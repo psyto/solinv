@@ -1,0 +1,53 @@
+[package]
+name = "escrow_fuzz"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+# Crucible — use git deps (match solinv workspace pin) so escrow_fuzz
+# and solinv-fuzz both resolve to the same crucible-fuzzer instance.
+crucible-fuzzer = { git = "https://github.com/asymmetric-research/crucible", tag = "v0.1.0" }
+crucible-test-context = { git = "https://github.com/asymmetric-research/crucible", tag = "v0.1.0" }
+
+# solinv path deps — wires this harness into solinv invariants.
+solinv-fuzz = { path = "../../../../crates/solinv-fuzz" }
+solinv-core = { path = "../../../../crates/solinv-core" }
+
+# Solana types — note: anchor-lang dep dropped Day 15. Harness uses
+# raw_call(Instruction) + manual sighash (sha2) instead of Anchor's
+# IDL-driven typed builders, so it is version-independent and ready
+# to target Anchor 0.x production protocols (klend 0.29, Raydium CLMM
+# 0.32) per docs/phase2-day14-anchor-version-mismatch.md.
+solana-account = "3"
+solana-keypair = "3"
+solana-pubkey = "3"
+solana-instruction = "3.1"
+solana-signer = "3"
+sha2 = "0.10"
+
+# Existing Crucible / LibAFL deps
+arbitrary = { version = "1", features = ["derive"] }
+ctrlc = "3.4"
+libafl = { version = "0.15.1", features = ["std", "cli", "prelude"] }
+libafl_bolts = { version = "0.15.1", features = ["std"] }
+escrow = { path = "../../programs/escrow", features = ["no-entrypoint"] }
+
+[[bin]]
+name = "invariant_test"
+path = "src/main.rs"
+
+[features]
+invariant_escrow = []
+invariant_solinv_acceptance = []
+invariant_signer_skip_only = []
+invariant_owner_skip_only = []
+invariant_discriminator_skip_only = []
+invariant_pda_forge_only = []
+invariant_account_swap_only = []
+invariant_unchecked_math_only = []
+invariant_cu_dos_only = []
+invariant_cpi_reentrancy_only = []
+invariant_realloc_race_only = []
+invariant_bump_seed_canonicalization_only = []

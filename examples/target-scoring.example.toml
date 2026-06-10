@@ -1,0 +1,44 @@
+[weights]
+tvl = 0.35
+change_velocity = 0.25
+permissionless_surface = 0.25
+complexity = 0.15
+audit_maturity = 0.30
+
+# Optional `status` field per target (defaults to "unverified" if omitted):
+#   "ready"      — toolchain-reachable, not yet tested at fuzz depth
+#   "exhausted"  — toolchain-reachable but tested clean already
+#   "gated"      — depth-gated by toolchain (e.g. Anchor 0.x ↔ LiteSVM ABI)
+#   "unverified" — reachability not yet confirmed
+# Optional `note` is a free-form one-liner explaining the status.
+# Filter with `solinv score --reachable-only` to show only status="ready".
+
+[[targets]]
+name = "Protocol-A"
+tvl = 0.70
+change_velocity = 0.80
+permissionless_surface = 0.90
+complexity = 0.75
+audit_maturity = 0.40
+status = "ready"
+note = "Native, fresh — primary candidate"
+
+[[targets]]
+name = "Protocol-B"
+tvl = 0.95
+change_velocity = 0.35
+permissionless_surface = 0.40
+complexity = 0.65
+audit_maturity = 0.85
+status = "exhausted"
+note = "tested clean, no marginal value from re-running"
+
+[[targets]]
+name = "Protocol-C"
+tvl = 0.45
+change_velocity = 0.90
+permissionless_surface = 0.85
+complexity = 0.80
+audit_maturity = 0.25
+status = "gated"
+note = "Anchor 0.x — needs toolchain fork first"

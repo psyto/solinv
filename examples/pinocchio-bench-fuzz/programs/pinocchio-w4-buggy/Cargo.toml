@@ -1,0 +1,14 @@
+[package]
+name = "pinocchio-w4-buggy"
+version = "0.1.0"
+edition = "2021"
+description = "PLANTED-BUG variant of pinocchio-w4-matching for solinv invariant acceptance"
+
+[workspace]
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "pinocchio_w4_buggy"
+
+[dependencies]
+pinocchio = "0.11.1"

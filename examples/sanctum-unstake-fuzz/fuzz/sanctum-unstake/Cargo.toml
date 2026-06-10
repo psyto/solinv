@@ -1,0 +1,49 @@
+[package]
+name = "sanctum_unstake_fuzz"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+# Day 55+ toolchain fork: route litesvm (transitive via crucible) to the
+# local fork so this Anchor 0.28 harness exercises the patched VM. This
+# is the H1 reproduction + fix-verification target. Vanilla baseline
+# still depth-gates (Day 46-47); patches to the fork are validated here.
+[dependencies]
+crucible-fuzzer = { git = "https://github.com/asymmetric-research/crucible", tag = "v0.1.0" }
+crucible-test-context = { git = "https://github.com/asymmetric-research/crucible", tag = "v0.1.0" }
+
+solinv-fuzz = { path = "../../../../crates/solinv-fuzz" }
+solinv-core = { path = "../../../../crates/solinv-core" }
+
+solana-account = "3"
+solana-keypair = "3"
+solana-pubkey = "3"
+solana-instruction = "3.1"
+solana-signer = "3"
+solana-rent = "3"
+# Anchor wire-format helpers (anchor_ix_sighash / anchor_account_disc)
+# now come from solinv_fuzz::bytepoke (Day 57). Local sha2 dep dropped.
+
+arbitrary = { version = "1", features = ["derive"] }
+ctrlc = "3.4"
+libafl = { version = "0.15.1", features = ["std", "cli", "prelude"] }
+libafl_bolts = { version = "0.15.1", features = ["std"] }
+
+[[bin]]
+name = "invariant_test"
+path = "src/main.rs"
+
+[features]
+# Phase 4 N=2 invariant variants (Anchor 0.28 target).
+# discriminator-skip applicable (Anchor 8-byte sighash); account-swap
+# may or may not have alternate-context surface depending on which ix
+# is wired in Day 46-47.
+invariant_sanctum_unstake_smoke = []
+invariant_signer_skip_only = []
+invariant_owner_skip_only = []
+invariant_discriminator_skip_only = []
+invariant_pda_forge_only = []
+invariant_account_swap_only = []
+invariant_unchecked_math_only = []
+invariant_cu_dos_only = []

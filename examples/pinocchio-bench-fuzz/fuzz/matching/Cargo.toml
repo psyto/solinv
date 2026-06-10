@@ -1,0 +1,52 @@
+[package]
+name = "matching_fuzz"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+# Crucible — git deps matching the solinv-fuzz pin so this harness and
+# solinv-fuzz both resolve to the same crucible-fuzzer instance.
+crucible-fuzzer = { git = "https://github.com/asymmetric-research/crucible", tag = "v0.1.0" }
+crucible-test-context = { git = "https://github.com/asymmetric-research/crucible", tag = "v0.1.0" }
+
+# solinv path deps — wires this harness into solinv invariants.
+solinv-fuzz = { path = "../../../../crates/solinv-fuzz" }
+solinv-core = { path = "../../../../crates/solinv-core" }
+
+# Solana types — pinned to the same workspace versions solinv uses.
+# Target program is Anchor 0.32 but Anchor instruction discriminator
+# (sha256("global:<name>")[..8]) and account discriminator
+# (sha256("account:<Type>")[..8]) layouts have been stable since 0.x,
+# so we compute them inline with sha2 and avoid the anchor-lang dep.
+solana-account = "3"
+solana-keypair = "3"
+solana-pubkey = "3"
+solana-instruction = "3.1"
+solana-signer = "3"
+sha2 = "0.10"
+
+# Crucible / LibAFL transitive deps
+arbitrary = { version = "1", features = ["derive"] }
+ctrlc = "3.4"
+libafl = { version = "0.15.1", features = ["std", "cli", "prelude"] }
+libafl_bolts = { version = "0.15.1", features = ["std"] }
+
+[[bin]]
+name = "invariant_test"
+path = "src/main.rs"
+
+[features]
+# One per #[invariant_test] in main.rs.
+invariant_matching_smoke = []
+invariant_signer_skip_only = []
+invariant_owner_skip_only = []
+invariant_discriminator_skip_only = []
+invariant_pda_forge_only = []
+invariant_unchecked_math_only = []
+invariant_cu_dos_only = []
+# W4/W5-specific structural checks (inline, not yet in solinv-core).
+invariant_tick_sort_only = []
+invariant_count_consistency_only = []
+invariant_owner_attribution_only = []

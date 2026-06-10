@@ -1,0 +1,14 @@
+[package]
+name = "pinocchio-w11-buggy"
+version = "0.1.0"
+edition = "2021"
+description = "PLANTED-BUG variant of pinocchio-w11-oracle for solinv invariant acceptance"
+
+[workspace]
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "pinocchio_w11_buggy"
+
+[dependencies]
+pinocchio = "0.11.1"

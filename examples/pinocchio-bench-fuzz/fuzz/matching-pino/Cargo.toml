@@ -1,0 +1,51 @@
+[package]
+name = "matching_pino_fuzz"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+# Crucible — same git pin as the Anchor twin so both binaries link
+# against one crucible-fuzzer instance.
+crucible-fuzzer = { git = "https://github.com/asymmetric-research/crucible", tag = "v0.1.0" }
+crucible-test-context = { git = "https://github.com/asymmetric-research/crucible", tag = "v0.1.0" }
+
+# solinv path deps.
+solinv-fuzz = { path = "../../../../crates/solinv-fuzz" }
+solinv-core = { path = "../../../../crates/solinv-core" }
+
+# Solana types — same workspace pins solinv uses. No anchor-lang dep:
+# the Pinocchio target has no Anchor sighash on instruction data and no
+# 8-byte account discriminator on its state accounts.
+solana-account = "3"
+solana-keypair = "3"
+solana-pubkey = "3"
+solana-instruction = "3.1"
+solana-signer = "3"
+
+# Crucible / LibAFL transitive deps
+arbitrary = { version = "1", features = ["derive"] }
+ctrlc = "3.4"
+libafl = { version = "0.15.1", features = ["std", "cli", "prelude"] }
+libafl_bolts = { version = "0.15.1", features = ["std"] }
+
+[[bin]]
+name = "invariant_test"
+path = "src/main.rs"
+
+[features]
+# Subset of the Anchor twin's variants. The Pinocchio target:
+#   - has no 8-byte instruction discriminator, so discriminator-skip is N/A
+#   - has no PDAs on either Market or Book, so pda-forge is N/A
+# Keeping the rest gives a like-for-like comparison on the invariants
+# that ARE meaningful for both frameworks.
+invariant_matching_smoke = []
+invariant_signer_skip_only = []
+invariant_owner_skip_only = []
+invariant_unchecked_math_only = []
+invariant_cu_dos_only = []
+# W4/W5-specific structural checks (inline).
+invariant_tick_sort_only = []
+invariant_count_consistency_only = []
+invariant_owner_attribution_only = []

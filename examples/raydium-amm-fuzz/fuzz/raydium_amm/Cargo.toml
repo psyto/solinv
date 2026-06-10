@@ -1,0 +1,52 @@
+[package]
+name = "raydium_amm_fuzz"
+version = "0.1.0"
+edition = "2021"
+
+# Opt out of solinv workspace (and any parent workspace) so this binary
+# is built with its own deps without polluting the solinv crates.
+[workspace]
+
+[dependencies]
+# Crucible — must match solinv workspace pin to share fuzzer infra
+crucible-fuzzer = { git = "https://github.com/asymmetric-research/crucible", tag = "v0.1.0" }
+crucible-test-context = { git = "https://github.com/asymmetric-research/crucible", tag = "v0.1.0" }
+
+# solinv path deps
+solinv-fuzz = { path = "../../../../crates/solinv-fuzz" }
+solinv-core = { path = "../../../../crates/solinv-core" }
+
+# Solana types (matching solinv workspace, Anchor-version-independent)
+solana-account = "3"
+solana-keypair = "3"
+solana-pubkey = "3"
+solana-instruction = "3.1"
+solana-signer = "3"
+
+# Harness helpers
+sha2 = "0.10"              # for ix_sighash if Anchor protocols added later
+bytemuck = { version = "1", features = ["derive"] }   # for AmmInfo Pod
+
+# Crucible / LibAFL transitive deps (mirroring escrow-demo)
+arbitrary = { version = "1", features = ["derive"] }
+ctrlc = "3.4"
+libafl = { version = "0.15.1", features = ["std", "cli", "prelude"] }
+libafl_bolts = { version = "0.15.1", features = ["std"] }
+
+[[bin]]
+name = "invariant_test"
+path = "src/main.rs"
+
+[features]
+# One per #[invariant_test] function in main.rs.
+# Combined variant + 4 isolated (Day 20, per Day 12 escrow-demo pattern).
+invariant_swap_base_in_v2_only = []
+invariant_signer_skip_only = []
+invariant_owner_skip_only = []
+invariant_pda_forge_only = []
+invariant_account_swap_only = []
+invariant_unchecked_math_only = []
+invariant_cu_dos_only = []
+invariant_cpi_reentrancy_only = []
+invariant_realloc_race_only = []
+invariant_bump_seed_canonicalization_only = []

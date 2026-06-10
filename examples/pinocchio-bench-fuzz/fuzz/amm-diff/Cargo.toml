@@ -1,0 +1,42 @@
+[package]
+name = "amm_diff_fuzz"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+# Crucible — git deps matching the solinv-fuzz pin.
+crucible-fuzzer = { git = "https://github.com/asymmetric-research/crucible", tag = "v0.1.0" }
+crucible-test-context = { git = "https://github.com/asymmetric-research/crucible", tag = "v0.1.0" }
+
+# solinv path deps — only HasContext glue is used; equivalence assertions
+# are inline because the SPL Token account body layout differs from the
+# Anchor zero-copy struct W4 harness pattern targeted.
+solinv-fuzz = { path = "../../../../crates/solinv-fuzz" }
+
+# Solana types — pinned to the same workspace versions solinv uses.
+solana-account = "3"
+solana-keypair = "3"
+solana-pubkey = "3"
+solana-instruction = "3.1"
+solana-signer = "3"
+sha2 = "0.10"
+
+# Crucible / LibAFL transitive deps
+arbitrary = { version = "1", features = ["derive"] }
+ctrlc = "3.4"
+libafl = { version = "0.15.1", features = ["std", "cli", "prelude"] }
+libafl_bolts = { version = "0.15.1", features = ["std"] }
+
+[[bin]]
+name = "invariant_test"
+path = "src/main.rs"
+
+[features]
+# Differential mode invariants for W8 AMM constant-product swap.
+invariant_amm_diff_smoke = []
+invariant_amm_diff_execution_parity_only = []
+invariant_amm_diff_pool_equivalent_only = []
+invariant_amm_diff_token_accounts_equivalent_only = []
+invariant_amm_diff_constant_product_only = []

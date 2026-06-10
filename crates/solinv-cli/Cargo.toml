@@ -1,0 +1,23 @@
+[package]
+name = "solinv-cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "solinv"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+solinv-core = { path = "../solinv-core" }
+solinv-fuzz = { path = "../solinv-fuzz" }
+solinv-cheat = { path = "../solinv-cheat" }
+solinv-corpus = { path = "../solinv-corpus" }
+solinv-disclose = { path = "../solinv-disclose" }

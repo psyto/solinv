@@ -1,0 +1,116 @@
+[weights]
+tvl = 0.35
+change_velocity = 0.25
+permissionless_surface = 0.25
+complexity = 0.15
+audit_maturity = 0.30
+
+# `status` field semantics (Day 49 addition):
+#   "ready"      — toolchain-reachable + not yet tested at fuzz depth
+#   "exhausted"  — toolchain-reachable but already tested clean (no marginal yield)
+#   "gated"      — depth-gated by toolchain (Day 47 H1: Anchor 0.x ↔ LiteSVM 0.9.1)
+#   "unverified" — Anchor version / build chain not yet confirmed (default)
+#
+# Verified by direct evidence in this repo. Unverified entries should
+# be promoted to ready/gated only after either a build smoke or a source
+# inspection.
+
+[[targets]]
+name = "Kamino"
+tvl = 1.00
+change_velocity = 0.80
+permissionless_surface = 0.85
+complexity = 0.85
+audit_maturity = 0.75
+status = "gated"
+note = "Anchor 0.29 — Phase 4 Day 22-27 klend depth gate; Day 47 H1 dig confirmed ABI mismatch"
+
+[[targets]]
+name = "Raydium"
+tvl = 0.85
+change_velocity = 0.90
+permissionless_surface = 0.90
+complexity = 0.90
+audit_maturity = 0.70
+status = "exhausted"
+note = "Native — 5 invariants × ~85K exec × 0 detections across Days 20/34/38"
+
+[[targets]]
+name = "Save"
+tvl = 0.65
+change_velocity = 0.70
+permissionless_surface = 0.75
+complexity = 0.85
+audit_maturity = 0.80
+status = "ready"
+note = "Native (solendprotocol/solana-program-library@mainnet). solana-program=1.16.20, spl-token=3.3.0; anchor-lang appears in dev-deps only. Buildable family like Slumlord; verified Day 50 via source-only inspection (no build smoke yet)."
+
+[[targets]]
+name = "Wormhole"
+tvl = 0.75
+change_velocity = 0.65
+permissionless_surface = 0.70
+complexity = 0.80
+audit_maturity = 0.90
+status = "gated"
+note = "Build-gated (Day 51 verification): solana-program=1.10.31 + solitaire framework. Fails with stdsimd error on default cargo-build-sbf; fails with rayon-core/Stderr::lock API mismatch even on v1.39 platform-tools workaround. Would need even older toolchain. Plus phase2-target-ranking notes narrow solinv-fit (signature/consensus surface)."
+
+[[targets]]
+name = "Meteora"
+tvl = 0.70
+change_velocity = 0.80
+permissionless_surface = 0.85
+complexity = 0.90
+audit_maturity = 0.65
+status = "unverified"
+note = "DAMM v2 (MeteoraAg/damm-v2) is Anchor 0.31 + Pinocchio (token ops) on Solana 2.3.13. Day 51 build smoke: BUILDS CLEAN with default cargo-build-sbf (no v1.39 workaround needed, unlike klend/Sanctum/Marinade in 0.27-0.29). Runtime H1 status still requires in-harness smoke (~1-2 days harness work) to fully resolve — could promote to ready or to gated."
+
+[[targets]]
+name = "Jito"
+tvl = 0.60
+change_velocity = 0.70
+permissionless_surface = 0.75
+complexity = 0.80
+audit_maturity = 0.75
+status = "ready"
+note = "Day 51 verification: jito-foundation/restaking workspace pins anchor-lang=0.31 but the actual restaking_program/Cargo.toml only depends on solana-program — it's NATIVE (Anchor used for IDL/SDK only). Builds clean with default cargo-build-sbf. Same buildable family as Slumlord. Tip-router / Stakenet / vault_program may differ — verify each separately if pursuing wider coverage."
+
+[[targets]]
+name = "Marinade"
+tvl = 0.55
+change_velocity = 0.50
+permissionless_surface = 0.60
+complexity = 0.65
+audit_maturity = 0.85
+status = "gated"
+note = "marinade-finance/liquid-staking-program uses Anchor 0.27 — older than confirmed-gated klend (0.29) and Sanctum (0.28). H1 family confirmed by extrapolation; no build smoke needed."
+
+[[targets]]
+name = "Project0-Marginfi"
+tvl = 0.65
+change_velocity = 0.60
+permissionless_surface = 0.65
+complexity = 0.80
+audit_maturity = 0.85
+status = "unverified"
+note = "Post-Drift rebrand churn; Anchor 0.x originally, current version unknown"
+
+[[targets]]
+name = "Jupiter-Perps"
+tvl = 0.80
+change_velocity = 0.85
+permissionless_surface = 0.85
+complexity = 0.90
+audit_maturity = 0.60
+status = "gated"
+note = "No public Jupiter perps program in jup-ag GitHub org (only jupiter-amm-implementation router + SDKs). Program source likely closed-source like Lifinity; reverse-engineering required, out of normal Phase 4 scope. Bounty terms also unverified."
+
+[[targets]]
+name = "Reserve-Flipcash"
+tvl = 0.40
+change_velocity = 0.55
+permissionless_surface = 0.50
+complexity = 0.50
+audit_maturity = 0.70
+status = "unverified"
+note = "Single-contract narrow scope; stack unknown"

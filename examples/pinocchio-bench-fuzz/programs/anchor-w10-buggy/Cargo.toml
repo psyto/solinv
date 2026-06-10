@@ -1,0 +1,23 @@
+[package]
+name = "anchor-w10-buggy"
+version = "0.1.0"
+edition = "2021"
+description = "PLANTED-BUG variant of anchor-w10-vault for solinv invariant acceptance"
+
+[workspace]
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "anchor_w10_buggy"
+
+[features]
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+idl-build = ["anchor-lang/idl-build", "anchor-spl/idl-build"]
+default = []
+
+[dependencies]
+anchor-lang = "1.0.1"
+anchor-spl = { version = "1.0.1", features = ["token"] }
+bytemuck = { version = "1.17", features = ["derive", "min_const_generics"] }

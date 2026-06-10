@@ -1,0 +1,12 @@
+[package]
+name = "solinv-corpus"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+tokio.workspace = true
+serde.workspace = true

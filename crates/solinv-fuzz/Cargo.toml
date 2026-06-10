@@ -1,0 +1,24 @@
+[package]
+name = "solinv-fuzz"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+
+# Crucible — engine layer
+crucible-fuzzer.workspace = true
+crucible-test-context.workspace = true
+
+# Solana types used in capability trait + InstructionSpec
+anchor-lang.workspace = true
+solana-account.workspace = true
+solana-keypair.workspace = true
+solana-pubkey.workspace = true
+solana-instruction.workspace = true
+
+# bytepoke module: Anchor discriminator + ix sighash (sha256 of "account:Foo" / "global:bar")
+sha2 = "0.10"

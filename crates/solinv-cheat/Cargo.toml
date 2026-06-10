@@ -1,0 +1,10 @@
+[package]
+name = "solinv-cheat"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true

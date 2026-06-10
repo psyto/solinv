@@ -1,0 +1,28 @@
+[package]
+name = "solinv-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+
+# Invariant implementations need capability traits + Crucible types
+solinv-fuzz = { path = "../solinv-fuzz" }
+crucible-test-context.workspace = true
+
+# Solana types used in invariant detection patterns
+solana-account.workspace = true
+solana-keypair.workspace = true
+solana-pubkey.workspace = true
+solana-instruction.workspace = true
+solana-signer.workspace = true
+# realloc-race runtime-error path: match against InsufficientFundsForRent
+solana-transaction-error = "3"
+
+[dev-dependencies]
+solana-system-interface = "2"

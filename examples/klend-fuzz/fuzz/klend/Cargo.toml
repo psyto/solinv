@@ -1,0 +1,49 @@
+[package]
+name = "klend_fuzz"
+version = "0.1.0"
+edition = "2021"
+
+# Opt out of solinv workspace + any parent workspace so this binary
+# builds with its own deps.
+[workspace]
+
+[dependencies]
+# Crucible — must match solinv workspace pin to share fuzzer infra
+crucible-fuzzer = { git = "https://github.com/asymmetric-research/crucible", tag = "v0.1.0" }
+crucible-test-context = { git = "https://github.com/asymmetric-research/crucible", tag = "v0.1.0" }
+
+# solinv path deps
+solinv-fuzz = { path = "../../../../crates/solinv-fuzz" }
+solinv-core = { path = "../../../../crates/solinv-core" }
+
+# Solana types (Anchor-version-independent, raw_call pattern)
+solana-account = "3"
+solana-keypair = "3"
+solana-pubkey = "3"
+solana-instruction = "3.1"
+solana-signer = "3"
+
+# Anchor wire-format helpers now live in solinv_fuzz::bytepoke (Day 57).
+# `sha2 = "0.10"` was used for the local ix_sighash + account_disc fns;
+# those are dropped now that solinv_fuzz re-exports them.
+
+# Crucible / LibAFL transitive deps (mirroring escrow-demo + raydium-amm-fuzz)
+arbitrary = { version = "1", features = ["derive"] }
+ctrlc = "3.4"
+libafl = { version = "0.15.1", features = ["std", "cli", "prelude"] }
+libafl_bolts = { version = "0.15.1", features = ["std"] }
+
+[[bin]]
+name = "invariant_test"
+path = "src/main.rs"
+
+[features]
+# Combined + 4 isolated variants (Day 12 escrow-demo pattern).
+# Anchor protections make signer/owner/disc-skip LOW yield; account_swap
+# is HIGH per Day 17 hit-rate analysis.
+invariant_klend_combined_only = []
+invariant_signer_skip_only = []
+invariant_owner_skip_only = []
+invariant_discriminator_skip_only = []
+invariant_pda_forge_only = []
+invariant_account_swap_only = []

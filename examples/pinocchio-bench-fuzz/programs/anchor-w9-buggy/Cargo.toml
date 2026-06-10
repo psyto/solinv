@@ -1,0 +1,22 @@
+[package]
+name = "anchor-w9-buggy"
+version = "0.1.0"
+edition = "2021"
+description = "PLANTED-BUG variant of anchor-w9-refresh for solinv invariant acceptance"
+
+[workspace]
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "anchor_w9_buggy"
+
+[features]
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+idl-build = ["anchor-lang/idl-build"]
+default = []
+
+[dependencies]
+anchor-lang = "1.0.1"
+bytemuck = { version = "1.17", features = ["derive", "min_const_generics"] }

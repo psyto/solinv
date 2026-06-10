@@ -1,0 +1,26 @@
+[package]
+name = "anchor-w4-buggy"
+version = "0.1.0"
+edition = "2021"
+description = "PLANTED-BUG variant of anchor-w4-matching for solinv invariant acceptance"
+
+[workspace]
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "anchor_w4_buggy"
+
+[features]
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+idl-build = ["anchor-lang/idl-build"]
+default = []
+
+[dependencies]
+# Pinned to solinv's workspace anchor-lang. Source layout (`#[program]`,
+# `#[account(zero_copy)]`, `AccountLoader<'info, T>`) is unchanged from
+# pinocchio-bench's 0.32.1 — those macros are stable across the
+# 0.32 → 1.0 rename.
+anchor-lang = "1.0.1"
+bytemuck = { version = "1.17", features = ["derive", "min_const_generics"] }

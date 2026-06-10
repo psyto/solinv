@@ -1,0 +1,36 @@
+[package]
+name = "matching_buggy_fuzz"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+crucible-fuzzer = { git = "https://github.com/asymmetric-research/crucible", tag = "v0.1.0" }
+crucible-test-context = { git = "https://github.com/asymmetric-research/crucible", tag = "v0.1.0" }
+solinv-fuzz = { path = "../../../../crates/solinv-fuzz" }
+solinv-core = { path = "../../../../crates/solinv-core" }
+solana-account = "3"
+solana-keypair = "3"
+solana-pubkey = "3"
+solana-instruction = "3.1"
+solana-signer = "3"
+sha2 = "0.10"
+arbitrary = { version = "1", features = ["derive"] }
+ctrlc = "3.4"
+libafl = { version = "0.15.1", features = ["std", "cli", "prelude"] }
+libafl_bolts = { version = "0.15.1", features = ["std"] }
+
+[[bin]]
+name = "invariant_test"
+path = "src/main.rs"
+
+[features]
+# Acceptance variants. Each `_only` should report a violation within
+# a few seconds against anchor_w4_buggy.so — see README.md for the
+# bug ↔ invariant mapping.
+invariant_buggy_smoke = []
+invariant_tick_sort_only = []           # catches Bug A (count not bumped)
+invariant_count_consistency_only = []   # catches Bug B (n_orders = 5 on new tick)
+invariant_owner_attribution_only = []   # catches Bug D (owner_pk = zero)
+invariant_sequence_monotonic_only = []  # catches Bug C (sequence never bumped)

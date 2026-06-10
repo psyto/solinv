@@ -1,0 +1,23 @@
+[package]
+name = "anchor-w8-buggy"
+version = "0.1.0"
+edition = "2021"
+description = "PLANTED-BUG variant of anchor-w8-amm for solinv invariant acceptance"
+
+[workspace]
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "anchor_w8_buggy"
+
+[features]
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+idl-build = ["anchor-lang/idl-build", "anchor-spl/idl-build"]
+default = []
+
+[dependencies]
+anchor-lang = "1.0.1"
+anchor-spl = { version = "1.0.1", features = ["token"] }
+bytemuck = { version = "1.17", features = ["derive", "min_const_generics"] }

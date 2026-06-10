@@ -1,0 +1,49 @@
+[package]
+name = "slumlord_fuzz"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+# Crucible — git deps matching the solinv-fuzz pin so slumlord_fuzz
+# and solinv-fuzz both resolve to the same crucible-fuzzer instance.
+crucible-fuzzer = { git = "https://github.com/asymmetric-research/crucible", tag = "v0.1.0" }
+crucible-test-context = { git = "https://github.com/asymmetric-research/crucible", tag = "v0.1.0" }
+
+# solinv path deps — wires this harness into solinv invariants.
+solinv-fuzz = { path = "../../../../crates/solinv-fuzz" }
+solinv-core = { path = "../../../../crates/solinv-core" }
+
+# Solana types — pinned to the same workspace versions solinv uses
+# (3.x family). Harness uses raw_call(Instruction) per Day 15 refactor;
+# no anchor-lang dependency (Slumlord is Native, single-byte u8
+# discriminator at data[0], no Anchor sighash).
+solana-account = "3"
+solana-keypair = "3"
+solana-pubkey = "3"
+solana-instruction = "3.1"
+solana-signer = "3"
+
+# Crucible / LibAFL transitive deps
+arbitrary = { version = "1", features = ["derive"] }
+ctrlc = "3.4"
+libafl = { version = "0.15.1", features = ["std", "cli", "prelude"] }
+libafl_bolts = { version = "0.15.1", features = ["std"] }
+
+[[bin]]
+name = "invariant_test"
+path = "src/main.rs"
+
+[features]
+# One per #[invariant_test] function in main.rs.
+# Slumlord coverage (from docs/slumlord-ix-inventory.md):
+#  - discriminator-skip N/A (Native, 1-byte u8 disc not Anchor 8-byte)
+#  - account-swap N/A (single-PDA program, no alternate-context concept)
+# Critical 3 + High 2 applicable invariants:
+invariant_slumlord_smoke = []
+invariant_signer_skip_only = []
+invariant_owner_skip_only = []
+invariant_pda_forge_only = []
+invariant_unchecked_math_only = []
+invariant_cu_dos_only = []

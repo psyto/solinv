@@ -59,6 +59,38 @@ manually with `data.push(tag)` then concatenate LE primitives. The
 `raw_call` + AccountMeta flow is identical to the escrow-demo Day 15
 pattern.
 
+## Clone-and-mutate: real mainnet pool fixture
+
+By default the fixture hand-crafts a healthy `AmmInfo`. With the
+`mainnet_snapshot_fixture` feature, the economic parameters (fees, lot
+sizes, order/depth) instead come from a **real Raydium AMM v4 SOL-USDC
+pool** committed under `snapshots/accounts/`, so the fuzzer exercises the
+pool config real users trade against rather than hand-guessed values.
+
+The snapshot is produced once from mainnet and cached for offline,
+reproducible runs via [`solinv-corpus`](../../crates/solinv-corpus):
+
+```rust
+// fetch + cache a live pool as a committed fixture (network, one-time)
+let snap = solinv_corpus::account::clone_account(
+    solinv_corpus::account::MAINNET_BETA,
+    std::path::Path::new("snapshots"),
+    &pool_pubkey,
+)?;
+```
+
+`amm_info_baseline()` (feature-gated) casts the 752-byte snapshot to
+`AmmInfoMirror`; `setup()` then rewires the cross-reference fields
+(vaults / mints / decimals / nonce) to the local synthetic graph so the
+swap still executes — only the economic params come from production.
+
+To probe **adversarial edge states**, perturb the baseline before
+injection (`AccountSnapshot::data_mut()` + the byte writers in
+`solinv-fuzz::bytepoke`, e.g. drive a reserve or fee field to an
+extreme) — the states a healthy mainnet clone never reaches on its own.
+Refresh the committed snapshot by deleting
+`snapshots/accounts/<pool>.json` and re-running `clone_account`.
+
 ## Solinv-coverage notes
 
 | Invariant | Coverage point in Raydium |

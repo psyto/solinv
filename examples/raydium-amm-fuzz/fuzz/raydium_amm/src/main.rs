@@ -183,6 +183,65 @@ const _: () = {
 };
 
 // ============================================================================
+// AmmInfo economic baseline
+//
+// Two sources, selected at compile time. Either way `setup()` rewires the
+// cross-reference fields (vaults / mints / decimals / nonce) to the local
+// synthetic graph so the SwapBaseInV2 processor path validates — only the
+// economic parameters (fees, lot sizes, order/depth) differ by source.
+// ============================================================================
+
+// Default: hand-crafted healthy pool (the Day 19 values).
+#[cfg(not(feature = "mainnet_snapshot_fixture"))]
+fn amm_info_baseline() -> AmmInfoMirror {
+    let mut a = AmmInfoMirror::zeroed();
+    a.state = 1; // running
+    a.order_num = 7;
+    a.depth = 3;
+    a.min_size = 1;
+    a.vol_max_cut_ratio = 500;
+    a.amount_wave = 5_000_000;
+    a.coin_lot_size = 1;
+    a.pc_lot_size = 1;
+    a.min_price_multiplier = 1;
+    a.max_price_multiplier = 1_000_000;
+    // Fees::initialize defaults (state.rs:508-521)
+    a.fees.min_separate_numerator = 5;
+    a.fees.min_separate_denominator = 10_000;
+    a.fees.trade_fee_numerator = 25;
+    a.fees.trade_fee_denominator = 10_000;
+    a.fees.pnl_numerator = 12;
+    a.fees.pnl_denominator = 100;
+    a.fees.swap_fee_numerator = 25;
+    a.fees.swap_fee_denominator = 10_000;
+    a
+}
+
+// `mainnet_snapshot_fixture`: real Raydium AMM v4 SOL-USDC pool, fetched
+// from mainnet-beta and committed under `snapshots/`. Fees, lot sizes and
+// order params come from production state — so the fuzzer exercises the
+// pool config real users trade against, not hand-guessed values. Refresh
+// via `solinv_corpus::account::clone_account`.
+#[cfg(feature = "mainnet_snapshot_fixture")]
+fn amm_info_baseline() -> AmmInfoMirror {
+    const SNAP: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../snapshots/accounts/",
+        "58oQChx4yWmvKdwLLZzBi4ChoCc2fqCUWBkwMihLYQo2.json"
+    ));
+    let snap = solinv_corpus::account::AccountSnapshot::from_json(SNAP)
+        .expect("committed raydium pool snapshot parses");
+    assert_eq!(
+        snap.data.len(),
+        std::mem::size_of::<AmmInfoMirror>(),
+        "committed snapshot size != AmmInfoMirror — Raydium layout drift"
+    );
+    let mut a = bytemuck::pod_read_unaligned::<AmmInfoMirror>(&snap.data);
+    a.state = 1; // force running regardless of the pool's live status flag
+    a
+}
+
+// ============================================================================
 // raw_call ix constructors — Native byte packing per Day 16 inventory
 // (tag byte + LE primitives, NO sighash, NO Borsh)
 // ============================================================================
@@ -386,37 +445,19 @@ impl RaydiumAmmFixture {
             .create()
             .unwrap();
 
-        // ---------- Hand-crafted AmmInfo via write_account ----------
-        // Set the minimum fields that the SwapBaseInV2 processor path
-        // validates (per raydium-amm/program/src/processor.rs:3032-3145).
-        let mut amm_info = AmmInfoMirror::zeroed();
+        // ---------- AmmInfo via write_account ----------
+        // Economic params come from `amm_info_baseline()`: hand-crafted
+        // healthy defaults by default, or a real committed mainnet pool
+        // under the `mainnet_snapshot_fixture` feature. The cross-reference
+        // fields are then rewired to the local synthetic graph so the
+        // SwapBaseInV2 processor path validates (per
+        // raydium-amm/program/src/processor.rs:3032-3145).
+        let mut amm_info = amm_info_baseline();
         amm_info.status = AMM_STATUS_SWAP_ONLY;       // swap_permission=true, orderbook=false
         amm_info.nonce = amm_nonce as u64;
-        amm_info.order_num = 7;
-        amm_info.depth = 3;
-        amm_info.coin_decimals = 6;
+        amm_info.coin_decimals = 6;                   // match the synthetic 6-dec mints
         amm_info.pc_decimals = 6;
-        amm_info.state = 1;                            // running
-        amm_info.reset_flag = 0;
-        amm_info.min_size = 1;
-        amm_info.vol_max_cut_ratio = 500;
-        amm_info.amount_wave = 5_000_000;
-        amm_info.coin_lot_size = 1;
-        amm_info.pc_lot_size = 1;
-        amm_info.min_price_multiplier = 1;
-        amm_info.max_price_multiplier = 1_000_000;
         amm_info.sys_decimal_value = 1_000_000_000;   // 1e9 standard normalization
-
-        // Fees::initialize defaults (per state.rs:508-521)
-        amm_info.fees.min_separate_numerator = 5;
-        amm_info.fees.min_separate_denominator = 10_000;
-        amm_info.fees.trade_fee_numerator = 25;
-        amm_info.fees.trade_fee_denominator = 10_000;
-        amm_info.fees.pnl_numerator = 12;
-        amm_info.fees.pnl_denominator = 100;
-        amm_info.fees.swap_fee_numerator = 25;
-        amm_info.fees.swap_fee_denominator = 10_000;
-
         amm_info.coin_vault = coin_vault.to_bytes();
         amm_info.pc_vault = pc_vault.to_bytes();
         amm_info.coin_vault_mint = coin_mint.to_bytes();

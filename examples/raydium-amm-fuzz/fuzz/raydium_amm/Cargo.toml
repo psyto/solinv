@@ -15,6 +15,7 @@ crucible-test-context = { git = "https://github.com/asymmetric-research/crucible
 # solinv path deps
 solinv-fuzz = { path = "../../../../crates/solinv-fuzz" }
 solinv-core = { path = "../../../../crates/solinv-core" }
+solinv-corpus = { path = "../../../../crates/solinv-corpus" }
 
 # Solana types (matching solinv workspace, Anchor-version-independent)
 solana-account = "3"
@@ -38,6 +39,11 @@ name = "invariant_test"
 path = "src/main.rs"
 
 [features]
+# Source AmmInfo economic params from a committed real mainnet Raydium
+# AMM v4 pool snapshot (clone-and-mutate) instead of hand-crafted defaults.
+# Off by default so the baseline campaign is unchanged.
+mainnet_snapshot_fixture = []
+
 # One per #[invariant_test] function in main.rs.
 # Combined variant + 4 isolated (Day 20, per Day 12 escrow-demo pattern).
 invariant_swap_base_in_v2_only = []

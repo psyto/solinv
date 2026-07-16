@@ -128,6 +128,27 @@ impl AccountSnapshot {
             rent_epoch: self.rent_epoch,
         })
     }
+
+    /// Materialize an `Account` but force the owner to `owner` instead of
+    /// the on-chain program. This is the LiteSVM clone pattern: inject a
+    /// mainnet account's real bytes under a *locally deployed* program id
+    /// (same bytecode, different address) so a harness can execute against
+    /// production state without redeploying under the mainnet address.
+    pub fn into_account_owned_by(&self, owner: Pubkey) -> Account {
+        Account {
+            lamports: self.lamports,
+            data: self.data.clone(),
+            owner,
+            executable: self.executable,
+            rent_epoch: self.rent_epoch,
+        }
+    }
+
+    /// Deserialize a snapshot from its on-disk JSON form. Handy for
+    /// `include_str!`-embedded committed fixtures (offline, no I/O).
+    pub fn from_json(s: &str) -> Result<Self> {
+        serde_json::from_str(s).context("parsing AccountSnapshot JSON")
+    }
 }
 
 /// Parse a `getAccountInfo` (encoding=base64) JSON-RPC response into a
@@ -304,6 +325,53 @@ mod tests {
         assert_eq!(acct.owner, Pubkey::from_str(SYSTEM_PROGRAM).unwrap());
         assert!(!acct.executable);
         assert_eq!(acct.rent_epoch, u64::MAX);
+    }
+
+    #[test]
+    fn into_account_owned_by_overrides_owner() {
+        let snap = sample_snapshot(vec![1, 2, 3]);
+        let local = Pubkey::from_str(TOKEN_PROGRAM).unwrap();
+        let acct = snap.into_account_owned_by(local);
+        assert_eq!(acct.owner, local); // NOT the snapshot's SYSTEM_PROGRAM owner
+        assert_eq!(acct.data, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn from_json_roundtrips() {
+        let snap = sample_snapshot(vec![0xca, 0xfe]);
+        let json = serde_json::to_string(&snap).unwrap();
+        assert_eq!(AccountSnapshot::from_json(&json).unwrap(), snap);
+    }
+
+    // Real Raydium AMM v4 SOL-USDC pool, fetched from mainnet-beta and
+    // committed under the raydium harness. Proves the clone-and-mutate
+    // data path on *production* state rather than a hand-built fixture.
+    #[test]
+    fn clone_and_mutate_on_real_raydium_pool() {
+        const RAY: &str = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../examples/raydium-amm-fuzz/snapshots/accounts/",
+            "58oQChx4yWmvKdwLLZzBi4ChoCc2fqCUWBkwMihLYQo2.json"
+        ));
+        let snap = AccountSnapshot::from_json(RAY).unwrap();
+
+        // AmmInfo is a 752-byte account owned by the Raydium AMM v4 program.
+        assert_eq!(snap.data.len(), 752, "AmmInfo layout is 752 bytes");
+        assert_eq!(snap.owner, "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8");
+        assert_ne!(snap.data, vec![0u8; 752], "baseline carries real state, not zeros");
+
+        // Inject under a locally-deployed program id (LiteSVM clone pattern).
+        let local_program = Pubkey::from_str(TOKEN_PROGRAM).unwrap();
+        let acct = snap.into_account_owned_by(local_program);
+        assert_eq!(acct.owner, local_program);
+        assert_eq!(acct.data.len(), 752);
+
+        // Perturb the real baseline to an adversarial value before injection —
+        // the edge a healthy mainnet clone never reaches on its own.
+        let mut mutated = snap.clone();
+        let before = mutated.data[128];
+        mutated.data_mut()[128] ^= 0xFF;
+        assert_ne!(mutated.data[128], before, "perturbation reaches the cloned bytes");
     }
 
     #[test]

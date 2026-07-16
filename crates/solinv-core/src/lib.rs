@@ -22,6 +22,7 @@
 //! `#[invariant_test]` body alongside Crucible's macros.
 
 pub mod invariants;
+pub mod trace;
 
 #[cfg(test)]
 mod tests {

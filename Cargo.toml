@@ -26,6 +26,12 @@ clap = { version = "4", features = ["derive"] }
 toml = "0.8"
 tokio = { version = "1", features = ["full"] }
 
+# Host-side mainnet fetch (solinv-corpus account clone-and-mutate).
+# Sync HTTP + base64 — host tooling only, does NOT touch the SBF build
+# graph so it is independent of the Solana toolchain pins below.
+ureq = { version = "2", features = ["json"] }
+base64 = "0.22"
+
 # Solana ecosystem — pinned to match Crucible v0.1.0 workspace
 # Per docs/implementation-day3-crucible-internals.md Risk #7
 anchor-lang = "1.0.1"

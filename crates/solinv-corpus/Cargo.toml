@@ -8,5 +8,14 @@ publish = false
 
 [dependencies]
 anyhow.workspace = true
-tokio.workspace = true
 serde.workspace = true
+serde_json.workspace = true
+solana-account.workspace = true
+solana-pubkey.workspace = true
+
+# account clone-and-mutate: mainnet getAccountInfo over sync JSON-RPC
+ureq.workspace = true
+base64.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

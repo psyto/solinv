@@ -91,6 +91,21 @@ extreme) — the states a healthy mainnet clone never reaches on its own.
 Refresh the committed snapshot by deleting
 `snapshots/accounts/<pool>.json` and re-running `clone_account`.
 
+**Result** (`unchecked-math`, real SOL-USDC pool fixture, 60s × 2
+workers): **~8,580 executions / ~237,000 actions → 0 violations.** The
+invariant holds on real production pool config, not just the synthetic
+baseline — the "tested and found nothing on hardened production" result
+extended to live mainnet state. Reproduce:
+
+```bash
+RAYDIUM_AMM_SO=/path/to/raydium_amm.so \
+  cargo build --release \
+  --features mainnet_snapshot_fixture,invariant_unchecked_math_only
+crucible run raydium_amm invariant_unchecked_math_only \
+  --binary-in target/release/invariant_test \
+  --program-so /path/to/raydium_amm.so --timeout 60 -j 2
+```
+
 ## Solinv-coverage notes
 
 | Invariant | Coverage point in Raydium |

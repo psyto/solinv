@@ -416,6 +416,41 @@ The Pinocchio side is cheaper on every probe of every workload, which
 is the expected direction — a null result, recorded the same way the
 other calibration nulls are.
 
+## Emitting a finding as evidence (`amm-diff`)
+
+A `fuzz_assert!` message dies with the worker. `amm-diff` can instead
+write the finding as a `solinv_disclose::DivergenceReport` — the
+canonical JSON a reader verifies, plus a Markdown view.
+
+```bash
+# names its inputs by digest (grades IdentifiedOnly)
+SOLINV_REPORT=/tmp/w8 crucible run amm_diff \
+    invariant_amm_diff_execution_parity_only --release --timeout 20
+
+# carries program bytes + account pre-state (grades InputsCarried, ~300 KB)
+SOLINV_REPORT=/tmp/w8 SOLINV_REPORT_INLINE=1 crucible run amm_diff \
+    invariant_amm_diff_execution_parity_only --release --timeout 20
+```
+
+**Written at most once per process, and off by default.** The W8 pair
+diverges on nearly every probe, so a report per violation would emit
+thousands of near-identical files and dominate the run. The campaign
+counters remain the measure of *how often*; a report answers *what*, and
+*can you check it yourself*.
+
+What it carries: both `.so` files by SHA-256 (program IDs are
+upgradeable, so an ID names an address rather than a binary), every
+declared account's pre-state and metadata snapshotted **before the
+first probe**, the real instruction encodings both sides were driven
+with, and the execution context — LiteSVM build, clock, and the fact
+that Crucible runs with sigverify off, so a reader reproduces without
+needing keys.
+
+The feature set is the one field that is a statement rather than a
+measurement: LiteSVM exposes no enumerated activated-feature list, so
+the report says which runtime it was instead of naming a cluster
+feature set it cannot know.
+
 ## Error-code divergence across the bench rewrites (2026-08-05)
 
 Adding the rejection *reason* to execution parity surfaced a real

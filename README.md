@@ -234,9 +234,11 @@ performance finding is never reported as a behavioural one. Each
 invariant runs its probes once and hands the result to the evaluators,
 since the probes mutate fixture state.
 
-**Emitting reports is still pending** — a finding leaves the fuzz
-worker as a log line, and nothing yet populates a bundle that carries
-its inputs.
+`amm-diff` emits its findings as reports: `SOLINV_REPORT=<prefix>`
+writes the canonical JSON and the Markdown view on the first
+divergence, and `SOLINV_REPORT_INLINE=1` carries the program bytes and
+account pre-state rather than only naming them. The other five
+harnesses still leave a finding as a log line.
 
 ## Quickstart — escrow-demo (catalog 10/10)
 

@@ -28,6 +28,8 @@
 //!   accounts hold 1_000_000 of mint_a. Both pool_vault_out accounts hold
 //!   10_000_000 of mint_b. Headroom for ~10⁴ swaps before user balance exhaustion.
 
+mod evidence;
+
 use crucible_fuzzer::*;
 use sha2::{Digest, Sha256};
 use solana_account::Account;
@@ -38,6 +40,11 @@ use solana_signer::Signer;
 use std::str::FromStr;
 use std::sync::Arc;
 
+use solana_clock::Clock;
+use solinv_disclose::{
+    AccountRef, ActionRef, DivergenceReport, ExecutionContext, ProgramRef, ReproBundle, Sides,
+    SignerPolicy,
+};
 use solinv_fuzz::{
     check_all_pairs, check_pair_equivalent, CuComparison, DiffAccountPair, DifferentialFixture,
     HasContext, ParityDivergence, SendFailure, TxOutcome,
@@ -464,11 +471,37 @@ impl DifferentialFixture for AmmDiffFixture {
 // Differential checks
 // ---------------------------------------------------------------------
 
-/// One executed probe: the action label, and each side's result.
+/// One executed probe: what was driven through both sides, and what
+/// each side did with it.
 ///
 /// `Err` carries the `send()` failure text — kept rather than collapsed
-/// so a probe that produced no evidence can be reported as such.
-type Probe = (String, Result<TxOutcome, String>, Result<TxOutcome, String>);
+/// so a probe that produced no evidence can be reported as such. The
+/// two instructions are kept because a report has to carry the action
+/// in a form someone can replay, not just a label describing it.
+/// One run of the probe set: the state it started from, and what each
+/// probe did.
+///
+/// The pre-state is captured before the first send, because that is the
+/// only moment it exists — the probes mutate as they go. Bundling it
+/// with the probes is what lets the parity and CU evaluators stay pure
+/// functions over an already-executed run while still being able to
+/// produce a report.
+struct ProbeRun {
+    /// `(label, pubkey, account)` for both sides of every declared pair.
+    pre_state: Vec<(String, Pubkey, Account)>,
+    /// Clock the run executed under, read before the first probe.
+    clock_slot: u64,
+    clock_unix_timestamp: i64,
+    probes: Vec<Probe>,
+}
+
+struct Probe {
+    label: String,
+    anchor_ix: Instruction,
+    pino_ix: Instruction,
+    anchor: Result<TxOutcome, String>,
+    pino: Result<TxOutcome, String>,
+}
 
 /// Drive the probe swaps through both sides and hand back the raw
 /// outcomes, labelled by the action that produced them.
@@ -484,7 +517,9 @@ type Probe = (String, Result<TxOutcome, String>, Result<TxOutcome, String>);
 /// CU skip it, and `check_probe_evidence` reports it. Skipping without
 /// reporting is what would let a harness whose sends are all failing
 /// run to completion and call itself clean.
-fn probe_actions(fixture: &mut AmmDiffFixture) -> Vec<Probe> {
+fn probe_actions(fixture: &mut AmmDiffFixture) -> ProbeRun {
+    let pre_state = snapshot_pre_state(fixture);
+    let clock: Clock = fixture.ctx.svm.get_sysvar();
     let probes: &[(u64, u64)] = &[
         (1, 0),
         (100, 0),
@@ -524,7 +559,7 @@ fn probe_actions(fixture: &mut AmmDiffFixture) -> Vec<Probe> {
 
         let anchor = fixture
             .ctx
-            .raw_call(anchor_ix)
+            .raw_call(anchor_ix.clone())
             .fee_payer(&*fixture.fee_payer)
             .signers(&[&*fixture.fee_payer, &*fixture.user])
             .send()
@@ -532,19 +567,44 @@ fn probe_actions(fixture: &mut AmmDiffFixture) -> Vec<Probe> {
 
         let pino = fixture
             .ctx
-            .raw_call(pino_ix)
+            .raw_call(pino_ix.clone())
             .fee_payer(&*fixture.fee_payer)
             .signers(&[&*fixture.fee_payer, &*fixture.user])
             .send()
             .map_err(|e| e.to_string());
 
-        out.push((
-            format!("swap(amount_in={}, min_out={})", amount_in, min_out),
+        out.push(Probe {
+            label: format!("swap(amount_in={}, min_out={})", amount_in, min_out),
+            anchor_ix,
+            pino_ix,
             anchor,
             pino,
-        ));
+        });
     }
 
+    ProbeRun {
+        pre_state,
+        clock_slot: clock.slot,
+        clock_unix_timestamp: clock.unix_timestamp,
+        probes: out,
+    }
+}
+
+/// Read every declared pair's accounts as they stand right now.
+///
+/// Called once, before the probes run. Accounts that are not present
+/// are skipped rather than faked — an absent account is a fact about
+/// the fixture, and inventing an empty one would put a claim in the
+/// report that no reader could reproduce.
+fn snapshot_pre_state(fixture: &AmmDiffFixture) -> Vec<(String, Pubkey, Account)> {
+    let mut out = Vec::new();
+    for pair in fixture.diff_pairs() {
+        for (side, pubkey) in [("anchor", pair.anchor), ("pinocchio", pair.pino)] {
+            if let Ok(account) = fixture.ctx().get_account(&pubkey) {
+                out.push((format!("{side}/{}", pair.label), pubkey, account));
+            }
+        }
+    }
     out
 }
 
@@ -561,8 +621,9 @@ fn probe_actions(fixture: &mut AmmDiffFixture) -> Vec<Probe> {
 ///
 /// Takes an already-executed probe set so parity and CU can be
 /// evaluated from one run of the actions rather than re-sending them.
-fn check_execution_parity(probes: &[Probe]) {
-    for (label, anchor, pino) in probes {
+fn check_execution_parity(run: &ProbeRun) {
+    for probe in &run.probes {
+        let (label, anchor, pino) = (&probe.label, &probe.anchor, &probe.pino);
         // A probe that never reached the program produces no evidence.
         // It is reported by `check_probe_evidence`, not silently reread
         // as agreement here.
@@ -571,6 +632,10 @@ fn check_execution_parity(probes: &[Probe]) {
         };
 
         if let Some(div) = ParityDivergence::check_outcomes(label, anchor, pino) {
+            // Emitted before the assert, because fuzz_assert! ends the
+            // iteration — the report has to be built while the run that
+            // produced it is still in hand.
+            evidence::emit(|| build_report(run, solinv_disclose::Divergence::from(&div)));
             fuzz_assert!(false, "{}", div);
         }
     }
@@ -589,13 +654,15 @@ fn check_execution_parity(probes: &[Probe]) {
 /// pinocchio-bench leaderboard: CU is consensus-relevant, so a slower
 /// rewrite writing byte-identical state is not equivalent — it can
 /// exceed the transaction limit and fail where the original succeeded.
-fn check_cu_no_regression(probes: &[Probe]) {
-    for (label, anchor, pino) in probes {
+fn check_cu_no_regression(run: &ProbeRun) {
+    for probe in &run.probes {
+        let (label, anchor, pino) = (&probe.label, &probe.anchor, &probe.pino);
         let (Ok(anchor), Ok(pino)) = (anchor, pino) else {
             continue;
         };
 
         if let Some(cmp) = CuComparison::regression(label, anchor, pino) {
+            evidence::emit(|| build_report(run, solinv_disclose::Divergence::from(&cmp)));
             fuzz_assert!(false, "{}", cmp);
         }
     }
@@ -608,9 +675,9 @@ fn check_cu_no_regression(probes: &[Probe]) {
 /// skipped. A harness whose sends are all failing would otherwise run
 /// to completion and declare itself clean: nothing diverges when
 /// nothing executes.
-fn check_probe_evidence(probes: &[Probe]) {
-    for (label, anchor, pino) in probes {
-        if let Some(f) = SendFailure::check(label, anchor, pino) {
+fn check_probe_evidence(run: &ProbeRun) {
+    for probe in &run.probes {
+        if let Some(f) = SendFailure::check(&probe.label, &probe.anchor, &probe.pino) {
             fuzz_assert!(false, "{}", f);
         }
     }
@@ -693,16 +760,16 @@ fn invariant_amm_diff_smoke(fixture: &mut AmmDiffFixture) {
         fuzz_assert!(false, "{}", div);
     }
     check_constant_product(fixture);
-    let probes = probe_actions(fixture);
-    check_probe_evidence(&probes);
-    check_execution_parity(&probes);
+    let run = probe_actions(fixture);
+    check_probe_evidence(&run);
+    check_execution_parity(&run);
 }
 
 #[invariant_test]
 fn invariant_amm_diff_execution_parity_only(fixture: &mut AmmDiffFixture) {
-    let probes = probe_actions(fixture);
-    check_probe_evidence(&probes);
-    check_execution_parity(&probes);
+    let run = probe_actions(fixture);
+    check_probe_evidence(&run);
+    check_execution_parity(&run);
 }
 
 #[invariant_test]
@@ -722,7 +789,92 @@ fn invariant_amm_diff_constant_product_only(fixture: &mut AmmDiffFixture) {
 
 #[invariant_test]
 fn invariant_amm_diff_cu_no_regression_only(fixture: &mut AmmDiffFixture) {
-    let probes = probe_actions(fixture);
-    check_probe_evidence(&probes);
-    check_cu_no_regression(&probes);
+    let run = probe_actions(fixture);
+    check_probe_evidence(&run);
+    check_cu_no_regression(&run);
+}
+
+// ---------------------------------------------------------------------
+// Report assembly
+// ---------------------------------------------------------------------
+
+/// Build the finding as a report a third party can check.
+///
+/// Everything here is drawn from the run itself rather than restated:
+/// the `.so` bytes are hashed off disk, the account pre-state is the
+/// snapshot taken before the first probe, and the actions carry the
+/// real instruction encodings both sides were driven with.
+///
+/// The one field that is a *statement* rather than a measurement is the
+/// feature set. LiteSVM does not expose an enumerated activated-feature
+/// list, so the string says which runtime it was rather than pretending
+/// to a cluster feature set it cannot name.
+fn build_report(run: &ProbeRun, finding: solinv_disclose::Divergence) -> DivergenceReport {
+    let inline = evidence::inline_artifacts();
+
+    let program = |side: &str, id: &str, path: &str| {
+        let bytes = std::fs::read(path).unwrap_or_default();
+        if inline {
+            ProgramRef::with_code_inline(side, id, &bytes)
+        } else {
+            ProgramRef::from_code(side, id, &bytes)
+        }
+    };
+
+    let mut bundle = ReproBundle::new()
+        .with_program(program(
+            "anchor",
+            ANCHOR_W8_PROGRAM_ID_STR,
+            ANCHOR_W8_SO_PATH,
+        ))
+        .with_program(program(
+            "pinocchio",
+            PINO_W8_PROGRAM_ID_STR,
+            PINO_W8_SO_PATH,
+        ))
+        .with_feature_set(
+            "litesvm default via crucible v0.1.0 (not an enumerated Solana feature set)",
+        );
+
+    for (label, pubkey, account) in &run.pre_state {
+        let acct = if inline {
+            AccountRef::with_data_inline(label.clone(), pubkey.to_string(), &account.data)
+        } else {
+            AccountRef::from_data(label.clone(), pubkey.to_string(), &account.data)
+        };
+        bundle = bundle.with_account(acct.with_metadata(
+            account.owner.to_string(),
+            account.lamports,
+            account.executable,
+            account.rent_epoch,
+        ));
+    }
+
+    for probe in &run.probes {
+        for (side, ix) in [("anchor", &probe.anchor_ix), ("pinocchio", &probe.pino_ix)] {
+            bundle = bundle.with_action(ActionRef::encoded(
+                format!("{} [{}]", probe.label, side),
+                ix.program_id.to_string(),
+                &ix.data,
+                ix.accounts
+                    .iter()
+                    .map(|m| (m.pubkey.to_string(), m.is_signer, m.is_writable))
+                    .collect(),
+            ));
+        }
+    }
+
+    // LiteSVM is constructed `with_sigverify(false)` by Crucible, so a
+    // reader reproduces by also disabling it and needs no keys. Stating
+    // the policy is what makes that reproducible rather than folklore.
+    bundle = bundle.with_context(
+        ExecutionContext::new(
+            "litesvm 0.9.1 via crucible v0.1.0 (sigverify off, blockhash check off)",
+            SignerPolicy::SigverifyDisabled,
+        )
+        .with_clock(run.clock_slot, run.clock_unix_timestamp),
+    );
+
+    DivergenceReport::new("amm-diff (W8 AMM swap)", Sides::anchor_pinocchio(), bundle)
+        .with_divergence(finding)
 }

@@ -331,19 +331,27 @@ into the platform-specific templates is not done yet — see Status.
 - `Divergence` / `ReproBundle` / `DivergenceReport`, canonical
   encoding, digest, Markdown rendering (`solinv-disclose`,
   55 tests + 6 doctests).
+- **`amm-diff` emits reports end to end.** `SOLINV_REPORT=<prefix>`
+  writes `<prefix>.json` (canonical) and `<prefix>.md` (human view) on
+  the first divergence, at most once per process — the W8 pair diverges
+  on nearly every probe, so a report per violation would produce
+  thousands of near-identical files and dominate the run.
+  `SOLINV_REPORT_INLINE=1` carries the program bytes and account
+  pre-state rather than only naming them, which is what reaches
+  `InputsCarried`; the resulting document is ~300 KB, so it is a
+  deliberate choice rather than the default. Measured on the W8 pair:
+  default run grades `IdentifiedOnly`, inline run grades
+  `InputsCarried`, and its carried payloads re-hash correctly when
+  checked by a reader outside this repository.
 
 **Not implemented**
 
-- **No harness emits a report yet.** All six differential harnesses
-  under `examples/pinocchio-bench-fuzz/fuzz/` check all three surfaces
-  and report probes that produced no evidence, but the
-  `DivergenceReport` conversions are not wired into any of them — a
-  finding still leaves the fuzz worker as a `fuzz_assert!` log line,
-  not as a bundle.
-- **Nothing populates a fully carried bundle.** Every report this
-  repository can currently produce is `IdentifiedOnly`. The inline
-  carrier, account metadata, instruction encoding, execution context and
-  signer policy all exist and are tested; no producer fills them in.
+- **Five of the six harnesses do not emit reports.** `amm-diff` does
+  (see Implemented, above); `matching-diff`, `oracle-diff`, `perp-diff`,
+  `refresh-diff` and `vault-diff` still leave a finding as a
+  `fuzz_assert!` log line. Wiring them is the same shape as `amm-diff`:
+  capture the pre-state and clock before the first probe, keep the
+  instructions on the probe, assemble in `build_report`.
 - The `TxOutcome` adapters (`check_outcomes`, `from_outcomes`,
   `regression`) are thin forwarding over tested decision logic and are
   not themselves covered — constructing a `TxOutcome` needs

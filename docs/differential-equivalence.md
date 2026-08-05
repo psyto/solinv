@@ -288,12 +288,22 @@ true or false.
   right rejected (builtin:InvalidArgument)
 ```
 
-…followed by the program and account tables (each row stating whether
-its bytes are carried, and flagging `**CORRUPT**` if a carried payload
-fails its own digest) and the action sequence.
+…followed by the program table and the account table — each row stating
+whether its bytes are carried, and flagging `**CORRUPT**` if a carried
+payload fails its own digest — then the execution context (runtime,
+clock, and how signatures are to be satisfied; here, *not stated*), then
+the action sequence with each action's account metas. Instruction data
+past 44 base64 characters is elided toward the serialized JSON, which is
+what a reader replays from.
 
 Note the two prefixes: the CU saving is `[recorded]` because it is the
-goal, and only the reason divergence is a `[fault]`.
+goal, and only the reason divergence is a `[fault]`. And note that the
+digest is labelled build-scoped: the finding names a builtin
+`ProgramError`, whose text comes from the toolchain rather than from the
+finding.
+
+The sample above is real output, regenerated against the current
+renderer rather than transcribed by hand.
 
 ## Relationship to the disclosure templates
 
@@ -320,7 +330,7 @@ into the platform-specific templates is not done yet — see Status.
   its own `*_cu_no_regression_only` invariant variant.
 - `Divergence` / `ReproBundle` / `DivergenceReport`, canonical
   encoding, digest, Markdown rendering (`solinv-disclose`,
-  54 tests + 6 doctests).
+  55 tests + 6 doctests).
 
 **Not implemented**
 

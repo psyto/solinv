@@ -152,7 +152,7 @@ gets along with the CU savings.
 > **Scope of this 2026-06-07 result.** "No execution-parity violation"
 > here means under the boolean accept/reject check that was in place at
 > the time. The rejection *reason* was not compared. Re-running the same
-> harness after the 2026-08-05 error-code upgrade does report a
+> harness after the 2026-08-05 rejection-reason upgrade does report a
 > divergence — see
 > [error-code divergence](#error-code-divergence-across-the-bench-rewrites-2026-08-05).
 > The byte-identical-state claim above is unaffected; it is a different

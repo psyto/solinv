@@ -150,14 +150,17 @@ all three narrows where a divergence can hide; it does not prove
 equivalence.
 
 A fourth condition is a precondition rather than a surface: a probe
-whose `send()` failed never reached the program, and is reported as
-such. Nothing diverges when nothing executes, so a silently skipped
-send failure turns a broken harness into a clean run.
+whose `send()` failed never reached the program. `SendFailure` reports
+it — including the case where *both* sides failed, since a symmetric
+failure still produced no evidence. Nothing diverges when nothing
+executes, so a silently skipped send failure turns a broken harness
+into a clean run, which is the worst result a differential can give.
 
 ### Findings that someone else can check
 
-A finding that only says *what* diverged is an assertion. `solinv-disclose`
-packages it with the inputs needed to re-execute it:
+A finding that only says *what* diverged is an assertion.
+`solinv-disclose` packages it with its inputs — identified by digest,
+and carried outright when the producer supplies them:
 
 ```
 # Divergence report — amm-diff (raydium-amm swap)
@@ -169,6 +172,9 @@ packages it with the inputs needed to re-execute it:
 - **Reproducible**: NOT FROM THIS REPORT ALONE — the inputs are
   identified by digest, not carried. Obtain them independently, verify
   them against the hashes below, then re-execute.
+  - Not carried: anchor program bytes, pinocchio program bytes,
+    `pool` account data, encoding for action `swap(100, 0)`,
+    the execution context and signer policy
 
 ## Where they parted
 
@@ -177,12 +183,16 @@ packages it with the inputs needed to re-execute it:
   right rejected (builtin:InvalidArgument)
 ```
 
-…followed by each side's `.so`, every account's pre-state and metadata,
-the activated feature set, and the action sequence. Program IDs are
-upgradeable, so an ID names a slot in time rather than a binary; the
-feature set matters because Solana's runtime semantics are gated by
-flags that activate at epoch boundaries, which makes "same instruction,
-same accounts" two different executions on two different days.
+…followed by tables for each side's `.so` and every account's pre-state
+and metadata (owner, lamports, executable, rent epoch), the activated
+feature set, the execution context — runtime, clock, and how signatures
+are to be satisfied — and the action sequence with its account metas.
+
+Program IDs are upgradeable, so an ID names a slot in time rather than a
+binary; the feature set matters because Solana's runtime semantics are
+gated by flags that activate at epoch boundaries, which makes "same
+instruction, same accounts" two different executions on two different
+days.
 
 **A digest identifies; it does not deliver.** A hash lets a reader
 confirm that bytes they already hold are the right ones — it cannot
@@ -218,11 +228,15 @@ Design rationale, API walkthrough and current gaps:
 All six differential harnesses under
 `examples/pinocchio-bench-fuzz/fuzz/` (`amm-diff`, `matching-diff`,
 `oracle-diff`, `perp-diff`, `refresh-diff`, `vault-diff`) check all
-three surfaces, with CU non-regression as its own
-`*_cu_no_regression_only` variant so a performance finding is never
-reported as a behavioural one. **Emitting reports is still pending** —
-a finding leaves the fuzz worker as a log line, not yet as a
-reproducible bundle.
+three surfaces and report probes that produced no evidence, with CU
+non-regression as its own `*_cu_no_regression_only` variant so a
+performance finding is never reported as a behavioural one. Each
+invariant runs its probes once and hands the result to the evaluators,
+since the probes mutate fixture state.
+
+**Emitting reports is still pending** — a finding leaves the fuzz
+worker as a log line, and nothing yet populates a bundle that carries
+its inputs.
 
 ## Quickstart — escrow-demo (catalog 10/10)
 
@@ -356,8 +370,9 @@ solinv/
 │   │                      #   + bytepoke + differential equivalence oracle
 │   ├── solinv-cheat/      # LiteSVM cheatcode wrappers
 │   ├── solinv-corpus/     # Yellowstone gRPC seeder (scaffold)
-│   ├── solinv-disclose/   # Reproducible divergence reports (serde+sha2 only,
-│   │                      #   no Crucible/Solana); platform formatters pending
+│   ├── solinv-disclose/   # Divergence findings as checkable evidence
+│   │                      #   (serde+sha2 only, no Crucible/Solana);
+│   │                      #   platform formatters pending
 │   └── solinv-cli/        # `solinv` binary — score, init, check, fuzz, corpus, disclose
 ├── examples/
 │   ├── escrow-demo/             # planted-bug acceptance fixture (7 invariants)
@@ -492,7 +507,7 @@ thing" drift after a negative result.
 
 ```bash
 cargo check --workspace               # verify scaffold (~5s)
-cargo test  --workspace               # all crates (119 tests)
+cargo test  --workspace               # all crates (155 tests)
 cargo test  -p solinv-core            # invariant regression tests
 cargo test  -p solinv-fuzz            # bytepoke + differential oracle
 cargo test  -p solinv-disclose        # divergence reports (no Solana deps)

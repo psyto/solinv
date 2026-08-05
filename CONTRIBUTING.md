@@ -68,15 +68,28 @@ canonical template.
 
 A **differential** harness (`*-diff`, two implementations of the same
 program driven through identical actions) additionally needs all three
-oracle surfaces, not just written state:
+oracle surfaces, not just written state — plus one precondition:
 
 1. `check_pair_equivalent` / `check_all_pairs` — account bodies.
-2. `ParityDivergence::check_outcomes` — accept/reject **and the error
-   code**. The boolean `::check` cannot see two sides rejecting for
-   different reasons, and error codes are part of a program's ABI.
-3. `CuComparison` — recorded per action, escalated only on regression.
+2. `ParityDivergence::check_outcomes` — accept/reject **and the
+   rejection reason**. Comparing custom error codes alone is not
+   enough: every builtin `ProgramError` reports no code, so two
+   different builtins would compare equal, and rejection reasons are
+   part of a program's ABI.
+3. `CuComparison` — escalated only on regression, since a CU difference
+   is the point of a rewrite rather than a defect. Keep it a separate
+   invariant variant so a performance finding is never reported as a
+   behavioural one.
+4. `SendFailure::check` — a probe whose `send()` failed never reached
+   the program and must be **reported**, not skipped. Nothing diverges
+   when nothing executes, so a harness that quietly drops failed sends
+   can run to completion and call itself clean.
 
-Rationale for all three:
+Drive the probes once and hand the result to each evaluator rather than
+re-sending per check; the probes mutate fixture state, so a variant that
+ran them twice would double every mutation.
+
+Rationale for all four:
 [`docs/differential-equivalence.md`](docs/differential-equivalence.md).
 
 ### 3. Run calibration on a new protocol

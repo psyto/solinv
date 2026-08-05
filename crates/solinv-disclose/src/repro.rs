@@ -169,8 +169,32 @@ impl Artifact {
     }
 }
 
-/// Decode RFC 4648 base64. `None` on any malformed input — wrong
-/// length, stray character, or padding in the wrong place.
+/// Decode RFC 4648 base64, accepting **canonical encodings only**.
+///
+/// `None` on any input that is malformed *or* merely non-canonical.
+/// The strictness is deliberate: this function decides whether a
+/// carried payload is trusted, so it must not be the loose end of that
+/// decision.
+///
+/// Three ways a string can be well-formed enough to decode and still be
+/// rejected here:
+///
+/// - **Padding before the end.** `Zg==AAAA` has a padded first quantum
+///   followed by more data. Padding terminates the stream; anything
+///   after it is not part of a valid encoding.
+/// - **Non-zero discarded bits.** A one-byte tail encodes 8 bits in two
+///   sextets, so the final sextet has 4 bits that must be zero.
+///   `Zm9=` and `Zm8=` both decode to `fo`, but only `Zm8=` is
+///   canonical.
+/// - **Anything else that does not re-encode to itself**, which the
+///   final round-trip check catches whether or not it was anticipated
+///   here.
+///
+/// Why canonicity matters even though the SHA-256 is verified
+/// afterwards: the digest protects the *decoded bytes*, but the base64
+/// *string* is what gets serialized into the claim. Two encodings of
+/// the same payload would pass every integrity check while producing
+/// two different claim digests for one finding.
 fn b64_decode(text: &str) -> Option<Vec<u8>> {
     fn val(c: u8) -> Option<u32> {
         Some(match c {
@@ -186,11 +210,13 @@ fn b64_decode(text: &str) -> Option<Vec<u8>> {
     if !raw.len().is_multiple_of(4) {
         return None;
     }
+    let last = raw.len().saturating_sub(4);
     let mut out = Vec::with_capacity(raw.len() / 4 * 3);
-    for chunk in raw.chunks(4) {
+    for (start, chunk) in raw.chunks(4).enumerate().map(|(i, c)| (i * 4, c)) {
         let pad = chunk.iter().filter(|&&c| c == b'=').count();
-        // Padding is only legal as the final one or two characters.
-        if pad > 2 || chunk[..4 - pad].contains(&b'=') {
+        // Padding is legal only as the last one or two characters of
+        // the last quantum.
+        if pad > 2 || (pad > 0 && start != last) || chunk[..4 - pad].contains(&b'=') {
             return None;
         }
         let mut n = 0u32;
@@ -200,6 +226,12 @@ fn b64_decode(text: &str) -> Option<Vec<u8>> {
         n <<= 6 * pad;
         let bytes = [(n >> 16) as u8, (n >> 8) as u8, n as u8];
         out.extend_from_slice(&bytes[..3 - pad]);
+    }
+    // Canonicity, decided by construction rather than by enumerating
+    // the ways it can fail: the only accepted encoding of a payload is
+    // the one this crate would have produced.
+    if b64(&out) != text {
+        return None;
     }
     Some(out)
 }
@@ -383,8 +415,24 @@ impl ActionRef {
         }
     }
 
+    /// Whether this action can actually be replayed, as opposed to
+    /// merely claiming to carry an encoding.
+    ///
+    /// The presence of a `data_base64` string is not enough — it has to
+    /// decode. A malformed one would otherwise let a bundle be graded
+    /// self-contained on the strength of a field that no reader can
+    /// turn back into an instruction.
     fn is_replayable(&self) -> bool {
-        self.program_id.is_some() && self.data_base64.is_some()
+        self.program_id.is_some()
+            && self
+                .data_base64
+                .as_deref()
+                .is_some_and(|d| b64_decode(d).is_some())
+    }
+
+    /// The decoded instruction data, when it is present and valid.
+    pub fn data(&self) -> Option<Vec<u8>> {
+        self.data_base64.as_deref().and_then(b64_decode)
     }
 }
 
@@ -679,7 +727,11 @@ mod tests {
     fn base64_round_trips_including_awkward_tails() {
         for n in 0..40usize {
             let bytes: Vec<u8> = (0..n).map(|i| (i * 37 % 251) as u8).collect();
-            assert_eq!(b64_decode(&b64(&bytes)).as_deref(), Some(&bytes[..]), "n={n}");
+            assert_eq!(
+                b64_decode(&b64(&bytes)).as_deref(),
+                Some(&bytes[..]),
+                "n={n}"
+            );
         }
     }
 
@@ -689,6 +741,55 @@ mod tests {
         assert!(b64_decode("Z*==").is_none(), "stray character");
         assert!(b64_decode("Z=g=").is_none(), "padding in the wrong place");
         assert!(b64_decode("====").is_none(), "all padding");
+    }
+
+    #[test]
+    fn base64_rejects_non_canonical_encodings() {
+        // Both of these decode to `fo` under a permissive decoder, but
+        // only one is canonical. Accepting both would let one payload
+        // have two claim digests while passing every integrity check,
+        // because the SHA-256 covers the decoded bytes and the digest
+        // covers the string.
+        assert_eq!(b64(b"fo"), "Zm8=");
+        assert_eq!(b64_decode("Zm8=").as_deref(), Some(&b"fo"[..]));
+        assert!(
+            b64_decode("Zm9=").is_none(),
+            "trailing bits of the final sextet must be zero"
+        );
+
+        // Padding terminates the stream; data after it is not a valid
+        // encoding, however well-formed the later quantum looks.
+        assert!(
+            b64_decode("Zg==AAAA").is_none(),
+            "padding before a later quantum"
+        );
+        assert!(b64_decode("Zm8=Zm8=").is_none(), "two padded quanta");
+    }
+
+    #[test]
+    fn action_with_undecodable_data_is_not_replayable() {
+        let good = ActionRef::encoded("swap", "Anch111", &[1, 2, 3], vec![]);
+        assert!(good.is_replayable());
+        assert_eq!(good.data().as_deref(), Some(&[1u8, 2, 3][..]));
+
+        let mut broken = good.clone();
+        broken.data_base64 = Some("not!valid!base64".into());
+        assert!(
+            !broken.is_replayable(),
+            "a data field that cannot decode is not an encoding"
+        );
+        assert!(broken.data().is_none());
+    }
+
+    #[test]
+    fn undecodable_action_data_blocks_self_containment() {
+        let mut b = self_contained_bundle();
+        b.actions[0].data_base64 = Some("!!!!".into());
+        assert_eq!(b.completeness(), Completeness::IdentifiedOnly);
+        assert!(b
+            .not_carried()
+            .iter()
+            .any(|g| g.contains("encoding for action")));
     }
 
     #[test]
@@ -708,7 +809,10 @@ mod tests {
             _ => unreachable!(),
         };
         assert!(!tampered.is_intact(), "digest mismatch must be caught");
-        assert!(tampered.bytes().is_none(), "corrupt bytes must not be handed out");
+        assert!(
+            tampered.bytes().is_none(),
+            "corrupt bytes must not be handed out"
+        );
 
         let wrong_len = match good {
             Artifact::Inline { sha256, base64, .. } => Artifact::Inline {

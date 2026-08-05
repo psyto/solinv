@@ -152,9 +152,9 @@ same place, instead of taking the finder's word.
 | Field | Why it is required |
 |---|---|
 | `programs[].code` | Program IDs are upgradeable — an ID names a slot in time, not a binary. The artifact pins the bytes that ran. |
-| `accounts[].pre_state` + owner/lamports | Same reason, for state. Account metadata is part of the state, not decoration. |
+| `accounts[].pre_state` + owner / lamports / **executable** | Same reason, for state. The metadata is part of the state, not decoration — `executable` decides whether the runtime treats the account as a program, so an account restored without it is not the account that ran. |
 | `feature_set` | Solana runtime semantics are gated by flags that activate at epoch boundaries. Same instruction + same accounts can be two different executions on two different days. Without this the comparison target is undefined. |
-| `actions` | The minimal instruction sequence reaching the divergence. |
+| `actions` | The minimal instruction sequence reaching the divergence. A label describes a step; only `ActionRef::encoded` — whose base64 must actually decode — lets anyone replay it. |
 | `slot` | Which mainnet snapshot the accounts were cloned from, when the fixture came from a real pool. |
 
 ### A digest identifies; it does not deliver
@@ -165,7 +165,7 @@ It cannot hand them those bytes. A bundle carrying only digests
 describes what must be supplied out of band — it is not, by itself,
 enough to re-execute anything, and must not announce otherwise.
 
-`ReproBundle::completeness()` is therefore three-valued:
+`ReproBundle::completeness()` is therefore four-valued:
 
 | value | meaning |
 |---|---|
@@ -174,10 +174,29 @@ enough to re-execute anything, and must not announce otherwise.
 | `Incomplete` | something required to define the comparison at all is absent. |
 | `Corrupt` | a carried payload contradicts its own declared length or digest. Worse than absent: the bundle asserts it holds the inputs and the assertion is false. Checked first, so no other verdict can mask it. |
 
-`SelfContained` is only granted after the carried bytes are decoded and
-re-hashed. Trusting a payload because the same report also states its
-digest would repeat, one level down, exactly the mistake the
-digest/deliver distinction exists to prevent.
+`SelfContained` is only granted after every carried payload is decoded
+and re-hashed, and every encoded action is decoded. Trusting a payload
+because the same report also states its digest would repeat, one level
+down, exactly the mistake the digest/deliver distinction exists to
+prevent — and so would trusting a `data_base64` field that no reader
+can turn back into an instruction.
+
+Base64 is accepted in **canonical form only**: padding must terminate
+the stream, the discarded bits of a short final quantum must be zero,
+and the string must re-encode to itself. This is stricter than
+decodability, and the reason is the digest rather than the payload —
+the SHA-256 covers the decoded bytes, but the base64 *string* is what
+gets hashed into the claim. Two encodings of one payload would pass
+every integrity check while producing two different claim digests for
+one finding.
+
+### Reading a report back
+
+`serde_json::from_slice` does not validate the schema number: it will
+accept a document declaring any version whose shape happens to fit,
+silently reinterpreting it under this build's meaning.
+`DivergenceReport::from_json` is the path that checks, and is what
+should be used wherever a report is treated as evidence.
 
 **Every report this repository can currently produce is
 `IdentifiedOnly`.** No harness populates inline artifacts or encoded
@@ -264,7 +283,7 @@ into the platform-specific templates is not done yet — see Status.
 **Implemented**
 
 - All three oracle surfaces, with `From` conversions into the report
-  types (`solinv-fuzz`, 29 tests).
+  types (`solinv-fuzz`, 31 tests).
 - Adoption across all six differential harnesses
   (`examples/pinocchio-bench-fuzz/fuzz/{amm,matching,oracle,perp,refresh,vault}-diff`):
   each drives its probe actions through `probe_actions`, which returns
@@ -273,7 +292,7 @@ into the platform-specific templates is not done yet — see Status.
   its own `*_cu_no_regression_only` invariant variant.
 - `Divergence` / `ReproBundle` / `DivergenceReport`, canonical
   encoding, digest, Markdown rendering (`solinv-disclose`,
-  23 tests + 5 doctests).
+  46 tests + 6 doctests).
 
 **Not implemented**
 

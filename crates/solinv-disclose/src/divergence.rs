@@ -72,10 +72,17 @@ impl Sides {
 
 /// One place where two executions that should have agreed did not.
 ///
-/// The variants cover the three oracles a Solana differential run can
-/// actually observe. There is no state root to compare, so "same
-/// outcome" has to be spelled out as: same written bytes, same
-/// accept/reject decision (and same reason), same cost.
+/// There is no state root to compare on Solana, so "same outcome" has
+/// to be spelled out by hand. These variants spell out three of it:
+/// same written bytes, same accept/reject decision *and reason*, same
+/// cost.
+///
+/// **Three chosen surfaces, not an exhaustive definition.** A caller
+/// can also observe account lamports, owner and executable flags,
+/// instruction return data, emitted logs, and any account written but
+/// not declared as a compared pair — none of which are represented
+/// here. A finding recorded with these variants narrows where a
+/// divergence can be hiding; it does not establish equivalence.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Divergence {
@@ -119,10 +126,13 @@ pub enum Divergence {
 
     /// Compute units consumed by each side.
     ///
-    /// Recorded on every compared action, not only on disagreement —
-    /// for a rewrite this is the measurement the whole exercise exists
-    /// to produce. `None` means that side did not reach a successful
-    /// execution, so no CU figure was reported.
+    /// Can be recorded on every compared action rather than only on
+    /// disagreement — for a rewrite this is the measurement the whole
+    /// exercise exists to produce. Note that the harnesses in this
+    /// repository gate on regressions only, so what they emit is the
+    /// verdict rather than a per-action series. `None` means that side
+    /// did not reach a successful execution, so no CU figure was
+    /// reported.
     ///
     /// CU is consensus-relevant on Solana: two runs that write
     /// identical bytes but consume different CU can still end

@@ -10,8 +10,17 @@
 //!
 //! [`DivergenceReport::claim_digest`] covers the **semantic finding** —
 //! schema version, subject, sides, inputs, divergences — and excludes
-//! provenance. Two runs that found the same thing agree here even if
-//! one was produced by a newer build of this crate.
+//! provenance, so a release of *this crate* does not change it.
+//!
+//! That is the whole of the promise, and it is narrower than it
+//! sounds. A finding whose rejection reason names a builtin
+//! `ProgramError` embeds a `Debug` rendering produced by the
+//! toolchain, so a dependency or compiler change can alter the digest
+//! without the finding changing.
+//! [`DivergenceReport::claim_digest_is_portable`] reports exactly that
+//! condition and the rendered header labels such a digest
+//! `build-scoped`. Do not read "excludes provenance" as
+//! "toolchain-independent" — check the flag.
 //!
 //! [`DivergenceReport::digest`] covers the **entire report**, tool
 //! stamp included. Use it to name one exact artifact; expect it to
@@ -150,6 +159,43 @@ impl DivergenceReport {
 
     pub fn has_fault(&self) -> bool {
         self.claim.divergences.iter().any(|d| d.is_fault())
+    }
+
+    /// Parse a report, validating that it is a schema this build
+    /// understands.
+    ///
+    /// Plain `serde_json::from_slice::<DivergenceReport>` does **not**
+    /// do this: it accepts any `schema` number so long as the shape
+    /// happens to fit, which means a document written by a future
+    /// version can be silently reinterpreted under this version's
+    /// meaning. A report is evidence, so the version it was written
+    /// against has to be checked rather than carried along as
+    /// decoration.
+    ///
+    /// ```
+    /// use solinv_disclose::{DivergenceReport, ReproBundle, Sides};
+    ///
+    /// let r = DivergenceReport::new("amm-diff", Sides::anchor_pinocchio(), ReproBundle::new());
+    /// let json = r.canonical_json().unwrap();
+    /// assert!(DivergenceReport::from_json(&json).is_ok());
+    ///
+    /// // Same shape, a schema this build does not know.
+    /// let bumped = String::from_utf8(json).unwrap().replace(r#""schema":2"#, r#""schema":99"#);
+    /// let err = DivergenceReport::from_json(bumped.as_bytes()).unwrap_err();
+    /// assert!(err.to_string().contains("schema 99"));
+    /// ```
+    pub fn from_json(bytes: &[u8]) -> Result<Self> {
+        let report: Self = serde_json::from_slice(bytes)?;
+        if report.claim.schema != SCHEMA_VERSION {
+            anyhow::bail!(
+                "report declares schema {} but this build understands schema {}; \
+                 the canonical encoding is bound to one version, so the digest \
+                 and field meanings cannot be assumed to carry across",
+                report.claim.schema,
+                SCHEMA_VERSION,
+            );
+        }
+        Ok(report)
     }
 
     /// Canonical bytes of the whole report. See the module docs for the
@@ -601,7 +647,11 @@ mod tests {
             right_reason: Some("builtin:InvalidArgument".into()),
         });
         assert!(!build_scoped.claim_digest_is_portable());
-        assert!(build_scoped.to_markdown().contains("build-scoped"), "{}", build_scoped.to_markdown());
+        assert!(
+            build_scoped.to_markdown().contains("build-scoped"),
+            "{}",
+            build_scoped.to_markdown()
+        );
     }
 
     #[test]
@@ -629,6 +679,34 @@ mod tests {
             .to_markdown();
         assert!(md.contains("CARRIED BYTES DO NOT MATCH"), "{md}");
         assert!(md.contains("**CORRUPT**"), "{md}");
+    }
+
+    #[test]
+    fn parsing_rejects_an_unknown_schema() {
+        let r = report().with_divergence(body_divergence());
+        let json = r.canonical_json().unwrap();
+        assert_eq!(DivergenceReport::from_json(&json).unwrap(), r);
+
+        let bumped = String::from_utf8(json.clone())
+            .unwrap()
+            .replace(r#""schema":2"#, r#""schema":3"#);
+        let err = DivergenceReport::from_json(bumped.as_bytes()).unwrap_err();
+        assert!(err.to_string().contains("schema 3"), "{err}");
+
+        // Plain serde deserialization is documented as *not* validating;
+        // this pins that difference so from_json stays the evidence path.
+        assert!(serde_json::from_slice::<DivergenceReport>(bumped.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn parsing_rejects_a_v1_shaped_document() {
+        // v1 had the claim fields inline on the report rather than
+        // nested, so it cannot be reinterpreted under v2 at all.
+        let v1 = br#"{"schema":1,"tool":{"name":"solinv-disclose","version":"0.0.1"},
+                     "subject":"amm-diff","sides":{"left":"anchor","right":"pinocchio"},
+                     "bundle":{"programs":[],"accounts":[],"slot":null,
+                     "feature_set":null,"actions":[]},"divergences":[]}"#;
+        assert!(DivergenceReport::from_json(v1).is_err());
     }
 
     #[test]

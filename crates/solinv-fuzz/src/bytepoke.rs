@@ -219,7 +219,9 @@ impl AnchorAccountBuilder {
         let mut data = Vec::with_capacity(8 + self.body.len());
         data.extend_from_slice(&anchor_account_disc(&self.type_name));
         data.extend_from_slice(&self.body);
-        let lamports = self.lamports.unwrap_or_else(|| rent_for_anchor_body(self.body.len()));
+        let lamports = self
+            .lamports
+            .unwrap_or_else(|| rent_for_anchor_body(self.body.len()));
         SolAccount {
             lamports,
             data,
@@ -289,7 +291,10 @@ mod tests {
         let mut buf = vec![0u8; 16];
         write_u64_at(&mut buf, 4, 0x0102030405060708);
         // Little-endian: least significant byte first.
-        assert_eq!(&buf[4..12], &[0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01]);
+        assert_eq!(
+            &buf[4..12],
+            &[0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01]
+        );
     }
 
     #[test]

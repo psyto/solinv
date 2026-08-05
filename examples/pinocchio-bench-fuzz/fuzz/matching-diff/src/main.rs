@@ -60,7 +60,7 @@ use std::sync::Arc;
 
 use solinv_fuzz::{
     check_all_pairs, check_pair_equivalent, read_pair_bodies, CuComparison, DiffAccountPair,
-    DifferentialFixture, HasContext, ParityDivergence, TxOutcome,
+    DifferentialFixture, HasContext, ParityDivergence, SendFailure, TxOutcome,
 };
 
 // ---------------------------------------------------------------------
@@ -365,6 +365,12 @@ impl DifferentialFixture for MatchingDiffFixture {
 /// execution parity: either both succeed or both fail, and failures
 /// carry the same custom error code. A divergence
 /// where one side accepts and the other rejects is an immediate bug.
+/// One executed probe: the action label, and each side's result.
+///
+/// `Err` carries the `send()` failure text — kept rather than collapsed
+/// so a probe that produced no evidence can be reported as such.
+type Probe = (String, Result<TxOutcome, String>, Result<TxOutcome, String>);
+
 /// Drive the probe actions through both sides and hand back the raw
 /// outcomes, labelled by the action that produced them.
 ///
@@ -377,9 +383,7 @@ impl DifferentialFixture for MatchingDiffFixture {
 /// failure (blockhash, signers, serialization), not a statement about
 /// program behaviour. Callers skip those probes rather than reading
 /// them as a divergence.
-fn probe_actions(
-    fixture: &mut MatchingDiffFixture,
-) -> Vec<(String, Option<TxOutcome>, Option<TxOutcome>)> {
+fn probe_actions(fixture: &mut MatchingDiffFixture) -> Vec<Probe> {
     let mut out = Vec::new();
 
     // Use a deterministic probe input. The real fuzz inputs already
@@ -417,7 +421,7 @@ fn probe_actions(
             .fee_payer(&*fixture.fee_payer)
             .signers(&[&*fixture.fee_payer, &*fixture.user])
             .send()
-            .ok();
+            .map_err(|e| e.to_string());
 
         let pino = fixture
             .ctx
@@ -425,7 +429,7 @@ fn probe_actions(
             .fee_payer(&*fixture.fee_payer)
             .signers(&[&*fixture.fee_payer, &*fixture.user])
             .send()
-            .ok();
+            .map_err(|e| e.to_string());
 
         out.push((
             format!("place_order(price={}, qty={})", price, qty),
@@ -438,22 +442,28 @@ fn probe_actions(
 }
 
 /// Execution parity: the two sides must make the same accept/reject
-/// decision **and**, when they reject, reject for the same reason.
+/// decision **and**, when they reject, reject for the same reason —
+/// custom code against custom code, builtin variant against builtin
+/// variant.
 ///
-/// The error code is checked because it is part of the program's
-/// observable ABI — a caller branching on `6001` behaves differently
-/// against a rewrite that returns `6002`, even though a boolean
-/// accept/reject comparison calls that agreement.
-fn check_execution_parity(fixture: &mut MatchingDiffFixture) {
-    for (label, anchor, pino) in probe_actions(fixture) {
-        let (Some(anchor), Some(pino)) = (anchor, pino) else {
-            // Harness-level send failure on at least one side — nothing
-            // can be concluded about program behaviour. Fail-soft, in
-            // line with `read_pair_bodies`.
+/// Comparing only the custom code is not enough: every builtin
+/// `ProgramError` reports no code, so two sides rejecting with
+/// different builtins would compare equal. That is the likeliest place
+/// for a divergence to hide here, because the Pinocchio side returns
+/// builtins exclusively.
+///
+/// Takes an already-executed probe set so parity and CU can be
+/// evaluated from one run of the actions rather than re-sending them.
+fn check_execution_parity(probes: &[Probe]) {
+    for (label, anchor, pino) in probes {
+        // A probe that never reached the program produces no evidence.
+        // It is reported by `check_probe_evidence`, not silently reread
+        // as agreement here.
+        let (Ok(anchor), Ok(pino)) = (anchor, pino) else {
             continue;
         };
 
-        if let Some(div) = ParityDivergence::check_outcomes(&label, &anchor, &pino) {
+        if let Some(div) = ParityDivergence::check_outcomes(label, anchor, pino) {
             fuzz_assert!(false, "{}", div);
         }
     }
@@ -472,14 +482,29 @@ fn check_execution_parity(fixture: &mut MatchingDiffFixture) {
 /// pinocchio-bench leaderboard: CU is consensus-relevant, so a slower
 /// rewrite writing byte-identical state is not equivalent — it can
 /// exceed the transaction limit and fail where the original succeeded.
-fn check_cu_no_regression(fixture: &mut MatchingDiffFixture) {
-    for (label, anchor, pino) in probe_actions(fixture) {
-        let (Some(anchor), Some(pino)) = (anchor, pino) else {
+fn check_cu_no_regression(probes: &[Probe]) {
+    for (label, anchor, pino) in probes {
+        let (Ok(anchor), Ok(pino)) = (anchor, pino) else {
             continue;
         };
 
-        if let Some(cmp) = CuComparison::regression(&label, &anchor, &pino) {
+        if let Some(cmp) = CuComparison::regression(label, anchor, pino) {
             fuzz_assert!(false, "{}", cmp);
+        }
+    }
+}
+
+/// Every probe must actually have reached the program on both sides.
+///
+/// `send()` returning `Err` is a harness-level failure, not a statement
+/// about program behaviour — but it must be reported rather than
+/// skipped. A harness whose sends are all failing would otherwise run
+/// to completion and declare itself clean: nothing diverges when
+/// nothing executes.
+fn check_probe_evidence(probes: &[Probe]) {
+    for (label, anchor, pino) in probes {
+        if let Some(f) = SendFailure::check(label, anchor, pino) {
+            fuzz_assert!(false, "{}", f);
         }
     }
 }
@@ -548,12 +573,16 @@ fn invariant_diff_smoke(fixture: &mut MatchingDiffFixture) {
         fuzz_assert!(false, "{}", div);
     }
     check_sequence_match(fixture);
-    check_execution_parity(fixture);
+    let probes = probe_actions(fixture);
+    check_probe_evidence(&probes);
+    check_execution_parity(&probes);
 }
 
 #[invariant_test]
 fn invariant_diff_execution_parity_only(fixture: &mut MatchingDiffFixture) {
-    check_execution_parity(fixture);
+    let probes = probe_actions(fixture);
+    check_probe_evidence(&probes);
+    check_execution_parity(&probes);
 }
 
 #[invariant_test]
@@ -569,5 +598,7 @@ fn invariant_diff_sequence_match_only(fixture: &mut MatchingDiffFixture) {
 
 #[invariant_test]
 fn invariant_diff_cu_no_regression_only(fixture: &mut MatchingDiffFixture) {
-    check_cu_no_regression(fixture);
+    let probes = probe_actions(fixture);
+    check_probe_evidence(&probes);
+    check_cu_no_regression(&probes);
 }

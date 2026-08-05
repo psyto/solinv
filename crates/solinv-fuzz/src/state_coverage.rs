@@ -53,7 +53,11 @@ pub fn fingerprint_key(spec: &InstructionSpec, obs: TransitionObservation) -> St
         .iter()
         .filter(|s| s.is_some())
         .count();
-    let swap_surface = spec.swap_alternates.iter().filter(|alts| !alts.is_empty()).count();
+    let swap_surface = spec
+        .swap_alternates
+        .iter()
+        .filter(|alts| !alts.is_empty())
+        .count();
     let cpi_bucket = bucket_cpi_depth(obs.cpi_depth);
     let flow = token_flow_code(obs.token_flow);
 

@@ -96,10 +96,15 @@ pub enum Divergence {
     /// The two sides disagreed on whether the instruction was accepted,
     /// or rejected it for different reasons.
     ///
-    /// The error codes matter: a program's custom error code is part of
-    /// its observable ABI. Two sides that both reject, but with
-    /// different codes, have diverged in a way a caller can see —
-    /// even though both "failed".
+    /// The reason matters, not just the decision: a program's rejection
+    /// reasons are part of its observable ABI. Two sides that both
+    /// reject, but for different reasons, have diverged in a way a
+    /// caller can see — even though both "failed".
+    ///
+    /// `*_reason` carries the full normalized reason (`custom:6001`,
+    /// `builtin:InvalidArgument`, …). `*_error` carries only the custom
+    /// code and is `None` for every builtin, so it must not be used as
+    /// the comparison key on its own.
     Parity {
         label: String,
         left_ok: bool,
@@ -107,6 +112,9 @@ pub enum Divergence {
         /// Custom program error code, when the side rejected with one.
         left_error: Option<u32>,
         right_error: Option<u32>,
+        /// Full normalized rejection reason; `None` when accepted.
+        left_reason: Option<String>,
+        right_reason: Option<String>,
     },
 
     /// Compute units consumed by each side.
@@ -141,9 +149,17 @@ impl Divergence {
     /// measurement.
     ///
     /// Body and parity divergences are always defects. A CU difference
-    /// is a defect only when the right side consumed *more* than the
-    /// left — a rewrite that costs more than the original has failed at
-    /// the thing it was for.
+    /// is a defect when the right side consumed *more* than the left —
+    /// a rewrite that costs more than the original has failed at the
+    /// thing it was for — and also when a figure is missing on one side
+    /// only, since that means one side never completed and the
+    /// comparison rests on nothing.
+    ///
+    /// The missing-side case is a fault *here* rather than being
+    /// delegated to an accompanying parity record, because nothing
+    /// forces such a record to exist. A report assembled with a
+    /// one-sided CU entry and no parity entry would otherwise render
+    /// "no divergence" for a run where one side did not execute.
     ///
     /// ```
     /// use solinv_disclose::Divergence;
@@ -171,9 +187,16 @@ impl Divergence {
                 right_cu: Some(r),
                 ..
             } => r > l,
-            // One side never produced a CU figure — that asymmetry is
-            // reported by the accompanying Parity divergence, not here.
-            Divergence::Cu { .. } => false,
+            // Neither side produced a figure: nothing is claimed, so
+            // nothing is wrong.
+            Divergence::Cu {
+                left_cu: None,
+                right_cu: None,
+                ..
+            } => false,
+            // Exactly one side produced a figure — one side did not
+            // complete. Incomplete evidence, reported as a fault.
+            Divergence::Cu { .. } => true,
         }
     }
 
@@ -194,18 +217,19 @@ impl Divergence {
                 label,
                 left_ok,
                 right_ok,
-                left_error,
-                right_error,
+                left_reason,
+                right_reason,
+                ..
             } => {
-                let render = |ok: &bool, err: &Option<u32>| match (ok, err) {
+                let render = |ok: &bool, reason: &Option<String>| match (ok, reason) {
                     (true, _) => "accepted".to_string(),
-                    (false, Some(code)) => format!("rejected ({code})"),
+                    (false, Some(r)) => format!("rejected ({r})"),
                     (false, None) => "rejected".to_string(),
                 };
                 format!(
                     "`{label}` outcome diverged: left {}, right {}",
-                    render(left_ok, left_error),
-                    render(right_ok, right_error)
+                    render(left_ok, left_reason),
+                    render(right_ok, right_reason)
                 )
             }
             Divergence::Cu {
@@ -275,10 +299,23 @@ mod tests {
     }
 
     #[test]
-    fn cu_with_a_missing_side_is_not_itself_a_fault() {
+    fn cu_with_a_missing_side_is_a_fault() {
+        // One side never completed, so the comparison rests on nothing.
+        // Reported here rather than delegated to a parity record that
+        // the report is not obliged to contain.
         let d = Divergence::Cu {
             label: "swap".into(),
             left_cu: Some(3_900),
+            right_cu: None,
+        };
+        assert!(d.is_fault());
+    }
+
+    #[test]
+    fn cu_with_neither_side_is_not_a_fault() {
+        let d = Divergence::Cu {
+            label: "swap".into(),
+            left_cu: None,
             right_cu: None,
         };
         assert!(!d.is_fault());
@@ -292,11 +329,35 @@ mod tests {
             right_ok: false,
             left_error: Some(6001),
             right_error: Some(6002),
+            left_reason: Some("custom:6001".into()),
+            right_reason: Some("custom:6002".into()),
         };
         assert!(d.is_fault());
         let h = d.headline();
-        assert!(h.contains("rejected (6001)"), "{h}");
-        assert!(h.contains("rejected (6002)"), "{h}");
+        assert!(h.contains("rejected (custom:6001)"), "{h}");
+        assert!(h.contains("rejected (custom:6002)"), "{h}");
+    }
+
+    #[test]
+    fn both_rejected_with_different_builtins_is_a_fault() {
+        // Neither side carries a custom code, so `*_error` is None on
+        // both — the reason is the only thing that distinguishes them.
+        // This is the case a code-only comparison cannot see, and it is
+        // the common case for the Pinocchio bench rewrites, which emit
+        // builtins exclusively.
+        let d = Divergence::Parity {
+            label: "swap(100, 0)".into(),
+            left_ok: false,
+            right_ok: false,
+            left_error: None,
+            right_error: None,
+            left_reason: Some("builtin:InvalidArgument".into()),
+            right_reason: Some("builtin:AccountDataTooSmall".into()),
+        };
+        assert!(d.is_fault());
+        let h = d.headline();
+        assert!(h.contains("builtin:InvalidArgument"), "{h}");
+        assert!(h.contains("builtin:AccountDataTooSmall"), "{h}");
     }
 
     #[test]

@@ -34,7 +34,7 @@ use std::sync::Arc;
 
 use solinv_fuzz::{
     check_all_pairs, read_pair_bodies, CuComparison, DiffAccountPair, DifferentialFixture,
-    HasContext, ParityDivergence, TxOutcome,
+    HasContext, ParityDivergence, SendFailure, TxOutcome,
 };
 
 const ANCHOR_W11_PROGRAM_ID_STR: &str = "1PA7z3xmC4WdLzc5frbUSuDynRNPPvPPyJNFPdFSmu5";
@@ -285,6 +285,12 @@ impl DifferentialFixture for OracleDiffFixture {
 // Differential checks
 // ---------------------------------------------------------------------
 
+/// One executed probe: the action label, and each side's result.
+///
+/// `Err` carries the `send()` failure text — kept rather than collapsed
+/// so a probe that produced no evidence can be reported as such.
+type Probe = (String, Result<TxOutcome, String>, Result<TxOutcome, String>);
+
 /// Drive the probe actions through both sides and hand back the raw
 /// outcomes, labelled by the action that produced them.
 ///
@@ -297,9 +303,7 @@ impl DifferentialFixture for OracleDiffFixture {
 /// failure (blockhash, signers, serialization), not a statement about
 /// program behaviour. Callers skip those probes rather than reading
 /// them as a divergence.
-fn probe_actions(
-    fixture: &mut OracleDiffFixture,
-) -> Vec<(String, Option<TxOutcome>, Option<TxOutcome>)> {
+fn probe_actions(fixture: &mut OracleDiffFixture) -> Vec<Probe> {
     let mut out = Vec::new();
 
     // Probes target the boundary cases: small/large prices, equal-slot
@@ -336,7 +340,7 @@ fn probe_actions(
             .fee_payer(&*fixture.fee_payer)
             .signers(&[&*fixture.fee_payer, &*fixture.publisher])
             .send()
-            .ok();
+            .map_err(|e| e.to_string());
 
         let pino = fixture
             .ctx
@@ -344,7 +348,7 @@ fn probe_actions(
             .fee_payer(&*fixture.fee_payer)
             .signers(&[&*fixture.fee_payer, &*fixture.publisher])
             .send()
-            .ok();
+            .map_err(|e| e.to_string());
 
         out.push((
             format!(
@@ -360,22 +364,28 @@ fn probe_actions(
 }
 
 /// Execution parity: the two sides must make the same accept/reject
-/// decision **and**, when they reject, reject for the same reason.
+/// decision **and**, when they reject, reject for the same reason —
+/// custom code against custom code, builtin variant against builtin
+/// variant.
 ///
-/// The error code is checked because it is part of the program's
-/// observable ABI — a caller branching on `6001` behaves differently
-/// against a rewrite that returns `6002`, even though a boolean
-/// accept/reject comparison calls that agreement.
-fn check_execution_parity(fixture: &mut OracleDiffFixture) {
-    for (label, anchor, pino) in probe_actions(fixture) {
-        let (Some(anchor), Some(pino)) = (anchor, pino) else {
-            // Harness-level send failure on at least one side — nothing
-            // can be concluded about program behaviour. Fail-soft, in
-            // line with `read_pair_bodies`.
+/// Comparing only the custom code is not enough: every builtin
+/// `ProgramError` reports no code, so two sides rejecting with
+/// different builtins would compare equal. That is the likeliest place
+/// for a divergence to hide here, because the Pinocchio side returns
+/// builtins exclusively.
+///
+/// Takes an already-executed probe set so parity and CU can be
+/// evaluated from one run of the actions rather than re-sending them.
+fn check_execution_parity(probes: &[Probe]) {
+    for (label, anchor, pino) in probes {
+        // A probe that never reached the program produces no evidence.
+        // It is reported by `check_probe_evidence`, not silently reread
+        // as agreement here.
+        let (Ok(anchor), Ok(pino)) = (anchor, pino) else {
             continue;
         };
 
-        if let Some(div) = ParityDivergence::check_outcomes(&label, &anchor, &pino) {
+        if let Some(div) = ParityDivergence::check_outcomes(label, anchor, pino) {
             fuzz_assert!(false, "{}", div);
         }
     }
@@ -394,14 +404,29 @@ fn check_execution_parity(fixture: &mut OracleDiffFixture) {
 /// pinocchio-bench leaderboard: CU is consensus-relevant, so a slower
 /// rewrite writing byte-identical state is not equivalent — it can
 /// exceed the transaction limit and fail where the original succeeded.
-fn check_cu_no_regression(fixture: &mut OracleDiffFixture) {
-    for (label, anchor, pino) in probe_actions(fixture) {
-        let (Some(anchor), Some(pino)) = (anchor, pino) else {
+fn check_cu_no_regression(probes: &[Probe]) {
+    for (label, anchor, pino) in probes {
+        let (Ok(anchor), Ok(pino)) = (anchor, pino) else {
             continue;
         };
 
-        if let Some(cmp) = CuComparison::regression(&label, &anchor, &pino) {
+        if let Some(cmp) = CuComparison::regression(label, anchor, pino) {
             fuzz_assert!(false, "{}", cmp);
+        }
+    }
+}
+
+/// Every probe must actually have reached the program on both sides.
+///
+/// `send()` returning `Err` is a harness-level failure, not a statement
+/// about program behaviour — but it must be reported rather than
+/// skipped. A harness whose sends are all failing would otherwise run
+/// to completion and declare itself clean: nothing diverges when
+/// nothing executes.
+fn check_probe_evidence(probes: &[Probe]) {
+    for (label, anchor, pino) in probes {
+        if let Some(f) = SendFailure::check(label, anchor, pino) {
+            fuzz_assert!(false, "{}", f);
         }
     }
 }
@@ -507,12 +532,16 @@ fn invariant_oracle_diff_smoke(fixture: &mut OracleDiffFixture) {
     }
     check_ema_match(fixture);
     check_publish_count(fixture);
-    check_execution_parity(fixture);
+    let probes = probe_actions(fixture);
+    check_probe_evidence(&probes);
+    check_execution_parity(&probes);
 }
 
 #[invariant_test]
 fn invariant_oracle_diff_execution_parity_only(fixture: &mut OracleDiffFixture) {
-    check_execution_parity(fixture);
+    let probes = probe_actions(fixture);
+    check_probe_evidence(&probes);
+    check_execution_parity(&probes);
 }
 
 #[invariant_test]
@@ -534,5 +563,7 @@ fn invariant_oracle_diff_publish_count_only(fixture: &mut OracleDiffFixture) {
 
 #[invariant_test]
 fn invariant_oracle_diff_cu_no_regression_only(fixture: &mut OracleDiffFixture) {
-    check_cu_no_regression(fixture);
+    let probes = probe_actions(fixture);
+    check_probe_evidence(&probes);
+    check_cu_no_regression(&probes);
 }

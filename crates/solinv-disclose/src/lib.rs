@@ -10,7 +10,7 @@
 //!
 //! ```
 //! use solinv_disclose::{
-//!     Divergence, DivergenceReport, ProgramRef, ReproBundle, Sides,
+//!     ActionRef, Divergence, DivergenceReport, ProgramRef, ReproBundle, Sides,
 //! };
 //!
 //! let report = DivergenceReport::new(
@@ -20,7 +20,7 @@
 //!         .with_program(ProgramRef::from_code("anchor", "Anch111", b"..."))
 //!         .with_program(ProgramRef::from_code("pinocchio", "Pino111", b"..."))
 //!         .with_feature_set("mainnet-beta@epoch-812")
-//!         .with_action("swap(100, 0)"),
+//!         .with_action(ActionRef::described("swap(100, 0)")),
 //! )
 //! .with_divergence(Divergence::Body {
 //!     label: "pool".into(),
@@ -32,7 +32,11 @@
 //!
 //! assert!(report.has_fault());
 //! assert!(report.to_markdown().contains("byte 16 of 6664"));
-//! let _digest = report.digest().unwrap();  // pins the claim
+//! let _digest = report.claim_digest().unwrap();  // pins the finding
+//!
+//! // `from_code` names the binary by digest without carrying it, so the
+//! // report says so rather than inviting a reproduction it can't support.
+//! assert!(!report.bundle.is_self_contained());
 //! ```
 //!
 //! ## Why this is a separate, dependency-light crate
@@ -51,9 +55,10 @@
 //!
 //! ## Status
 //!
-//! Implemented: the divergence record ([`Divergence`]), the
-//! reproduction bundle ([`ReproBundle`]), and the report with its
-//! canonical encoding, digest and Markdown rendering
+//! Implemented: the divergence record ([`Divergence`]), the input
+//! bundle ([`ReproBundle`]) with a three-valued
+//! [`Completeness`][repro::Completeness] judgement, and the report with
+//! its canonical encoding, claim/report digests and Markdown rendering
 //! ([`DivergenceReport`]).
 //!
 //! Not implemented yet: bounty-platform-specific formatters (Immunefi,
@@ -61,11 +66,18 @@
 //! economic impact estimation, and remediation-pattern lookup. The
 //! Markdown rendering is generic — it is not yet shaped to any
 //! platform's submission template.
+//!
+//! No harness populates a self-contained bundle today. Every report
+//! this repository can currently produce is
+//! [`IdentifiedOnly`][repro::Completeness::IdentifiedOnly]: it names
+//! its inputs by digest without carrying them, and renders accordingly.
 
 pub mod divergence;
 pub mod report;
 pub mod repro;
 
 pub use divergence::{Divergence, Sides};
-pub use report::{DivergenceReport, ToolStamp};
-pub use repro::{sha256_hex, AccountRef, ProgramRef, ReproBundle};
+pub use report::{DivergenceReport, ToolStamp, SCHEMA_VERSION};
+pub use repro::{
+    sha256_hex, AccountRef, ActionRef, Artifact, Completeness, ProgramRef, ReproBundle,
+};

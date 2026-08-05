@@ -32,13 +32,14 @@ nothing on-chain can reconstruct it later.
 
 ## The three surfaces
 
-A caller of a Solana program can observe three things. All three are
-part of the contract, so all three belong in the oracle.
+Three of the things a caller can observe, chosen because they are where
+a rewrite is most likely to break. **They are not the whole observable
+surface** — see "What is not compared" below.
 
 | # | Surface | Type | Fault when |
 |---|---|---|---|
 | 1 | Written account state | `BodyDivergence` | any byte of the compared body differs |
-| 2 | Accept/reject **and the reason** | `ParityDivergence` | decisions differ, or both reject with different error codes |
+| 2 | Accept/reject **and the reason** | `ParityDivergence` | decisions differ, or both reject for different reasons |
 | 3 | Compute units consumed | `CuComparison` | the rewrite consumed *more* than the original |
 
 ### 1. Written state
@@ -52,15 +53,24 @@ the first differing byte, with the compared length as context —
 
 ### 2. The decision, and its reason
 
-`ParityDivergence::check` compares booleans only, and therefore **cannot
-see reason divergence**: two sides that both reject look like agreement.
-That is a real hole, because a program's custom error codes are part of
-its observable ABI — a caller branching on `6001` behaves differently
-against a rewrite that returns `6002`, even though both "failed".
+A boolean accept/reject comparison **cannot see reason divergence**:
+two sides that both reject look like agreement. A program's rejection
+reasons are part of its observable ABI — a caller branching on `6001`
+behaves differently against a rewrite that returns `6002`, even though
+both "failed".
 
-`check_outcomes` (or `check_codes`, over plain values) closes it: sides
-agree only when they made the same decision *and* reported the same
-error code. Prefer it wherever the harness has the `TxOutcome`s.
+Comparing the custom error code is necessary but still not sufficient.
+`TxOutcome::error_code()` returns `None` for *every* builtin
+`ProgramError`, so two sides rejecting with `InvalidArgument` and
+`AccountDataTooSmall` would both report "no code" and compare equal.
+That is the likeliest place for a divergence to hide in this repository,
+because the Pinocchio bench rewrites return builtins exclusively.
+
+`SideResult` therefore carries a normalized reason — `custom:6001`,
+`builtin:InvalidArgument` — and `ParityDivergence::check_outcomes`
+compares that. The reason is a **comparison token**, meaningful only
+against another token from the same build; it is not a stable wire
+identifier.
 
 ### 3. Cost
 
@@ -70,17 +80,46 @@ the dearer one can exceed the transaction limit and fail in production
 where the other succeeds. A harness that checks only surface (1) will
 pass a rewrite that got slower.
 
-`CuComparison` is therefore **recorded on every compared action, not
-only on disagreement**. For a rewrite the two sides are *supposed* to
+`CuComparison::from_outcomes` therefore records the figure on every
+compared action, not only on disagreement. For a rewrite the two sides are *supposed* to
 disagree, in one direction — that difference is the measurement the
 whole exercise exists to produce, and it is what
 [pinocchio-bench](https://github.com/psyto/pinocchio-bench) publishes.
 It becomes a fault in exactly one case, a regression, for which
-`CuComparison::regression` is the gating constructor.
+`CuComparison::regression` is the gating constructor. Note what the
+harnesses actually do: they call `regression` only, which **discards
+the measurement on every non-regressing action**. What they retain is
+the verdict, not a per-action CU series.
 
 `None` on a side means that side never reached a successful execution,
-so the runtime reported no CU figure. That asymmetry is flagged by the
-accompanying `ParityDivergence`, not here.
+so the runtime reported no CU figure.
+
+## What is not compared
+
+Naming the gaps, because a differential that quietly under-checks is
+worse than one that admits its scope:
+
+- **Account metadata** — lamports, owner, and the executable flag are
+  all caller-observable and none are compared. Only declared body byte
+  ranges are.
+- **Undeclared accounts** — an account written by one side but absent
+  from `diff_pairs()` is invisible.
+- **Return data and logs** — both observable, neither compared.
+- **Rejection reasons beyond the first differing probe** — a harness
+  stops at the first violation.
+
+A run that passes all three surfaces has narrowed where a divergence
+could be hiding. It has not proved equivalence.
+
+## Probes that produced no evidence
+
+`send()` returning `Err` is a harness-level failure — bad signer set,
+unloaded account, malformed instruction — not a statement about program
+behaviour. It is nonetheless reported, by `SendFailure`, rather than
+skipped: a harness whose sends are all failing would otherwise run to
+completion and declare itself clean. **Nothing diverges when nothing
+executes**, which makes an unreported send failure the most dangerous
+possible result — a broken harness that looks like a passing one.
 
 ## From finding to report
 
@@ -112,33 +151,56 @@ same place, instead of taking the finder's word.
 
 | Field | Why it is required |
 |---|---|
-| `programs[].code_sha256` | Program IDs are upgradeable — an ID names a slot in time, not a binary. The hash pins the bytes that ran. |
-| `accounts[].pre_state_sha256` | Same reason, for state. |
+| `programs[].code` | Program IDs are upgradeable — an ID names a slot in time, not a binary. The artifact pins the bytes that ran. |
+| `accounts[].pre_state` + owner/lamports | Same reason, for state. Account metadata is part of the state, not decoration. |
 | `feature_set` | Solana runtime semantics are gated by flags that activate at epoch boundaries. Same instruction + same accounts can be two different executions on two different days. Without this the comparison target is undefined. |
 | `actions` | The minimal instruction sequence reaching the divergence. |
 | `slot` | Which mainnet snapshot the accounts were cloned from, when the fixture came from a real pool. |
 
-`is_reproducible()` / `missing()` make an incomplete bundle say so.
-A report that can't be reproduced renders with **`Reproducible: NO`**
-and the list of gaps at the top, rather than presenting itself as
-checkable.
+### A digest identifies; it does not deliver
+
+The distinction that a boolean `is_reproducible()` got wrong: a SHA-256
+lets a reader confirm that bytes they already hold are the right ones.
+It cannot hand them those bytes. A bundle carrying only digests
+describes what must be supplied out of band — it is not, by itself,
+enough to re-execute anything, and must not announce otherwise.
+
+`ReproBundle::completeness()` is therefore three-valued:
+
+| value | meaning |
+|---|---|
+| `SelfContained` | program bytes, account pre-state with metadata, and encoded instructions all travel with the report. Re-execute from this alone. |
+| `IdentifiedOnly` | everything is *named* — digests, program IDs, labels — but the bytes do not travel. Obtain them independently, verify against the hashes, then re-run. |
+| `Incomplete` | something required to define the comparison at all is absent. |
+
+**Every report this repository can currently produce is
+`IdentifiedOnly`.** No harness populates inline artifacts or encoded
+instruction data yet. The rendered header says so.
 
 Hashing is part of the spec, not an implementation detail: `sha256_hex`
 is exported so a third party recomputing digests hashes the same way
 rather than guessing the encoding.
 
-### What the digest does and does not do
+### What the digests do and do not do
 
-`DivergenceReport::digest()` is SHA-256 over a canonical encoding
-(compact JSON, struct declaration order, no maps so no ordering
-ambiguity). It pins **the claim** — inputs, sides, and asserted
-divergences — so a finding can be quoted, referenced across a bounty
-thread, or later signed without ambiguity about which version is meant.
+Two are exposed. `claim_digest()` covers the semantic finding — schema
+version, subject, sides, inputs, divergences — and **excludes
+provenance**, so two runs that found the same thing agree even if one
+was produced by a newer build. `digest()` covers the whole report,
+tool stamp included, and will change on a crate release even when the
+finding did not.
 
-It does **not** attest that the claim is true. No hash can. Confirming a
+Both are SHA-256 over compact JSON with fields in struct declaration
+order, no maps, so no key-ordering ambiguity. The honest scope: **that
+guarantee holds for one schema version.** Adding a field, reordering
+declarations, or a change in `serde_json` formatting all change the
+bytes. `SCHEMA_VERSION` is carried inside the hashed payload so a
+mismatch is diagnosable — it is not a stable cross-version wire format.
+
+Neither attests that the claim is true. No hash can. Confirming a
 finding means re-running the bundle and arriving at the same
-divergence. That division is deliberate: the digest makes the claim
-immutable, re-execution makes it true or false.
+divergence: the digest makes the claim immutable, re-execution makes it
+true or false.
 
 ### Rendered output
 

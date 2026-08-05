@@ -118,10 +118,13 @@ written into Order slots matches across sides), and after every
 fuzz-derived `place_order(price, qty)` asserts:
 
 1. **Execution parity** — both transactions succeed or both fail, and
-   when both fail they fail with the same custom error code. A
-   divergence where one side accepts what the other rejects is a bug;
-   so is one where both reject for different reasons, since error codes
-   are part of the program's observable ABI.
+   when both fail they fail for the same reason: custom code against
+   custom code, builtin `ProgramError` variant against builtin variant.
+   A divergence where one side accepts what the other rejects is a bug;
+   so is one where both reject for different reasons, since rejection
+   reasons are part of the program's observable ABI. Comparing custom
+   codes alone would miss the builtin-vs-builtin case, which is the
+   likeliest one here — the Pinocchio side returns builtins exclusively.
 2. **Market body equivalence** — the 16-byte Market body
    (`sequence + side + pad`) is byte-identical, stripping Anchor's
    8-byte account discriminator from the Anchor side.
@@ -200,7 +203,7 @@ mints (mint_a, mint_b) and user keypair across sides so symmetric
 SPL Token CPIs produce byte-comparable post-state.
 
 Checks:
-1. Execution parity (same decision, same error code on rejection)
+1. Execution parity (same decision, same rejection reason)
 2. Pool body equivalence (24 bytes after stripping Anchor's discriminator)
 3. Token-account equivalence — all 4 pairs byte-identical
 4. Constant-product `k = reserve_in × reserve_out` non-decreasing per side
@@ -219,7 +222,7 @@ obligation + 2 reserves + 2 oracles. No CPI in W9, so framework
 overhead and math are the only cost — the cleanest differential target.
 
 Checks:
-1. Execution parity (same decision, same error code on rejection)
+1. Execution parity (same decision, same rejection reason)
 2. Obligation body equivalence
 3. Reserve body equivalence (both reserve_a and reserve_b)
 4. Oracle body equivalence (both oracle_a and oracle_b)
@@ -246,7 +249,7 @@ The math under test is NAV-weighted share computation:
 special case).
 
 Checks:
-1. Execution parity (same decision, same error code on rejection)
+1. Execution parity (same decision, same rejection reason)
 2. Body equivalence across all 4 pairs (via `check_all_pairs(fixture)`)
 3. NAV cross-product equality:
    `anchor.total_assets × pino.total_shares == pino.total_assets × anchor.total_shares`
@@ -295,7 +298,7 @@ struct with α = 1/8 smoothing.
 
 Checks:
 1. Execution parity (deterministic probes including stale-slot rejection;
-   same decision, same error code)
+   same decision, same rejection reason)
 2. Body equivalence (single pair via `check_all_pairs(fixture)`)
 3. EMA field equivalence (surface-specific math invariant — pinpoints
    smoothing-formula bugs)
@@ -325,7 +328,7 @@ Phase 0's final harness. Largest combined surface in the bench: 5 pairs
 margin check + fee compute + oracle propagation + 1 SPL CPI.
 
 Checks:
-1. Execution parity (same decision, same error code on rejection)
+1. Execution parity (same decision, same rejection reason)
 2. Body equivalence across all 5 pairs (via `check_all_pairs(fixture)`)
 3. Open-interest match: both sides' `perp_market.open_interest` agree,
    and each equals that side's `user.position_size` (single-user fixture)
@@ -425,6 +428,10 @@ W11 publish(price=1e8, conf=50000, slot=200): anchor=rejected(6000) pino=rejecte
 W12 open_position(size=1, slot=1):         anchor=rejected(6000) pino=rejected
 ```
 
+All figures below are from the 2026-08-05 campaigns, which compared
+custom error codes only. The builtin-reason comparison landed after
+them; rows marked clean have not been re-run against it.
+
 | harness | verdict | violations / executions |
 |---|---|---|
 | `matching-diff` (W4) | DIVERGED | 8,270 / 12,000 |
@@ -459,16 +466,18 @@ rewrite, and code matching on `6001` never matches at all.
 
 **The two non-diverging results mean different things.**
 
-- **W9 `refresh-diff` is genuinely clean**: `anchor-w9-refresh` declares
-  no `#[error_code]` at all, so there is no error-code surface for the
-  two sides to disagree on.
+- **W9 `refresh-diff` shows no observed custom-code divergence.**
+  `anchor-w9-refresh` declares no `#[error_code]` at all, so there is no
+  *custom-code* surface for the two sides to disagree on. That is not
+  the same as clean: both sides can still reject with different builtin
+  `ProgramError` variants, and this campaign predates the builtin-reason
+  comparison. Untested, not verified.
 - **W10 `vault-diff` is *not* evidence of agreement.** Its campaign ran
   at a 100% success rate (112,812 / 112,812 actions accepted), meaning
   no probe ever reached a rejection — yet `anchor-w10-vault` does
   declare `VaultErr`. The divergence is latent and simply unreached by
   the current probe set. Treat this row as a probe-coverage gap, not a
-  pass. Same caveat applies to the W9 row's *rejection* coverage, though
-  there the conclusion happens to hold for a different reason.
+  pass.
 
 **Status.** Recorded, not fixed. Whether the Pinocchio programs should
 reproduce Anchor's error numbering is a design question for

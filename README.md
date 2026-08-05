@@ -48,10 +48,11 @@ declaration as a library:
 6. **Disclosure templates** — Immunefi / Sherlock / direct-to-protocol
    markdown templates with field-by-field guidance + a worked example
    from solinv's own planted-bug detection.
-7. **Differential equivalence + reproducible reports** — a three-surface
+7. **Differential equivalence + checkable findings** — a three-surface
    oracle for "do these two programs behave the same?" (written state,
    accept/reject *and reason*, compute units), and a finding format that
-   carries the inputs needed to re-execute it. See
+   identifies every input by digest and states plainly whether it
+   carries them. See
    [differential equivalence](#differential-equivalence--do-two-programs-behave-the-same)
    below.
 
@@ -111,30 +112,47 @@ there is nothing to compare except the other run, and the definition of
 chain hands you. Get it wrong and you don't get an error, you get
 silent false confidence.
 
-Solinv spells the oracle out as three surfaces, all of them observable
-by a caller and therefore all of them load-bearing:
+Solinv spells the oracle out as three surfaces — chosen because they
+are where a rewrite is most likely to break, **not** because they
+exhaust what a caller can observe:
 
 | Surface | Type | Fault when |
 |---|---|---|
 | Written account state | `BodyDivergence` | any byte of the compared body differs |
-| Accept/reject **and the reason** | `ParityDivergence` | decisions differ, or both reject with *different error codes* |
+| Accept/reject **and the reason** | `ParityDivergence` | decisions differ, or both reject *for different reasons* |
 | Compute units consumed | `CuComparison` | the rewrite consumed **more** than the original |
 
 Two of these are easy to omit and expensive to omit:
 
-- **Error codes are ABI.** A caller branching on `6001` behaves
+- **Rejection reasons are ABI.** A caller branching on `6001` behaves
   differently against a rewrite returning `6002` — yet a boolean
   accept/reject check calls that agreement, because both sides
-  "failed". `ParityDivergence::check_outcomes` compares the reason too.
+  "failed". Comparing the custom code alone is still not enough: every
+  builtin `ProgramError` reports *no* code, so two different builtins
+  compare equal. `ParityDivergence::check_outcomes` compares a
+  normalized reason (`custom:6001`, `builtin:InvalidArgument`).
 - **CU is consensus-relevant.** Two runs writing byte-identical state at
   different CU are not equivalent: the dearer one can exceed the
-  transaction limit and fail where the other succeeds. `CuComparison` is
-  recorded on every action rather than only on disagreement — for a
-  rewrite the CU difference is the measurement the work exists to
-  produce, and only a *regression* is a fault.
+  transaction limit and fail where the other succeeds. Only a
+  *regression* is a fault — for a rewrite the two sides are supposed to
+  disagree, in one direction. (`CuComparison::from_outcomes` can record
+  the figure per action; the harnesses call `regression` only, so what
+  they retain is the verdict, not a CU series.)
 
 A harness that checks written state alone will pass a rewrite that
-changed its error codes or got slower.
+changed its rejection reasons or got slower.
+
+What these three do **not** cover, stated plainly because a differential
+that quietly under-checks is worse than one that admits its scope:
+account lamports / owner / executable flags, accounts written but not
+declared as a pair, instruction return data, and emitted logs. Passing
+all three narrows where a divergence can hide; it does not prove
+equivalence.
+
+A fourth condition is a precondition rather than a surface: a probe
+whose `send()` failed never reached the program, and is reported as
+such. Nothing diverges when nothing executes, so a silently skipped
+send failure turns a broken harness into a clean run.
 
 ### Findings that someone else can check
 
@@ -146,8 +164,10 @@ packages it with the inputs needed to re-execute it:
 
 - **Sides**: `anchor` (left) vs `pinocchio` (right)
 - **Verdict**: DIVERGED
-- **Report digest**: `9fbd48ca…`
-- **Reproducible**: yes — re-run the bundle below and compare
+- **Claim digest**: `9fbd48ca…` (schema v1)
+- **Reproducible**: NOT FROM THIS REPORT ALONE — the inputs are
+  identified by digest, not carried. Obtain them independently, verify
+  them against the hashes below, then re-execute.
 
 ## Where they parted
 
@@ -155,20 +175,28 @@ packages it with the inputs needed to re-execute it:
 - **[fault]** `swap(100, 0)` outcome diverged: left rejected (6001), right rejected (6002)
 ```
 
-…followed by SHA-256 of each side's `.so`, of every account's
-pre-state, the activated feature set, and the action sequence. Program
-IDs are upgradeable, so an ID names a slot in time rather than a
-binary; the feature set matters because Solana's runtime semantics are
-gated by flags that activate at epoch boundaries, which makes "same
-instruction, same accounts" two different executions on two different
-days. An incomplete bundle renders as **`Reproducible: NO`** with the
-list of gaps, rather than presenting itself as checkable.
+…followed by each side's `.so`, every account's pre-state and metadata,
+the activated feature set, and the action sequence. Program IDs are
+upgradeable, so an ID names a slot in time rather than a binary; the
+feature set matters because Solana's runtime semantics are gated by
+flags that activate at epoch boundaries, which makes "same instruction,
+same accounts" two different executions on two different days.
 
-The report digest pins **the claim**, so a finding can be quoted or
-referenced without ambiguity about which version is meant. It does not
-attest that the claim is *true* — no hash can. Confirming a finding
-means re-running the bundle. The digest makes the claim immutable;
-re-execution makes it true or false.
+**A digest identifies; it does not deliver.** A hash lets a reader
+confirm that bytes they already hold are the right ones — it cannot
+hand them those bytes. So the bundle is graded three ways:
+`SelfContained` (inputs travel with the report), `IdentifiedOnly`
+(inputs are named by digest and must be obtained elsewhere), and
+`Incomplete` (the comparison is not even defined). Every report this
+repository can produce today is `IdentifiedOnly`, and says so in its
+header rather than inviting a reproduction it cannot support.
+
+The claim digest pins **the finding** — excluding tool provenance, so a
+crate release does not change it — and is bound to a schema version
+carried inside the hashed payload. It does not attest that the claim is
+*true*; no hash can. Confirming a finding means re-running the inputs.
+The digest makes the claim immutable; re-execution makes it true or
+false.
 
 `solinv-disclose` depends on serde and sha2 and nothing else: finding a
 divergence needs Crucible, LiteSVM and the Solana crates, but *checking

@@ -20,39 +20,51 @@
 //! On Ethereum a differential can diff against a commitment — the state
 //! root, the receipts trie. Solana publishes no such thing, so there is
 //! nothing to compare against except the other run, and the oracle has
-//! to be spelled out by hand. Three surfaces, all of them observable by
-//! a caller and therefore all of them load-bearing:
+//! to be spelled out by hand.
+//!
+//! Three surfaces are covered here:
 //!
 //! 1. **Written state** — [`check_pair_equivalent`]. Byte-identical
-//!    account bodies.
+//!    account *bodies*, over the pairs a fixture declares.
 //! 2. **The decision, and its reason** — [`ParityDivergence`]. Not just
-//!    accepted vs rejected: two sides that both reject with different
-//!    custom error codes have diverged in a way callers can branch on.
+//!    accepted vs rejected, and not just the custom error code: every
+//!    builtin `ProgramError` reports no code, so the normalized reason
+//!    is what actually distinguishes two rejections. See [`SideResult`].
 //! 3. **Cost** — [`CuComparison`]. CU is consensus-relevant, so two
 //!    runs writing identical bytes at different CU are not equivalent;
-//!    the dearer one can hit the transaction limit and fail. For a
-//!    rewrite this is also the measurement the work exists to produce,
-//!    so it is recorded rather than merely asserted.
+//!    the dearer one can hit the transaction limit and fail.
 //!
-//! A harness that checks only (1) will pass a rewrite that changed the
-//! error code or got slower.
+//! **These three are not the whole observable surface.** A caller can
+//! also see account lamports, owner and executable flags, instruction
+//! return data, emitted logs, and any account written by one side but
+//! not declared as a pair. None of those are compared here. The three
+//! covered surfaces are the ones a rewrite is most likely to break,
+//! not an exhaustive definition of equivalence — a harness passing all
+//! three has narrowed the space of possible divergence, not closed it.
+//!
+//! A fourth condition is not a surface but a precondition:
+//! [`SendFailure`] reports probes that never reached the program on one
+//! or both sides. Nothing diverges when nothing executes, so an
+//! unreported send failure turns a broken harness into a clean run.
 //!
 //! ## What this module provides
 //!
 //! - [`DiffAccountPair`] — declarative pair description (which two
 //!   pubkeys, what body size, what per-side offset to strip).
-//! - [`BodyDivergence`] / [`ParityDivergence`] / [`CuComparison`] —
-//!   structured findings the harness passes into `fuzz_assert!` after a
-//!   check fires.
+//! - [`SideResult`] — one side's observable result: accepted, or
+//!   rejected with a normalized reason.
+//! - [`BodyDivergence`] / [`ParityDivergence`] / [`CuComparison`] /
+//!   [`SendFailure`] — structured findings the harness passes into
+//!   `fuzz_assert!` after a check fires.
 //! - [`check_pair_equivalent`] / [`ParityDivergence::check_outcomes`] /
-//!   [`CuComparison::regression`] — pure functions returning
-//!   `Option<..>` for the harness to decide whether to escalate to a
-//!   fuzz violation.
+//!   [`CuComparison::regression`] / [`SendFailure::check`] — pure
+//!   functions returning `Option<..>` for the harness to decide whether
+//!   to escalate to a fuzz violation.
 //! - [`DifferentialFixture`] trait + [`check_all_pairs`] — optional
 //!   sugar for fixtures that want to declare their pair set once and
 //!   walk it from a single helper call.
 //! - `From` conversions into [`solinv_disclose::Divergence`], so a
-//!   finding can leave the fuzz worker as a reproducible report rather
+//!   finding can leave the fuzz worker as a structured record rather
 //!   than a log line. See the bridge section at the bottom of the file.
 //!
 //! ## Why a `fuzz_assert!`-free API
@@ -160,110 +172,213 @@ impl std::fmt::Display for BodyDivergence {
     }
 }
 
-/// An execution-result mismatch between Anchor and Pinocchio sides
-/// on a single instruction execution.
+/// One side's execution result, reduced to the parts a caller can
+/// observe: whether it was accepted, and if not, *why*.
 ///
-/// Carries the custom program error code of each side, not just
-/// accepted/rejected. A program's error codes are part of its
-/// observable ABI: a caller branching on `6001` behaves differently
-/// against a rewrite that returns `6002`, even though both sides
-/// "failed". See [`ParityDivergence::check_outcomes`].
-#[derive(Clone, Debug)]
-pub struct ParityDivergence {
-    pub label: String,
-    pub anchor_ok: bool,
-    pub pino_ok: bool,
-    /// Custom error code the Anchor side rejected with, when it
-    /// rejected and the runtime reported one.
-    pub anchor_error: Option<u32>,
-    pub pino_error: Option<u32>,
+/// The `reason` is the load-bearing field. Comparing only
+/// [`TxOutcome::error_code`] is not enough, because that returns `None`
+/// for every builtin `ProgramError` — so two sides rejecting with
+/// `InvalidArgument` and `AccountDataTooSmall` would both report "no
+/// code" and compare equal. That matters concretely here: the Pinocchio
+/// bench rewrites return *only* builtins, so a code-only comparison is
+/// blind to divergence anywhere within the side it is most likely to
+/// occur.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SideResult {
+    pub ok: bool,
+    /// Custom program error code, when the runtime reported one.
+    pub error_code: Option<u32>,
+    /// Normalized rejection reason — `None` when accepted.
+    ///
+    /// This is a **comparison token**, not a stable wire identifier: it
+    /// is only meaningful when compared against another token produced
+    /// by the same build, which is exactly how it is used. Do not
+    /// persist it and expect it to match a future toolchain.
+    pub reason: Option<String>,
 }
 
-impl ParityDivergence {
-    /// Coarse accept/reject check.
-    ///
-    /// Returns `None` when the two sides agreed and `Some(div)` when
-    /// they disagreed.
-    ///
-    /// **This check cannot see reason divergence.** Two sides that both
-    /// reject, for different reasons, agree as far as this function is
-    /// concerned. Prefer [`Self::check_outcomes`] when the harness has
-    /// the [`TxOutcome`]s rather than bare booleans.
-    pub fn check(label: &str, anchor_ok: bool, pino_ok: bool) -> Option<Self> {
-        if anchor_ok == pino_ok {
-            None
-        } else {
-            Some(ParityDivergence {
-                label: label.to_string(),
-                anchor_ok,
-                pino_ok,
-                anchor_error: None,
-                pino_error: None,
-            })
+impl SideResult {
+    /// Reduce a [`TxOutcome`] to the observable result.
+    pub fn from_outcome(outcome: &TxOutcome) -> Self {
+        match outcome {
+            TxOutcome::Success { .. } => Self {
+                ok: true,
+                error_code: None,
+                reason: None,
+            },
+            TxOutcome::ProgramError {
+                error, error_code, ..
+            } => Self {
+                ok: false,
+                error_code: *error_code,
+                reason: Some(match error_code {
+                    // A custom code fully identifies the rejection.
+                    Some(code) => format!("custom:{code}"),
+                    // No custom code — the builtin variant IS the
+                    // reason, and must be compared as such.
+                    None => format!("builtin:{error:?}"),
+                }),
+            },
         }
     }
 
-    /// Full outcome check: flags a divergence when the two sides
-    /// disagreed on acceptance **or** rejected for different reasons.
+    /// Accepted.
+    pub fn accepted() -> Self {
+        Self {
+            ok: true,
+            error_code: None,
+            reason: None,
+        }
+    }
+
+    /// Rejected with an Anchor-style custom error code.
+    pub fn custom(code: u32) -> Self {
+        Self {
+            ok: false,
+            error_code: Some(code),
+            reason: Some(format!("custom:{code}")),
+        }
+    }
+
+    /// Rejected with a builtin `ProgramError` variant, named by `tag`.
+    pub fn builtin(tag: impl std::fmt::Display) -> Self {
+        Self {
+            ok: false,
+            error_code: None,
+            reason: Some(format!("builtin:{tag}")),
+        }
+    }
+
+    fn render(&self) -> String {
+        match (&self.ok, &self.reason) {
+            (true, _) => "accepted".to_string(),
+            (false, Some(r)) => format!("rejected({r})"),
+            (false, None) => "rejected".to_string(),
+        }
+    }
+}
+
+/// An execution-result mismatch between Anchor and Pinocchio sides
+/// on a single instruction execution.
+///
+/// Sides agree only when they made the same accept/reject decision
+/// **and**, on rejection, rejected for the same reason — custom code
+/// against custom code, builtin variant against builtin variant. A
+/// program's rejection reasons are part of its observable ABI: a caller
+/// branching on `6001` behaves differently against a rewrite that
+/// returns `6002`, or that returns a builtin instead.
+#[derive(Clone, Debug)]
+pub struct ParityDivergence {
+    pub label: String,
+    pub anchor: SideResult,
+    pub pino: SideResult,
+}
+
+impl ParityDivergence {
+    /// Compare two reduced results.
+    ///
+    /// ```
+    /// use solinv_fuzz::{ParityDivergence, SideResult};
+    ///
+    /// // Both reject, both without a custom code — but for different
+    /// // builtin reasons. A code-only comparison calls this agreement.
+    /// let d = ParityDivergence::check(
+    ///     "swap",
+    ///     &SideResult::builtin("InvalidArgument"),
+    ///     &SideResult::builtin("AccountDataTooSmall"),
+    /// );
+    /// assert!(d.is_some());
+    /// ```
+    pub fn check(label: &str, anchor: &SideResult, pino: &SideResult) -> Option<Self> {
+        if anchor == pino {
+            return None;
+        }
+        Some(ParityDivergence {
+            label: label.to_string(),
+            anchor: anchor.clone(),
+            pino: pino.clone(),
+        })
+    }
+
+    /// Convenience over two [`TxOutcome`]s.
     ///
     /// ```ignore
-    /// let a = ctx.send_anchor(ix.clone());
-    /// let p = ctx.send_pino(ix);
     /// if let Some(d) = ParityDivergence::check_outcomes("swap", &a, &p) {
     ///     fuzz_assert!(false, "{}", d);
     /// }
     /// ```
     pub fn check_outcomes(label: &str, anchor: &TxOutcome, pino: &TxOutcome) -> Option<Self> {
-        Self::check_codes(
+        Self::check(
             label,
-            anchor.is_success(),
-            anchor.error_code(),
-            pino.is_success(),
-            pino.error_code(),
+            &SideResult::from_outcome(anchor),
+            &SideResult::from_outcome(pino),
         )
     }
+}
 
-    /// The decision logic behind [`Self::check_outcomes`], over plain
-    /// values rather than [`TxOutcome`]s.
-    ///
-    /// Sides agree only when they made the same accept/reject decision
-    /// *and* reported the same error code. Split out so the rule is
-    /// testable without standing up two full transaction outcomes.
-    pub fn check_codes(
+impl std::fmt::Display for ParityDivergence {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "execution-parity divergence on {}: anchor={} pino={}",
+            self.label,
+            self.anchor.render(),
+            self.pino.render(),
+        )
+    }
+}
+
+/// A transaction that never reached the program on at least one side.
+///
+/// `send()` returning `Err` is a harness-level failure — bad signer
+/// set, unloaded account, malformed instruction — not a statement about
+/// program behaviour. It must still be **reported**: treating it as a
+/// skipped probe lets a harness whose sends are all failing run to
+/// completion and declare itself clean, which is the worst possible
+/// outcome for a differential. Nothing diverges when nothing executes.
+#[derive(Clone, Debug)]
+pub struct SendFailure {
+    pub label: String,
+    /// Error text from the Anchor side, when its `send()` failed.
+    pub anchor_error: Option<String>,
+    pub pino_error: Option<String>,
+}
+
+impl SendFailure {
+    /// `Some` when either side failed to submit. Both-sides failure is
+    /// included deliberately: a symmetric failure is still a probe that
+    /// produced no evidence, and a campaign built entirely from them is
+    /// vacuous.
+    pub fn check<T, E: std::fmt::Display>(
         label: &str,
-        anchor_ok: bool,
-        anchor_error: Option<u32>,
-        pino_ok: bool,
-        pino_error: Option<u32>,
+        anchor: &Result<T, E>,
+        pino: &Result<T, E>,
     ) -> Option<Self> {
-        if anchor_ok == pino_ok && anchor_error == pino_error {
+        let anchor_error = anchor.as_ref().err().map(|e| e.to_string());
+        let pino_error = pino.as_ref().err().map(|e| e.to_string());
+        if anchor_error.is_none() && pino_error.is_none() {
             return None;
         }
-        Some(ParityDivergence {
+        Some(SendFailure {
             label: label.to_string(),
-            anchor_ok,
-            pino_ok,
             anchor_error,
             pino_error,
         })
     }
 }
 
-impl std::fmt::Display for ParityDivergence {
+impl std::fmt::Display for SendFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        fn side(ok: bool, err: Option<u32>) -> String {
-            match (ok, err) {
-                (true, _) => "accepted".to_string(),
-                (false, Some(code)) => format!("rejected({code})"),
-                (false, None) => "rejected".to_string(),
-            }
-        }
+        let side = |e: &Option<String>| match e {
+            Some(msg) => format!("send failed ({msg})"),
+            None => "sent".to_string(),
+        };
         write!(
             f,
-            "execution-parity divergence on {}: anchor={} pino={}",
+            "probe produced no evidence on {}: anchor={} pino={}",
             self.label,
-            side(self.anchor_ok, self.anchor_error),
-            side(self.pino_ok, self.pino_error),
+            side(&self.anchor_error),
+            side(&self.pino_error),
         )
     }
 }
@@ -337,6 +452,12 @@ impl CuComparison {
     /// Gating constructor: `Some` only when the rewrite regressed, so a
     /// harness can escalate it the same way it escalates the other
     /// divergence types.
+    ///
+    /// **This discards the measurement on every non-regressing action.**
+    /// The six differential harnesses call only this, so despite the
+    /// type's framing as a recording, what they retain today is the
+    /// regression verdict — not a CU figure per action. Use
+    /// [`Self::from_outcomes`] to keep every measurement.
     pub fn regression(label: &str, anchor: &TxOutcome, pino: &TxOutcome) -> Option<Self> {
         let cmp = Self::from_outcomes(label, anchor, pino);
         cmp.is_regression().then_some(cmp)
@@ -393,10 +514,12 @@ impl From<&ParityDivergence> for solinv_disclose::Divergence {
     fn from(d: &ParityDivergence) -> Self {
         solinv_disclose::Divergence::Parity {
             label: d.label.clone(),
-            left_ok: d.anchor_ok,
-            right_ok: d.pino_ok,
-            left_error: d.anchor_error,
-            right_error: d.pino_error,
+            left_ok: d.anchor.ok,
+            right_ok: d.pino.ok,
+            left_error: d.anchor.error_code,
+            right_error: d.pino.error_code,
+            left_reason: d.anchor.reason.clone(),
+            right_reason: d.pino.reason.clone(),
         }
     }
 }
@@ -478,46 +601,105 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parity_check_agrees() {
-        assert!(ParityDivergence::check("ix", true, true).is_none());
-        assert!(ParityDivergence::check("ix", false, false).is_none());
-    }
-
-    #[test]
-    fn parity_check_disagrees() {
-        let div = ParityDivergence::check("swap(100, 0)", true, false).unwrap();
-        assert_eq!(div.label, "swap(100, 0)");
-        assert!(div.anchor_ok);
-        assert!(!div.pino_ok);
-    }
-
-    #[test]
-    fn both_rejected_with_the_same_code_agree() {
+    fn identical_results_agree() {
         assert!(
-            ParityDivergence::check_codes("swap", false, Some(6001), false, Some(6001)).is_none()
+            ParityDivergence::check("ix", &SideResult::accepted(), &SideResult::accepted())
+                .is_none()
+        );
+        assert!(ParityDivergence::check(
+            "ix",
+            &SideResult::custom(6001),
+            &SideResult::custom(6001)
+        )
+        .is_none());
+        assert!(ParityDivergence::check(
+            "ix",
+            &SideResult::builtin("InvalidArgument"),
+            &SideResult::builtin("InvalidArgument")
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn accept_vs_reject_diverges() {
+        let div = ParityDivergence::check(
+            "swap(100, 0)",
+            &SideResult::accepted(),
+            &SideResult::custom(6001),
+        )
+        .unwrap();
+        assert_eq!(div.label, "swap(100, 0)");
+        assert!(div.anchor.ok);
+        assert!(!div.pino.ok);
+        assert!(div.to_string().contains("anchor=accepted"), "{div}");
+        assert!(
+            div.to_string().contains("pino=rejected(custom:6001)"),
+            "{div}"
         );
     }
 
     #[test]
     fn both_rejected_with_different_codes_diverge() {
-        // The hole the bool-only `check` cannot see: both sides
-        // "failed", so `check` calls it agreement — but a caller
-        // branching on the error code observes two different programs.
-        assert!(ParityDivergence::check("swap", false, false).is_none());
-
-        let div = ParityDivergence::check_codes("swap", false, Some(6001), false, Some(6002))
-            .expect("different rejection reasons must diverge");
-        assert_eq!(div.anchor_error, Some(6001));
-        assert_eq!(div.pino_error, Some(6002));
-        assert!(div.to_string().contains("rejected(6001)"), "{div}");
-        assert!(div.to_string().contains("rejected(6002)"), "{div}");
+        let div =
+            ParityDivergence::check("swap", &SideResult::custom(6001), &SideResult::custom(6002))
+                .expect("different rejection reasons must diverge");
+        assert_eq!(div.anchor.error_code, Some(6001));
+        assert_eq!(div.pino.error_code, Some(6002));
     }
 
     #[test]
-    fn one_side_rejecting_without_a_code_still_diverges() {
-        let div = ParityDivergence::check_codes("swap", true, None, false, None).unwrap();
-        assert!(div.to_string().contains("anchor=accepted"), "{div}");
-        assert!(div.to_string().contains("pino=rejected"), "{div}");
+    fn both_rejected_with_different_builtins_diverge() {
+        // Neither side reports a custom code, so `error_code` is None on
+        // both. Comparing codes alone would call this agreement — and
+        // this is the common case, because the Pinocchio rewrites return
+        // builtins exclusively.
+        let anchor = SideResult::builtin("InvalidArgument");
+        let pino = SideResult::builtin("AccountDataTooSmall");
+        assert_eq!(anchor.error_code, None);
+        assert_eq!(pino.error_code, None);
+
+        let div = ParityDivergence::check("swap", &anchor, &pino)
+            .expect("different builtin reasons must diverge");
+        assert!(div.to_string().contains("builtin:InvalidArgument"), "{div}");
+        assert!(
+            div.to_string().contains("builtin:AccountDataTooSmall"),
+            "{div}"
+        );
+    }
+
+    #[test]
+    fn custom_and_builtin_rejections_diverge() {
+        assert!(ParityDivergence::check(
+            "swap",
+            &SideResult::custom(6001),
+            &SideResult::builtin("InvalidArgument")
+        )
+        .is_some());
+    }
+
+    #[test]
+    fn send_failure_on_either_side_is_reported() {
+        let ok = || Ok::<&str, &str>("outcome");
+        // Modelled with a stand-in payload; only the Err arm is inspected.
+        let one_side = SendFailure::check("swap", &ok(), &Err::<&str, &str>("blockhash expired"))
+            .expect("a one-sided send failure must be reported, not skipped");
+        assert!(one_side.anchor_error.is_none());
+        assert_eq!(one_side.pino_error.as_deref(), Some("blockhash expired"));
+        assert!(
+            one_side.to_string().contains("pino=send failed"),
+            "{one_side}"
+        );
+
+        let err = |m: &'static str| Err::<&str, &str>(m);
+        let both = SendFailure::check("swap", &err("a"), &err("b"))
+            .expect("a symmetric send failure still produced no evidence");
+        assert!(both.anchor_error.is_some() && both.pino_error.is_some());
+    }
+
+    #[test]
+    fn no_send_failure_when_both_sides_submitted() {
+        let ok = || Ok::<&str, &str>("outcome");
+        assert!(SendFailure::check("swap", &ok(), &ok()).is_none());
     }
 
     #[test]
@@ -561,19 +743,29 @@ mod tests {
     }
 
     #[test]
-    fn parity_divergence_carries_its_codes_into_the_finding() {
-        let div =
-            ParityDivergence::check_codes("swap", false, Some(6001), false, Some(6002)).unwrap();
+    fn parity_divergence_carries_its_reasons_into_the_finding() {
+        let div = ParityDivergence::check(
+            "swap",
+            &SideResult::custom(6001),
+            &SideResult::builtin("InvalidArgument"),
+        )
+        .unwrap();
         let finding: solinv_disclose::Divergence = (&div).into();
         assert!(finding.is_fault());
         match finding {
             solinv_disclose::Divergence::Parity {
                 left_error,
                 right_error,
+                left_reason,
+                right_reason,
                 ..
             } => {
                 assert_eq!(left_error, Some(6001));
-                assert_eq!(right_error, Some(6002));
+                // The builtin side has no code — the reason is what
+                // carries the divergence across the boundary.
+                assert_eq!(right_error, None);
+                assert_eq!(left_reason.as_deref(), Some("custom:6001"));
+                assert_eq!(right_reason.as_deref(), Some("builtin:InvalidArgument"));
             }
             other => panic!("expected a parity finding, got {other:?}"),
         }

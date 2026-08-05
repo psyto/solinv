@@ -36,7 +36,7 @@
 //!
 //! // `from_code` names the binary by digest without carrying it, so the
 //! // report says so rather than inviting a reproduction it can't support.
-//! assert!(!report.bundle.is_self_contained());
+//! assert!(!report.bundle().is_self_contained());
 //! ```
 //!
 //! ## Why this is a separate, dependency-light crate
@@ -77,7 +77,7 @@ pub mod report;
 pub mod repro;
 
 pub use divergence::{Divergence, Sides};
-pub use report::{DivergenceReport, ToolStamp, SCHEMA_VERSION};
+pub use report::{Claim, DivergenceReport, ToolStamp, SCHEMA_VERSION};
 pub use repro::{
     sha256_hex, AccountRef, ActionRef, Artifact, Completeness, ProgramRef, ReproBundle,
 };

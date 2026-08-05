@@ -200,6 +200,30 @@ impl Divergence {
         }
     }
 
+    /// Whether this divergence embeds a token whose text depends on
+    /// the build that produced it, rather than on the finding.
+    ///
+    /// True for a rejection reason naming a builtin `ProgramError`,
+    /// which is rendered from its `Debug` form. Comparing two such
+    /// tokens inside one process is exactly what they are for; carrying
+    /// one into a persisted digest imports its instability, which is
+    /// why [`DivergenceReport::claim_digest_is_portable`] exists.
+    ///
+    /// [`DivergenceReport::claim_digest_is_portable`]: crate::DivergenceReport::claim_digest_is_portable
+    pub fn has_build_scoped_token(&self) -> bool {
+        match self {
+            Divergence::Parity {
+                left_reason,
+                right_reason,
+                ..
+            } => [left_reason, right_reason]
+                .into_iter()
+                .flatten()
+                .any(|r| r.starts_with("builtin:")),
+            _ => false,
+        }
+    }
+
     /// One-line summary, used as the headline in rendered reports.
     pub fn headline(&self) -> String {
         match self {

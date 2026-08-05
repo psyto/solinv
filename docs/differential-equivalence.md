@@ -169,9 +169,15 @@ enough to re-execute anything, and must not announce otherwise.
 
 | value | meaning |
 |---|---|
-| `SelfContained` | program bytes, account pre-state with metadata, and encoded instructions all travel with the report. Re-execute from this alone. |
+| `SelfContained` | program bytes, account pre-state with full metadata (owner, lamports, executable), and encoded instructions all travel with the report — and every carried payload matches its own declared length and digest. Re-execute from this alone. |
 | `IdentifiedOnly` | everything is *named* — digests, program IDs, labels — but the bytes do not travel. Obtain them independently, verify against the hashes, then re-run. |
 | `Incomplete` | something required to define the comparison at all is absent. |
+| `Corrupt` | a carried payload contradicts its own declared length or digest. Worse than absent: the bundle asserts it holds the inputs and the assertion is false. Checked first, so no other verdict can mask it. |
+
+`SelfContained` is only granted after the carried bytes are decoded and
+re-hashed. Trusting a payload because the same report also states its
+digest would repeat, one level down, exactly the mistake the
+digest/deliver distinction exists to prevent.
 
 **Every report this repository can currently produce is
 `IdentifiedOnly`.** No harness populates inline artifacts or encoded
@@ -188,7 +194,18 @@ version, subject, sides, inputs, divergences — and **excludes
 provenance**, so two runs that found the same thing agree even if one
 was produced by a newer build. `digest()` covers the whole report,
 tool stamp included, and will change on a crate release even when the
-finding did not.
+finding did not. The claim is a real nested field rather than a
+projection maintained by hand, so the two cannot silently drift apart.
+
+**The cross-release promise has a hole, and the report says where.** A
+rejection reason naming a builtin `ProgramError` is a `Debug` rendering
+— correct for comparing two sides inside one process, which is what it
+is produced for, but its *text* belongs to the toolchain rather than to
+the finding. When such a token is inside the hashed payload, the digest
+inherits that instability. `claim_digest_is_portable()` returns `false`
+in exactly that case, and the rendered header labels the digest
+`build-scoped`. Custom codes (`custom:6001`) are unaffected — a `u32`
+is stable.
 
 Both are SHA-256 over compact JSON with fields in struct declaration
 order, no maps, so no key-ordering ambiguity. The honest scope: **that
@@ -209,18 +226,27 @@ true or false.
 
 - **Sides**: `anchor` (left) vs `pinocchio` (right)
 - **Verdict**: DIVERGED
-- **Report digest**: `9fbd48ca…`
-- **Reproducible**: yes — re-run the bundle below and compare
+- **Claim digest**: `9fbd48ca…` (schema v2, build-scoped — contains a
+  builtin rejection token whose text depends on the producing toolchain)
+- **Reproducible**: NOT FROM THIS REPORT ALONE — the inputs are
+  identified by digest, not carried. Obtain them independently, verify
+  them against the hashes below, then re-execute.
+  - Not carried: anchor program bytes, pinocchio program bytes,
+    `pool` account data, encoding for action `swap(100, 0)`
 
 ## Where they parted
 
 - [recorded] `swap` CU: 12400 → 3900 (-8500)
-- **[fault]** `swap(100, 0)` outcome diverged: left rejected (6001), right rejected (6002)
+- **[fault]** `swap(100, 0)` outcome diverged: left rejected (custom:6001),
+  right rejected (builtin:InvalidArgument)
 ```
 
-…followed by the program / account hash tables and the action sequence.
+…followed by the program and account tables (each row stating whether
+its bytes are carried, and flagging `**CORRUPT**` if a carried payload
+fails its own digest) and the action sequence.
+
 Note the two prefixes: the CU saving is `[recorded]` because it is the
-goal, and only the error-code divergence is a `[fault]`.
+goal, and only the reason divergence is a `[fault]`.
 
 ## Relationship to the disclosure templates
 
@@ -252,16 +278,25 @@ into the platform-specific templates is not done yet — see Status.
 **Not implemented**
 
 - **No harness emits a report yet.** All six differential harnesses
-  under `examples/pinocchio-bench-fuzz/fuzz/` now check all three
-  surfaces (see below), but the `DivergenceReport` conversions are not
-  wired into any of them — a finding still leaves the fuzz worker as a
-  `fuzz_assert!` log line, not as a reproducible bundle.
+  under `examples/pinocchio-bench-fuzz/fuzz/` check all three surfaces
+  and report probes that produced no evidence, but the
+  `DivergenceReport` conversions are not wired into any of them — a
+  finding still leaves the fuzz worker as a `fuzz_assert!` log line,
+  not as a bundle.
+- **Nothing populates a self-contained bundle.** Every report this
+  repository can currently produce is `IdentifiedOnly`. The inline
+  carrier, account metadata and instruction encoding all exist and are
+  tested; no producer fills them in.
 - The `TxOutcome` adapters (`check_outcomes`, `from_outcomes`,
-  `regression`) are untested — constructing a `TxOutcome` needs
+  `regression`) are thin forwarding over tested decision logic and are
+  not themselves covered — constructing a `TxOutcome` needs
   `Signature` / `InnerInstructionsList` / `TransactionReturnData`,
-  which are not `solinv-fuzz` dependencies. The decision logic is
-  factored into `check_codes` and tested there; the adapters are
-  one-line forwarding.
+  which are not `solinv-fuzz` dependencies.
+- `SendFailure` is unit-tested but has never fired in a campaign: no
+  send has failed in any of the six harnesses, so the reporting path is
+  not exercised end to end.
+- Builtin-reason parity has not been run against the W9 and W10
+  harnesses, whose recorded campaigns predate it.
 - No signing. The digest pins the claim; binding it to an identity
   (ed25519 receipt) is not in this crate.
 - Bounty-platform-specific formatters, severity classification,

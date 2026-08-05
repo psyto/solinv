@@ -133,6 +133,75 @@ impl Artifact {
     pub fn is_carried(&self) -> bool {
         matches!(self, Artifact::Inline { .. })
     }
+
+    /// Whether a carried payload actually matches what it claims to be.
+    ///
+    /// A `Digest` artifact is trivially intact — it asserts only a hash,
+    /// and there is nothing carried to contradict it. An `Inline`
+    /// artifact asserts three things at once (bytes, length, hash) and
+    /// they can disagree: hand-assembled, truncated in transit, or
+    /// re-serialized by something that did not recompute the digest.
+    ///
+    /// Checking this is the difference between "the report says it
+    /// carries the program" and "the report carries the program". The
+    /// first is a claim; only the second can be executed.
+    pub fn is_intact(&self) -> bool {
+        match self {
+            Artifact::Digest { .. } => true,
+            Artifact::Inline {
+                sha256,
+                len,
+                base64,
+            } => match b64_decode(base64) {
+                Some(bytes) => bytes.len() == *len && &sha256_hex(&bytes) == sha256,
+                None => false,
+            },
+        }
+    }
+
+    /// The carried bytes, when they are present and self-consistent.
+    pub fn bytes(&self) -> Option<Vec<u8>> {
+        match self {
+            Artifact::Digest { .. } => None,
+            Artifact::Inline { .. } if !self.is_intact() => None,
+            Artifact::Inline { base64, .. } => b64_decode(base64),
+        }
+    }
+}
+
+/// Decode RFC 4648 base64. `None` on any malformed input — wrong
+/// length, stray character, or padding in the wrong place.
+fn b64_decode(text: &str) -> Option<Vec<u8>> {
+    fn val(c: u8) -> Option<u32> {
+        Some(match c {
+            b'A'..=b'Z' => (c - b'A') as u32,
+            b'a'..=b'z' => (c - b'a') as u32 + 26,
+            b'0'..=b'9' => (c - b'0') as u32 + 52,
+            b'+' => 62,
+            b'/' => 63,
+            _ => return None,
+        })
+    }
+    let raw = text.as_bytes();
+    if !raw.len().is_multiple_of(4) {
+        return None;
+    }
+    let mut out = Vec::with_capacity(raw.len() / 4 * 3);
+    for chunk in raw.chunks(4) {
+        let pad = chunk.iter().filter(|&&c| c == b'=').count();
+        // Padding is only legal as the final one or two characters.
+        if pad > 2 || chunk[..4 - pad].contains(&b'=') {
+            return None;
+        }
+        let mut n = 0u32;
+        for &c in &chunk[..4 - pad] {
+            n = (n << 6) | val(c)?;
+        }
+        n <<= 6 * pad;
+        let bytes = [(n >> 16) as u8, (n >> 8) as u8, n as u8];
+        out.extend_from_slice(&bytes[..3 - pad]);
+    }
+    Some(out)
 }
 
 /// Minimal base64 (RFC 4648, padded) so the crate keeps its
@@ -259,8 +328,18 @@ impl AccountRef {
         self
     }
 
+    /// Whether this account is reconstructible from the report alone.
+    ///
+    /// Requires the data *and* the full metadata triple. `executable` is
+    /// included because it is not cosmetic: it decides whether the
+    /// runtime will treat the account as a program, so an account
+    /// restored without it is not the account that ran.
     fn is_complete(&self) -> bool {
-        self.pre_state.is_carried() && self.owner.is_some() && self.lamports.is_some()
+        self.pre_state.is_carried()
+            && self.pre_state.is_intact()
+            && self.owner.is_some()
+            && self.lamports.is_some()
+            && self.executable.is_some()
     }
 }
 
@@ -347,6 +426,10 @@ pub enum Completeness {
     IdentifiedOnly,
     /// Something required to define the comparison at all is absent.
     Incomplete,
+    /// A carried payload does not match its own declared length or
+    /// digest. Worse than absent: the bundle asserts it holds the
+    /// inputs and the assertion is false.
+    Corrupt,
 }
 
 impl ReproBundle {
@@ -387,6 +470,12 @@ impl ReproBundle {
     /// announce itself reproducible while carrying nothing anyone could
     /// execute.
     pub fn completeness(&self) -> Completeness {
+        // Checked before anything else: a bundle that carries bytes
+        // contradicting their own digest is not merely under-filled,
+        // it is lying, and no other verdict should mask that.
+        if !self.integrity_failures().is_empty() {
+            return Completeness::Corrupt;
+        }
         if !self.defines_a_comparison() {
             return Completeness::Incomplete;
         }
@@ -399,6 +488,23 @@ impl ReproBundle {
         } else {
             Completeness::IdentifiedOnly
         }
+    }
+
+    /// Carried payloads whose bytes disagree with their declared length
+    /// or SHA-256. Empty for a bundle that carries nothing.
+    pub fn integrity_failures(&self) -> Vec<String> {
+        let mut bad = Vec::new();
+        for p in &self.programs {
+            if !p.code.is_intact() {
+                bad.push(format!("{} program bytes", p.side));
+            }
+        }
+        for a in &self.accounts {
+            if !a.pre_state.is_intact() {
+                bad.push(format!("`{}` account data", a.label));
+            }
+        }
+        bad
     }
 
     /// Whether the bundle pins the comparison target at all: a binary
@@ -445,8 +551,11 @@ impl ReproBundle {
         for a in &self.accounts {
             if !a.pre_state.is_carried() {
                 gaps.push(format!("`{}` account data", a.label));
-            } else if a.owner.is_none() || a.lamports.is_none() {
-                gaps.push(format!("`{}` account metadata (owner/lamports)", a.label));
+            } else if a.owner.is_none() || a.lamports.is_none() || a.executable.is_none() {
+                gaps.push(format!(
+                    "`{}` account metadata (owner/lamports/executable)",
+                    a.label
+                ));
             }
         }
         for a in &self.actions {
@@ -564,6 +673,91 @@ mod tests {
         assert_eq!(b.completeness(), Completeness::SelfContained);
         assert!(b.is_self_contained());
         assert!(b.not_carried().is_empty(), "{:?}", b.not_carried());
+    }
+
+    #[test]
+    fn base64_round_trips_including_awkward_tails() {
+        for n in 0..40usize {
+            let bytes: Vec<u8> = (0..n).map(|i| (i * 37 % 251) as u8).collect();
+            assert_eq!(b64_decode(&b64(&bytes)).as_deref(), Some(&bytes[..]), "n={n}");
+        }
+    }
+
+    #[test]
+    fn base64_rejects_malformed_input() {
+        assert!(b64_decode("Zg=").is_none(), "length not a multiple of 4");
+        assert!(b64_decode("Z*==").is_none(), "stray character");
+        assert!(b64_decode("Z=g=").is_none(), "padding in the wrong place");
+        assert!(b64_decode("====").is_none(), "all padding");
+    }
+
+    #[test]
+    fn tampered_inline_payload_is_not_intact() {
+        // The regression this guards: a bundle that *says* it carries
+        // the program, whose carried bytes are not the program.
+        let good = Artifact::inline(b"the real program");
+        assert!(good.is_intact());
+        assert_eq!(good.bytes().as_deref(), Some(&b"the real program"[..]));
+
+        let tampered = match good.clone() {
+            Artifact::Inline { sha256, len, .. } => Artifact::Inline {
+                sha256,
+                len,
+                base64: b64(b"something else!!"),
+            },
+            _ => unreachable!(),
+        };
+        assert!(!tampered.is_intact(), "digest mismatch must be caught");
+        assert!(tampered.bytes().is_none(), "corrupt bytes must not be handed out");
+
+        let wrong_len = match good {
+            Artifact::Inline { sha256, base64, .. } => Artifact::Inline {
+                sha256,
+                len: 999,
+                base64,
+            },
+            _ => unreachable!(),
+        };
+        assert!(!wrong_len.is_intact(), "length mismatch must be caught");
+    }
+
+    #[test]
+    fn corrupt_payload_outranks_every_other_verdict() {
+        let mut b = self_contained_bundle();
+        b.programs[0].code = match &b.programs[0].code {
+            Artifact::Inline { sha256, len, .. } => Artifact::Inline {
+                sha256: sha256.clone(),
+                len: *len,
+                base64: b64(b"not the program"),
+            },
+            other => other.clone(),
+        };
+        assert_eq!(b.completeness(), Completeness::Corrupt);
+        assert!(!b.is_self_contained());
+        assert_eq!(b.integrity_failures(), vec!["anchor program bytes"]);
+    }
+
+    #[test]
+    fn account_without_executable_is_not_self_contained() {
+        // `executable` decides whether the runtime treats the account as
+        // a program, so an account restored without it is not the
+        // account that ran.
+        let b = ReproBundle::new()
+            .with_program(ProgramRef::with_code_inline("anchor", "Anch111", b"a"))
+            .with_program(ProgramRef::with_code_inline("pinocchio", "Pino111", b"p"))
+            .with_account({
+                let mut a = AccountRef::with_data_inline("pool", "Pool111", &[0u8; 24]);
+                a.owner = Some("Owner111".into());
+                a.lamports = Some(5_000_000);
+                a
+            })
+            .with_feature_set("mainnet-beta@epoch-812")
+            .with_action(ActionRef::encoded("swap", "Anch111", &[1], vec![]));
+        assert_eq!(b.completeness(), Completeness::IdentifiedOnly);
+        assert!(b
+            .not_carried()
+            .iter()
+            .any(|g| g.contains("owner/lamports/executable")));
     }
 
     #[test]

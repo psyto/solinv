@@ -70,15 +70,20 @@ impl ToolStamp {
 /// Bumped whenever a field is added, removed, or reordered in
 /// [`DivergenceReport`] or anything it contains. Carried inside the
 /// hashed payload so a digest mismatch is diagnosable.
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
-/// One differential comparison run, its findings, and the inputs it
-/// ran on.
+/// The finding itself, with no provenance attached.
+///
+/// A real nested field rather than a projection maintained by hand
+/// against [`DivergenceReport`]. The earlier arrangement — a private
+/// mirror struct listing the same fields in the same order — worked
+/// only for as long as someone remembered to update both, and a
+/// divergence between them would have surfaced as an unexplained digest
+/// mismatch rather than a compile error.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DivergenceReport {
+pub struct Claim {
     /// See [`SCHEMA_VERSION`].
     pub schema: u32,
-    pub tool: ToolStamp,
     /// What the run was called (e.g. the harness or campaign name).
     pub subject: String,
     pub sides: Sides,
@@ -86,48 +91,65 @@ pub struct DivergenceReport {
     pub divergences: Vec<Divergence>,
 }
 
-/// The provenance-free view of a report, used by
-/// [`DivergenceReport::claim_digest`]. Field order mirrors
-/// [`DivergenceReport`] minus `tool`.
-#[derive(Serialize)]
-struct Claim<'a> {
-    schema: u32,
-    subject: &'a str,
-    sides: &'a Sides,
-    bundle: &'a ReproBundle,
-    divergences: &'a [Divergence],
+/// One differential comparison run: what was found, and who found it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DivergenceReport {
+    pub tool: ToolStamp,
+    pub claim: Claim,
 }
 
 impl DivergenceReport {
     pub fn new(subject: impl Into<String>, sides: Sides, bundle: ReproBundle) -> Self {
         Self {
-            schema: SCHEMA_VERSION,
             tool: ToolStamp::this_crate(),
-            subject: subject.into(),
-            sides,
-            bundle,
-            divergences: Vec::new(),
+            claim: Claim {
+                schema: SCHEMA_VERSION,
+                subject: subject.into(),
+                sides,
+                bundle,
+                divergences: Vec::new(),
+            },
         }
     }
 
+    pub fn schema(&self) -> u32 {
+        self.claim.schema
+    }
+
+    pub fn subject(&self) -> &str {
+        &self.claim.subject
+    }
+
+    pub fn sides(&self) -> &Sides {
+        &self.claim.sides
+    }
+
+    pub fn bundle(&self) -> &ReproBundle {
+        &self.claim.bundle
+    }
+
+    pub fn divergences(&self) -> &[Divergence] {
+        &self.claim.divergences
+    }
+
     pub fn with_divergence(mut self, divergence: Divergence) -> Self {
-        self.divergences.push(divergence);
+        self.claim.divergences.push(divergence);
         self
     }
 
     pub fn with_divergences(mut self, divergences: impl IntoIterator<Item = Divergence>) -> Self {
-        self.divergences.extend(divergences);
+        self.claim.divergences.extend(divergences);
         self
     }
 
     /// Divergences that are defects, as opposed to recorded
     /// measurements. See [`Divergence::is_fault`].
     pub fn faults(&self) -> impl Iterator<Item = &Divergence> {
-        self.divergences.iter().filter(|d| d.is_fault())
+        self.claim.divergences.iter().filter(|d| d.is_fault())
     }
 
     pub fn has_fault(&self) -> bool {
-        self.divergences.iter().any(|d| d.is_fault())
+        self.claim.divergences.iter().any(|d| d.is_fault())
     }
 
     /// Canonical bytes of the whole report. See the module docs for the
@@ -138,13 +160,7 @@ impl DivergenceReport {
 
     /// Canonical bytes of the finding alone, excluding provenance.
     pub fn claim_json(&self) -> Result<Vec<u8>> {
-        Ok(serde_json::to_vec(&Claim {
-            schema: self.schema,
-            subject: &self.subject,
-            sides: &self.sides,
-            bundle: &self.bundle,
-            divergences: &self.divergences,
-        })?)
+        Ok(serde_json::to_vec(&self.claim)?)
     }
 
     /// Lowercase-hex SHA-256 over [`Self::canonical_json`] — names one
@@ -168,29 +184,51 @@ impl DivergenceReport {
     /// assert_ne!(a.digest().unwrap(), b.digest().unwrap());
     ///
     /// // A different finding parts ways under both.
-    /// a.subject = "other".into();
+    /// a.claim.subject = "other".into();
     /// assert_ne!(a.claim_digest().unwrap(), b.claim_digest().unwrap());
     /// ```
     pub fn claim_digest(&self) -> Result<String> {
         Ok(sha256_hex(&self.claim_json()?))
     }
 
+    /// Whether the claim digest is portable across toolchains.
+    ///
+    /// `false` when any divergence carries a build-scoped rejection
+    /// token — a builtin `ProgramError` rendered via `Debug`. Those
+    /// strings are correct for comparing two sides inside one process,
+    /// which is what they are produced for, but a dependency or
+    /// toolchain change can alter the text without the finding
+    /// changing. When that text is inside the hashed payload, the
+    /// digest inherits the instability.
+    ///
+    /// The promise is therefore narrower than "survives a release": a
+    /// claim digest is stable across releases of *this crate*, and
+    /// across toolchains only when this returns `true`.
+    pub fn claim_digest_is_portable(&self) -> bool {
+        !self
+            .claim
+            .divergences
+            .iter()
+            .any(|d| d.has_build_scoped_token())
+    }
+
     /// Render as Markdown, for a bug-bounty submission or a public
     /// finding log.
     ///
     /// The header is deliberately blunt about what the reader can do
-    /// with it: a bundle that only names its inputs says so, instead of
-    /// inviting a reproduction it cannot support.
+    /// with it: a bundle that only names its inputs says so, and one
+    /// whose carried bytes contradict their own digest says that
+    /// loudest of all.
     pub fn to_markdown(&self) -> String {
         let digest = self
             .claim_digest()
             .unwrap_or_else(|_| "<report could not be encoded>".to_string());
 
         let mut out = String::new();
-        out.push_str(&format!("# Divergence report — {}\n\n", self.subject));
+        out.push_str(&format!("# Divergence report — {}\n\n", self.claim.subject));
         out.push_str(&format!(
             "- **Sides**: `{}` (left) vs `{}` (right)\n",
-            self.sides.left, self.sides.right
+            self.claim.sides.left, self.claim.sides.right
         ));
         out.push_str(&format!(
             "- **Verdict**: {}\n",
@@ -201,11 +239,17 @@ impl DivergenceReport {
             }
         ));
         out.push_str(&format!(
-            "- **Claim digest**: `{digest}` (schema v{})\n",
-            self.schema
+            "- **Claim digest**: `{digest}` (schema v{}{})\n",
+            self.claim.schema,
+            if self.claim_digest_is_portable() {
+                ""
+            } else {
+                ", build-scoped — contains a builtin rejection token \
+                 whose text depends on the producing toolchain"
+            }
         ));
 
-        match self.bundle.completeness() {
+        match self.claim.bundle.completeness() {
             Completeness::SelfContained => out.push_str(
                 "- **Reproducible**: yes — every input travels with this \
                  report; re-execute and compare\n",
@@ -219,21 +263,27 @@ impl DivergenceReport {
                 );
                 out.push_str(&format!(
                     "  - Not carried: {}\n",
-                    self.bundle.not_carried().join(", ")
+                    self.claim.bundle.not_carried().join(", ")
                 ));
             }
             Completeness::Incomplete => out.push_str(&format!(
                 "- **Reproducible**: NO — the bundle does not even define a \
                  comparison; missing {}\n",
-                self.bundle.missing().join(", ")
+                self.claim.bundle.missing().join(", ")
+            )),
+            Completeness::Corrupt => out.push_str(&format!(
+                "- **Reproducible**: NO — CARRIED BYTES DO NOT MATCH THEIR OWN \
+                 DIGEST. This report claims to carry inputs it does not. \
+                 Do not trust it. Failing: {}\n",
+                self.claim.bundle.integrity_failures().join(", ")
             )),
         }
 
         out.push_str("\n## Where they parted\n\n");
-        if self.divergences.is_empty() {
+        if self.claim.divergences.is_empty() {
             out.push_str("Nothing recorded.\n");
         } else {
-            for d in &self.divergences {
+            for d in &self.claim.divergences {
                 out.push_str(&format!(
                     "- {} {}\n",
                     if d.is_fault() {
@@ -247,54 +297,54 @@ impl DivergenceReport {
         }
 
         out.push_str("\n## Inputs\n\n");
-        if let Some(fs) = &self.bundle.feature_set {
+        if let Some(fs) = &self.claim.bundle.feature_set {
             out.push_str(&format!("Feature set: `{fs}`\n\n"));
         }
-        if let Some(slot) = self.bundle.slot {
+        if let Some(slot) = self.claim.bundle.slot {
             out.push_str(&format!("Account snapshot cloned at slot `{slot}`\n\n"));
         }
 
-        if !self.bundle.programs.is_empty() {
+        if !self.claim.bundle.programs.is_empty() {
             out.push_str("| side | program id | code sha256 | bytes carried |\n");
             out.push_str("|---|---|---|---|\n");
-            for p in &self.bundle.programs {
+            for p in &self.claim.bundle.programs {
                 out.push_str(&format!(
                     "| {} | `{}` | `{}` | {} |\n",
                     p.side,
                     p.program_id,
                     p.code.sha256(),
-                    if p.code.is_carried() { "yes" } else { "no" },
+                    carried(&p.code),
                 ));
             }
             out.push('\n');
         }
 
-        if !self.bundle.accounts.is_empty() {
-            out.push_str("| account | pubkey | len | owner | lamports | pre-state sha256 | bytes carried |\n");
-            out.push_str("|---|---|---|---|---|---|---|\n");
-            for a in &self.bundle.accounts {
-                let dash = "—".to_string();
+        if !self.claim.bundle.accounts.is_empty() {
+            out.push_str(
+                "| account | pubkey | len | owner | lamports | executable | \
+                 pre-state sha256 | bytes carried |\n",
+            );
+            out.push_str("|---|---|---|---|---|---|---|---|\n");
+            for a in &self.claim.bundle.accounts {
+                let dash = || "—".to_string();
                 out.push_str(&format!(
-                    "| {} | `{}` | {} | {} | {} | `{}` | {} |\n",
+                    "| {} | `{}` | {} | {} | {} | {} | `{}` | {} |\n",
                     a.label,
                     a.pubkey,
                     a.pre_state.len(),
-                    a.owner.clone().unwrap_or_else(|| dash.clone()),
-                    a.lamports.map(|l| l.to_string()).unwrap_or(dash),
+                    a.owner.clone().unwrap_or_else(dash),
+                    a.lamports.map(|l| l.to_string()).unwrap_or_else(dash),
+                    a.executable.map(|e| e.to_string()).unwrap_or_else(dash),
                     a.pre_state.sha256(),
-                    if a.pre_state.is_carried() {
-                        "yes"
-                    } else {
-                        "no"
-                    },
+                    carried(&a.pre_state),
                 ));
             }
             out.push('\n');
         }
 
-        if !self.bundle.actions.is_empty() {
+        if !self.claim.bundle.actions.is_empty() {
             out.push_str("Action sequence:\n\n```\n");
-            for (i, action) in self.bundle.actions.iter().enumerate() {
+            for (i, action) in self.claim.bundle.actions.iter().enumerate() {
                 out.push_str(&format!(
                     "{}. {}{}\n",
                     i + 1,
@@ -309,6 +359,17 @@ impl DivergenceReport {
         }
 
         out
+    }
+}
+
+/// How a rendered table should describe an artifact: carried and
+/// self-consistent, carried but contradicting its own digest, or not
+/// carried at all.
+fn carried(a: &crate::repro::Artifact) -> &'static str {
+    match (a.is_carried(), a.is_intact()) {
+        (true, true) => "yes",
+        (true, false) => "**CORRUPT**",
+        (false, _) => "no",
     }
 }
 
@@ -448,7 +509,7 @@ mod tests {
     fn schema_version_is_inside_the_hashed_payload() {
         let a = report();
         let mut b = a.clone();
-        b.schema = SCHEMA_VERSION + 1;
+        b.claim.schema = SCHEMA_VERSION + 1;
         assert_ne!(a.claim_digest().unwrap(), b.claim_digest().unwrap());
     }
 
@@ -512,6 +573,62 @@ mod tests {
         assert!(md.contains("byte 16 of 6664"), "{md}");
         assert!(md.contains("**[fault]**"), "{md}");
         assert!(md.contains("swap(100, 0)"), "{md}");
+    }
+
+    #[test]
+    fn build_scoped_tokens_make_the_claim_digest_non_portable() {
+        let portable = report().with_divergence(Divergence::Parity {
+            label: "swap".into(),
+            left_ok: false,
+            right_ok: false,
+            left_error: Some(6001),
+            right_error: Some(6002),
+            left_reason: Some("custom:6001".into()),
+            right_reason: Some("custom:6002".into()),
+        });
+        assert!(portable.claim_digest_is_portable());
+        assert!(!portable.to_markdown().contains("build-scoped"));
+
+        // A builtin reason is a Debug rendering, so its text belongs to
+        // the build rather than the finding. The header must say so.
+        let build_scoped = report().with_divergence(Divergence::Parity {
+            label: "swap".into(),
+            left_ok: false,
+            right_ok: false,
+            left_error: Some(6001),
+            right_error: None,
+            left_reason: Some("custom:6001".into()),
+            right_reason: Some("builtin:InvalidArgument".into()),
+        });
+        assert!(!build_scoped.claim_digest_is_portable());
+        assert!(build_scoped.to_markdown().contains("build-scoped"), "{}", build_scoped.to_markdown());
+    }
+
+    #[test]
+    fn corrupt_bundle_is_shouted_about_in_the_header() {
+        use crate::repro::{AccountRef, Artifact};
+        let mut bundle = ReproBundle::new()
+            .with_program(ProgramRef::with_code_inline("anchor", "Anch111", b"a"))
+            .with_program(ProgramRef::with_code_inline("pinocchio", "Pino111", b"p"))
+            .with_account(
+                AccountRef::with_data_inline("pool", "Pool111", &[0u8; 24])
+                    .with_metadata("Owner111", 5_000_000, false),
+            )
+            .with_feature_set("mainnet-beta@epoch-812")
+            .with_action(ActionRef::encoded("swap", "Anch111", &[1], vec![]));
+        bundle.programs[0].code = match &bundle.programs[0].code {
+            Artifact::Inline { sha256, len, .. } => Artifact::Inline {
+                sha256: sha256.clone(),
+                len: *len,
+                base64: "bm90IHRoZSBwcm9ncmFt".into(),
+            },
+            other => other.clone(),
+        };
+        let md = DivergenceReport::new("amm-diff", Sides::anchor_pinocchio(), bundle)
+            .with_divergence(body_divergence())
+            .to_markdown();
+        assert!(md.contains("CARRIED BYTES DO NOT MATCH"), "{md}");
+        assert!(md.contains("**CORRUPT**"), "{md}");
     }
 
     #[test]

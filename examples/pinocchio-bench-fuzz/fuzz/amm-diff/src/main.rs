@@ -478,10 +478,12 @@ type Probe = (String, Result<TxOutcome, String>, Result<TxOutcome, String>);
 /// the rejection *reason* (custom error code) and the compute units
 /// consumed. `map(|o| o.is_success())` throws both away.
 ///
-/// `None` on a side means `send()` itself failed — a harness-level
+/// `Err` on a side means `send()` itself failed — a harness-level
 /// failure (blockhash, signers, serialization), not a statement about
-/// program behaviour. Callers skip those probes rather than reading
-/// them as a divergence.
+/// program behaviour. Such a probe produced no evidence, so parity and
+/// CU skip it, and `check_probe_evidence` reports it. Skipping without
+/// reporting is what would let a harness whose sends are all failing
+/// run to completion and call itself clean.
 fn probe_actions(fixture: &mut AmmDiffFixture) -> Vec<Probe> {
     let probes: &[(u64, u64)] = &[
         (1, 0),

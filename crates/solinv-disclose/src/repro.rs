@@ -433,7 +433,7 @@ impl ActionRef {
     ///
     /// The presence of a `data_base64` string is not enough — it has to
     /// decode. A malformed one would otherwise let a bundle be graded
-    /// self-contained on the strength of a field that no reader can
+    /// as carrying its inputs on the strength of a field that no reader can
     /// turn back into an instruction.
     fn is_replayable(&self) -> bool {
         self.program_id.is_some()
@@ -695,7 +695,7 @@ impl ReproBundle {
     /// Human-readable list of what is missing before the bundle would
     /// define a comparison. Empty once [`Self::defines_a_comparison`]
     /// holds — it does **not** report what is missing before the bundle
-    /// would be self-contained; use [`Self::not_carried`] for that.
+    /// would carry its inputs; use [`Self::not_carried`] for that.
     pub fn missing(&self) -> Vec<&'static str> {
         let mut gaps = Vec::new();
         if self.programs.len() < 2 {
@@ -711,7 +711,7 @@ impl ReproBundle {
     }
 
     /// What is identified but not carried, for a bundle that defines a
-    /// comparison without being self-contained.
+    /// comparison without carrying its inputs.
     pub fn not_carried(&self) -> Vec<String> {
         let mut gaps = Vec::new();
         for p in &self.programs {
@@ -839,7 +839,7 @@ mod tests {
     }
 
     #[test]
-    fn digest_only_bundle_is_not_self_contained() {
+    fn digest_only_bundle_does_not_carry_its_inputs() {
         // The regression this guards: hashes verify artifacts a reader
         // already holds; they cannot deliver them. A bundle of digests
         // must never announce itself reproducible.
@@ -1082,7 +1082,7 @@ mod tests {
     }
 
     #[test]
-    fn account_without_executable_is_not_self_contained() {
+    fn account_without_executable_does_not_carry_its_inputs() {
         // `executable` decides whether the runtime treats the account as
         // a program, so an account restored without it is not the
         // account that ran.

@@ -488,6 +488,16 @@ impl DivergenceReport {
                     i + 1,
                     action.label,
                     match (&action.program_id, &action.data_base64) {
+                        // Instruction data is elided past a readable
+                        // length: this block is for a human scanning the
+                        // sequence, and the full encoding is in the
+                        // serialized report, which is what a reader
+                        // replays from anyway.
+                        (Some(pid), Some(data)) if data.len() > 44 => format!(
+                            "  [program {pid} data {}… ({} b64 chars, full value in the JSON)]",
+                            &data[..44],
+                            data.len()
+                        ),
                         (Some(pid), Some(data)) => format!("  [program {pid} data {data}]"),
                         _ => "  [not encoded — description only]".to_string(),
                     }
@@ -773,6 +783,29 @@ mod tests {
         assert!(md.contains("User111 signer writable"), "{md}");
         // …while being clear that the payloads live in the JSON.
         assert!(md.contains("base64 in the JSON"), "{md}");
+    }
+
+    #[test]
+    fn long_instruction_data_is_elided_toward_the_json() {
+        use crate::repro::AccountRef;
+        let long: Vec<u8> = (0..128).map(|i| i as u8).collect();
+        let r = DivergenceReport::new(
+            "amm-diff",
+            Sides::anchor_pinocchio(),
+            ReproBundle::new()
+                .with_account(AccountRef::from_data("pool", "Pool111", &[0u8; 8]))
+                .with_action(ActionRef::encoded("swap", "Anch111", &long, vec![])),
+        );
+        let md = r.to_markdown();
+        assert!(md.contains("full value in the JSON"), "{md}");
+        assert!(
+            !md.contains(
+                &crate::repro::ActionRef::encoded("x", "y", &long, vec![])
+                    .data_base64
+                    .unwrap()
+            ),
+            "the full payload must not be inlined"
+        );
     }
 
     #[test]

@@ -184,12 +184,20 @@ same accounts" two different executions on two different days.
 
 **A digest identifies; it does not deliver.** A hash lets a reader
 confirm that bytes they already hold are the right ones — it cannot
-hand them those bytes. So the bundle is graded three ways:
-`SelfContained` (inputs travel with the report), `IdentifiedOnly`
-(inputs are named by digest and must be obtained elsewhere), and
-`Incomplete` (the comparison is not even defined). Every report this
-repository can produce today is `IdentifiedOnly`, and says so in its
-header rather than inviting a reproduction it cannot support.
+hand them those bytes. So the bundle is graded four ways:
+`InputsCarried` (every input the bundle models travels with it, intact,
+with a stated execution context), `IdentifiedOnly` (inputs are named by
+digest and must be obtained elsewhere), `Incomplete` (the comparison is
+not even defined), and `Corrupt` (carried bytes contradict their own
+digest). Every report this repository can produce today is
+`IdentifiedOnly`, and says so in its header rather than inviting a
+reproduction it cannot support.
+
+The top verdict is deliberately *not* called reproducible. A published
+report can never carry signing material, and it states rather than
+carries the runtime conditions — so what it promises is that nothing
+the model covers is missing or corrupt, and that the reader knows which
+environment to reconstruct.
 
 The claim digest pins **the finding** — excluding tool provenance, so a
 crate release does not change it — and is bound to a schema version

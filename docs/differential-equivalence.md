@@ -169,12 +169,12 @@ enough to re-execute anything, and must not announce otherwise.
 
 | value | meaning |
 |---|---|
-| `SelfContained` | program bytes, account pre-state with full metadata (owner, lamports, executable), and encoded instructions all travel with the report — and every carried payload matches its own declared length and digest. Re-execute from this alone. |
+| `InputsCarried` | every input the bundle *models* travels with it and matches its own declared length and digest: program bytes, account pre-state with full metadata (owner, lamports, executable, rent epoch), decodable instruction encodings, a feature set, and a stated execution context and signer policy. |
 | `IdentifiedOnly` | everything is *named* — digests, program IDs, labels — but the bytes do not travel. Obtain them independently, verify against the hashes, then re-run. |
 | `Incomplete` | something required to define the comparison at all is absent. |
 | `Corrupt` | a carried payload contradicts its own declared length or digest. Worse than absent: the bundle asserts it holds the inputs and the assertion is false. Checked first, so no other verdict can mask it. |
 
-`SelfContained` is only granted after every carried payload is decoded
+`InputsCarried` is only granted after every carried payload is decoded
 and re-hashed, and every encoded action is decoded. Trusting a payload
 because the same report also states its digest would repeat, one level
 down, exactly the mistake the digest/deliver distinction exists to
@@ -199,8 +199,35 @@ silently reinterpreting it under this build's meaning.
 should be used wherever a report is treated as evidence.
 
 **Every report this repository can currently produce is
-`IdentifiedOnly`.** No harness populates inline artifacts or encoded
-instruction data yet. The rendered header says so.
+`IdentifiedOnly`.** No harness populates inline artifacts, encoded
+instruction data, or an execution context yet. The rendered header
+says so.
+
+### `InputsCarried` is not "replayable"
+
+The verdict was called `SelfContained` for three revisions, rendered as
+"re-execute from this alone", and that was never true. Each revision
+found another layer being trusted rather than carried: first the bytes
+behind a digest, then the integrity of those bytes, then the
+decodability of an instruction encoding — and then the things the model
+does not represent at all.
+
+Two of those are structural rather than oversights:
+
+- **Signing material.** Action metas carry `is_signer` flags, but a
+  published report must never carry keys. `SignerPolicy` therefore
+  states how signatures are to be satisfied — `SigverifyDisabled` for a
+  LiteSVM-backed harness, or `KeysSuppliedOutOfBand` naming the signers
+  a reader has to bring.
+- **Runtime conditions.** Sysvars beyond the clock, the exact runtime
+  build, and any program-owned account the fixture never declared are
+  *stated* (`ExecutionContext.runtime`, `clock_slot`) rather than
+  carried.
+
+So the verdict now claims only what it can: nothing the model covers is
+missing or corrupt, and the reader has been told which environment to
+reconstruct. That is the strongest honest claim available to a document
+you publish.
 
 Hashing is part of the spec, not an implementation detail: `sha256_hex`
 is exported so a third party recomputing digests hashes the same way
@@ -251,7 +278,8 @@ true or false.
   identified by digest, not carried. Obtain them independently, verify
   them against the hashes below, then re-execute.
   - Not carried: anchor program bytes, pinocchio program bytes,
-    `pool` account data, encoding for action `swap(100, 0)`
+    `pool` account data, encoding for action `swap(100, 0)`,
+    the execution context and signer policy
 
 ## Where they parted
 

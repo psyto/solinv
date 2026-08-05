@@ -186,26 +186,40 @@ impl DivergenceReport {
     /// ```
     pub fn from_json(bytes: &[u8]) -> Result<Self> {
         let report: Self = serde_json::from_slice(bytes)?;
-        if report.claim.schema != SCHEMA_VERSION {
+        report.check_schema()?;
+        Ok(report)
+    }
+
+    /// Whether `claim.schema` is one this build can read back.
+    ///
+    /// `claim` is a public field, so it can be set to a version this
+    /// build would refuse in [`Self::from_json`]. Serializing such a
+    /// report would emit a document its own producer rejects, so the
+    /// serializing paths check first rather than letting the mismatch
+    /// escape to disk.
+    fn check_schema(&self) -> Result<()> {
+        if self.claim.schema != SCHEMA_VERSION {
             anyhow::bail!(
                 "report declares schema {} but this build understands schema {}; \
                  the canonical encoding is bound to one version, so the digest \
                  and field meanings cannot be assumed to carry across",
-                report.claim.schema,
+                self.claim.schema,
                 SCHEMA_VERSION,
             );
         }
-        Ok(report)
+        Ok(())
     }
 
     /// Canonical bytes of the whole report. See the module docs for the
     /// encoding rules and the scope of their guarantee.
     pub fn canonical_json(&self) -> Result<Vec<u8>> {
+        self.check_schema()?;
         Ok(serde_json::to_vec(self)?)
     }
 
     /// Canonical bytes of the finding alone, excluding provenance.
     pub fn claim_json(&self) -> Result<Vec<u8>> {
+        self.check_schema()?;
         Ok(serde_json::to_vec(&self.claim)?)
     }
 
@@ -217,6 +231,10 @@ impl DivergenceReport {
 
     /// Lowercase-hex SHA-256 over [`Self::claim_json`] — names the
     /// finding, and survives a release of this crate.
+    ///
+    /// It does **not** necessarily survive a change of toolchain: see
+    /// [`Self::claim_digest_is_portable`], which is false whenever a
+    /// build-scoped rejection token is part of the finding.
     ///
     /// ```
     /// use solinv_disclose::{DivergenceReport, ReproBundle, Sides, ToolStamp};
@@ -296,9 +314,11 @@ impl DivergenceReport {
         ));
 
         match self.claim.bundle.completeness() {
-            Completeness::SelfContained => out.push_str(
-                "- **Reproducible**: yes — every input travels with this \
-                 report; re-execute and compare\n",
+            Completeness::InputsCarried => out.push_str(
+                "- **Inputs**: carried — every input this report models \
+                 travels with it and matches its own digest, and the \
+                 execution context is stated. Reconstruct that context, \
+                 then re-execute and compare.\n",
             ),
             Completeness::IdentifiedOnly => {
                 out.push_str(
@@ -422,7 +442,7 @@ fn carried(a: &crate::repro::Artifact) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::repro::{ActionRef, ProgramRef};
+    use crate::repro::{ActionRef, ExecutionContext, ProgramRef, SignerPolicy};
 
     fn body_divergence() -> Divergence {
         Divergence::Body {
@@ -553,10 +573,28 @@ mod tests {
 
     #[test]
     fn schema_version_is_inside_the_hashed_payload() {
-        let a = report();
-        let mut b = a.clone();
-        b.claim.schema = SCHEMA_VERSION + 1;
-        assert_ne!(a.claim_digest().unwrap(), b.claim_digest().unwrap());
+        let json = String::from_utf8(report().claim_json().unwrap()).unwrap();
+        assert!(
+            json.contains(&format!(r#""schema":{SCHEMA_VERSION}"#)),
+            "{json}"
+        );
+    }
+
+    #[test]
+    fn a_report_this_build_could_not_read_back_is_not_serialized() {
+        // claim is public, so an unsupported version can be set in
+        // process. Emitting it would produce a document its own
+        // producer rejects.
+        let mut r = report();
+        r.claim.schema = SCHEMA_VERSION + 1;
+        for err in [
+            r.canonical_json().unwrap_err(),
+            r.claim_json().unwrap_err(),
+            r.digest().unwrap_err(),
+            r.claim_digest().unwrap_err(),
+        ] {
+            assert!(err.to_string().contains("schema"), "{err}");
+        }
     }
 
     #[test]
@@ -589,7 +627,7 @@ mod tests {
     }
 
     #[test]
-    fn self_contained_bundle_advertises_reproducibility() {
+    fn fully_carried_bundle_says_so() {
         use crate::repro::AccountRef;
         let r = DivergenceReport::new(
             "amm-diff",
@@ -599,14 +637,21 @@ mod tests {
                 .with_program(ProgramRef::with_code_inline("pinocchio", "Pino111", b"p"))
                 .with_account(
                     AccountRef::with_data_inline("pool", "Pool111", &[0u8; 24])
-                        .with_metadata("Owner111", 5_000_000, false),
+                        .with_metadata("Owner111", 5_000_000, false, 0),
                 )
                 .with_feature_set("mainnet-beta@epoch-812")
-                .with_action(ActionRef::encoded("swap", "Anch111", &[1, 2], vec![])),
+                .with_action(ActionRef::encoded("swap", "Anch111", &[1, 2], vec![]))
+                .with_context(ExecutionContext::new(
+                    "litesvm 0.9.1 via crucible v0.1.0",
+                    SignerPolicy::SigverifyDisabled,
+                )),
         )
         .with_divergence(body_divergence());
         let md = r.to_markdown();
-        assert!(md.contains("**Reproducible**: yes"), "{md}");
+        // Deliberately not "Reproducible: yes" — the bundle carries the
+        // inputs it models, which is a smaller claim than replayability.
+        assert!(md.contains("**Inputs**: carried"), "{md}");
+        assert!(md.contains("Reconstruct that context"), "{md}");
         assert!(
             md.contains("| pool | `Pool111` | 24 | Owner111 | 5000000 |"),
             "{md}"
@@ -662,7 +707,7 @@ mod tests {
             .with_program(ProgramRef::with_code_inline("pinocchio", "Pino111", b"p"))
             .with_account(
                 AccountRef::with_data_inline("pool", "Pool111", &[0u8; 24])
-                    .with_metadata("Owner111", 5_000_000, false),
+                    .with_metadata("Owner111", 5_000_000, false, 0),
             )
             .with_feature_set("mainnet-beta@epoch-812")
             .with_action(ActionRef::encoded("swap", "Anch111", &[1], vec![]));

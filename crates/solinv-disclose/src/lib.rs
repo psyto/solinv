@@ -36,7 +36,7 @@
 //!
 //! // `from_code` names the binary by digest without carrying it, so the
 //! // report says so rather than inviting a reproduction it can't support.
-//! assert!(!report.bundle().is_self_contained());
+//! assert!(!report.bundle().carries_its_inputs());
 //! ```
 //!
 //! ## Why this is a separate, dependency-light crate
@@ -56,7 +56,7 @@
 //! ## Status
 //!
 //! Implemented: the divergence record ([`Divergence`]), the input
-//! bundle ([`ReproBundle`]) with a three-valued
+//! bundle ([`ReproBundle`]) with a four-valued
 //! [`Completeness`][repro::Completeness] judgement, and the report with
 //! its canonical encoding, claim/report digests and Markdown rendering
 //! ([`DivergenceReport`]).
@@ -67,7 +67,7 @@
 //! Markdown rendering is generic — it is not yet shaped to any
 //! platform's submission template.
 //!
-//! No harness populates a self-contained bundle today. Every report
+//! No harness populates a fully carried bundle today. Every report
 //! this repository can currently produce is
 //! [`IdentifiedOnly`][repro::Completeness::IdentifiedOnly]: it names
 //! its inputs by digest without carrying them, and renders accordingly.
@@ -79,5 +79,6 @@ pub mod repro;
 pub use divergence::{Divergence, Sides};
 pub use report::{Claim, DivergenceReport, ToolStamp, SCHEMA_VERSION};
 pub use repro::{
-    sha256_hex, AccountRef, ActionRef, Artifact, Completeness, ProgramRef, ReproBundle,
+    sha256_hex, AccountRef, ActionRef, Artifact, Completeness, ExecutionContext, ProgramRef,
+    ReproBundle, SignerPolicy,
 };

@@ -22,8 +22,9 @@
 //!
 //! [`Artifact`] makes the difference explicit per input, and
 //! [`ReproBundle::completeness`] reports it for the bundle as a whole,
-//! three-valued: [`Completeness::SelfContained`],
-//! [`Completeness::IdentifiedOnly`], [`Completeness::Incomplete`].
+//! four-valued: [`Completeness::InputsCarried`],
+//! [`Completeness::IdentifiedOnly`], [`Completeness::Incomplete`],
+//! [`Completeness::Corrupt`].
 //!
 //! ## What has to be in the bundle
 //!
@@ -182,10 +183,11 @@ impl Artifact {
 /// - **Padding before the end.** `Zg==AAAA` has a padded first quantum
 ///   followed by more data. Padding terminates the stream; anything
 ///   after it is not part of a valid encoding.
-/// - **Non-zero discarded bits.** A one-byte tail encodes 8 bits in two
-///   sextets, so the final sextet has 4 bits that must be zero.
-///   `Zm9=` and `Zm8=` both decode to `fo`, but only `Zm8=` is
-///   canonical.
+/// - **Non-zero discarded bits.** A two-byte tail encodes 16 bits in
+///   three sextets, which hold 18, so the final sextet has 2 bits that
+///   must be zero. `Zm9=` and `Zm8=` both decode to `fo`, but only
+///   `Zm8=` is canonical. (A one-byte tail has the same problem with 4
+///   spare bits across two sextets.)
 /// - **Anything else that does not re-encode to itself**, which the
 ///   final round-trip check catches whether or not it was anticipated
 ///   here.
@@ -316,6 +318,12 @@ pub struct AccountRef {
     pub owner: Option<String>,
     pub lamports: Option<u64>,
     pub executable: Option<bool>,
+    /// Rent epoch. Part of the account as the runtime sees it, and
+    /// carried by this repository's own snapshot model
+    /// (`solinv_corpus::account`), so omitting it here would mean a
+    /// restored account differs from the one that ran in a field the
+    /// producer already had.
+    pub rent_epoch: Option<u64>,
 }
 
 impl AccountRef {
@@ -328,6 +336,7 @@ impl AccountRef {
             owner: None,
             lamports: None,
             executable: None,
+            rent_epoch: None,
         }
     }
 
@@ -344,6 +353,7 @@ impl AccountRef {
             owner: None,
             lamports: None,
             executable: None,
+            rent_epoch: None,
         }
     }
 
@@ -353,10 +363,12 @@ impl AccountRef {
         owner: impl Into<String>,
         lamports: u64,
         executable: bool,
+        rent_epoch: u64,
     ) -> Self {
         self.owner = Some(owner.into());
         self.lamports = Some(lamports);
         self.executable = Some(executable);
+        self.rent_epoch = Some(rent_epoch);
         self
     }
 
@@ -372,6 +384,7 @@ impl AccountRef {
             && self.owner.is_some()
             && self.lamports.is_some()
             && self.executable.is_some()
+            && self.rent_epoch.is_some()
     }
 }
 
@@ -436,6 +449,58 @@ impl ActionRef {
     }
 }
 
+/// How the signatures the actions declare are meant to be satisfied.
+///
+/// Action metas carry `is_signer` flags but no signing material, and
+/// they never will — a report is a thing you publish. So a reader
+/// re-executing has to be told what to do about signatures, and a
+/// bundle that does not say is not replayable no matter how many bytes
+/// it carries.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "policy", rename_all = "snake_case")]
+pub enum SignerPolicy {
+    /// Signature verification was off, as in a LiteSVM-backed harness.
+    /// The reader reproduces by also disabling it; no keys are needed.
+    SigverifyDisabled,
+    /// Signatures were verified, and the reader must supply the listed
+    /// keypairs out of band. Named, never carried.
+    KeysSuppliedOutOfBand { signers: Vec<String> },
+}
+
+/// The runtime conditions the compared run assumed.
+///
+/// Not decoration: on Solana the same instruction against the same
+/// accounts is a different execution under a different clock, and the
+/// programs in this repository read the slot directly. A bundle
+/// without this pins the inputs and leaves the environment floating.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecutionContext {
+    /// What executed the run — e.g. `"litesvm 0.9.1 via crucible v0.1.0"`.
+    pub runtime: String,
+    /// `Clock::slot` at execution.
+    pub clock_slot: Option<u64>,
+    /// `Clock::unix_timestamp` at execution.
+    pub clock_unix_timestamp: Option<i64>,
+    pub signer_policy: SignerPolicy,
+}
+
+impl ExecutionContext {
+    pub fn new(runtime: impl Into<String>, signer_policy: SignerPolicy) -> Self {
+        Self {
+            runtime: runtime.into(),
+            clock_slot: None,
+            clock_unix_timestamp: None,
+            signer_policy,
+        }
+    }
+
+    pub fn with_clock(mut self, slot: u64, unix_timestamp: i64) -> Self {
+        self.clock_slot = Some(slot);
+        self.clock_unix_timestamp = Some(unix_timestamp);
+        self
+    }
+}
+
 /// The inputs of the compared run, and how completely they travel.
 ///
 /// Named a *bundle* aspirationally: whether it actually bundles enough
@@ -458,15 +523,29 @@ pub struct ReproBundle {
     pub feature_set: Option<String>,
     /// Instruction sequence reaching the divergence, in order.
     pub actions: Vec<ActionRef>,
+    /// Runtime conditions and signer policy. See [`ExecutionContext`].
+    pub context: Option<ExecutionContext>,
 }
 
 /// How much of the run a bundle actually carries.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Completeness {
-    /// Program bytes, account pre-state with metadata, encoded
-    /// instructions, and a feature set all travel with the report. A
-    /// reader can re-execute from this alone.
-    SelfContained,
+    /// Every input this bundle models travels with it and survives its
+    /// own integrity check: program bytes, account pre-state with full
+    /// metadata, decodable instruction encodings, a feature set, and a
+    /// stated execution context and signer policy.
+    ///
+    /// **Named for what it is, not for what one might want it to be.**
+    /// An earlier revision called this `SelfContained` and rendered it
+    /// as "re-execute from this alone", which was not true: the bundle
+    /// models a specific set of inputs, and anything outside that set —
+    /// sysvars beyond the clock, program-owned accounts the fixture
+    /// never declared, the exact runtime build — is stated rather than
+    /// carried. What this verdict promises is that nothing the model
+    /// covers is missing or corrupt, and that the reader has been told
+    /// what environment to reconstruct. That is the strongest honest
+    /// claim available to a published document.
+    InputsCarried,
     /// Everything is identified — digests, program IDs, labels — but
     /// the bytes do not travel. A reader who independently obtains the
     /// artifacts can confirm they are the right ones and then re-run;
@@ -510,10 +589,15 @@ impl ReproBundle {
         self
     }
 
+    pub fn with_context(mut self, context: ExecutionContext) -> Self {
+        self.context = Some(context);
+        self
+    }
+
     /// What this bundle is actually good for.
     ///
-    /// Deliberately three-valued. The earlier boolean conflated "we
-    /// know what the inputs were" with "we can hand them to you", and a
+    /// Deliberately not a boolean. The earlier one conflated "we know
+    /// what the inputs were" with "we can hand them to you", and a
     /// digest-only bundle satisfied it — which meant a report could
     /// announce itself reproducible while carrying nothing anyone could
     /// execute.
@@ -530,9 +614,10 @@ impl ReproBundle {
         let carried = self.programs.iter().all(|p| p.code.is_carried())
             && self.accounts.iter().all(|a| a.is_complete())
             && self.actions.iter().all(|a| a.is_replayable())
-            && !self.accounts.is_empty();
+            && !self.accounts.is_empty()
+            && self.context.is_some();
         if carried {
-            Completeness::SelfContained
+            Completeness::InputsCarried
         } else {
             Completeness::IdentifiedOnly
         }
@@ -561,9 +646,14 @@ impl ReproBundle {
         self.programs.len() >= 2 && self.feature_set.is_some() && !self.actions.is_empty()
     }
 
-    /// Whether a reader can re-execute from the report alone.
-    pub fn is_self_contained(&self) -> bool {
-        self.completeness() == Completeness::SelfContained
+    /// Whether every input the bundle models travels with it, intact,
+    /// alongside a stated execution context.
+    ///
+    /// Not the same as "a reader can re-execute and get the same
+    /// answer" — see [`Completeness::InputsCarried`] for what is and
+    /// is not promised.
+    pub fn carries_its_inputs(&self) -> bool {
+        self.completeness() == Completeness::InputsCarried
     }
 
     /// Human-readable list of what is missing before the bundle would
@@ -610,6 +700,9 @@ impl ReproBundle {
             if !a.is_replayable() {
                 gaps.push(format!("encoding for action `{}`", a.label));
             }
+        }
+        if self.context.is_none() {
+            gaps.push("the execution context and signer policy".to_string());
         }
         gaps
     }
@@ -674,13 +767,13 @@ mod tests {
             .with_action(ActionRef::described("swap(100, 0)"))
     }
 
-    fn self_contained_bundle() -> ReproBundle {
+    fn carried_bundle() -> ReproBundle {
         ReproBundle::new()
             .with_program(ProgramRef::with_code_inline("anchor", "Anch111", b"a"))
             .with_program(ProgramRef::with_code_inline("pinocchio", "Pino111", b"p"))
             .with_account(
                 AccountRef::with_data_inline("pool", "Pool111", &[0u8; 24])
-                    .with_metadata("Owner111", 5_000_000, false),
+                    .with_metadata("Owner111", 5_000_000, false, 0),
             )
             .with_feature_set("mainnet-beta@epoch-812")
             .with_action(ActionRef::encoded(
@@ -688,6 +781,10 @@ mod tests {
                 "Anch111",
                 &[1, 2, 3],
                 vec![("Pool111".into(), false, true)],
+            ))
+            .with_context(ExecutionContext::new(
+                "litesvm 0.9.1 via crucible v0.1.0",
+                SignerPolicy::SigverifyDisabled,
             ))
     }
 
@@ -698,7 +795,7 @@ mod tests {
         // must never announce itself reproducible.
         let b = identified_bundle();
         assert_eq!(b.completeness(), Completeness::IdentifiedOnly);
-        assert!(!b.is_self_contained());
+        assert!(!b.carries_its_inputs());
         assert!(b.missing().is_empty(), "it does define a comparison");
         let gaps = b.not_carried();
         assert!(
@@ -716,10 +813,31 @@ mod tests {
     }
 
     #[test]
-    fn fully_carried_bundle_is_self_contained() {
-        let b = self_contained_bundle();
-        assert_eq!(b.completeness(), Completeness::SelfContained);
-        assert!(b.is_self_contained());
+    fn bundle_without_an_execution_context_does_not_claim_carried_inputs() {
+        // Signer flags without a signer policy, and instructions without
+        // a stated runtime, are not replayable however many bytes
+        // travel with them.
+        let mut b = carried_bundle();
+        b.context = None;
+        assert_eq!(b.completeness(), Completeness::IdentifiedOnly);
+        assert!(b
+            .not_carried()
+            .iter()
+            .any(|g| g.contains("execution context and signer policy")));
+    }
+
+    #[test]
+    fn account_without_rent_epoch_is_not_carried() {
+        let mut b = carried_bundle();
+        b.accounts[0].rent_epoch = None;
+        assert_eq!(b.completeness(), Completeness::IdentifiedOnly);
+    }
+
+    #[test]
+    fn fully_carried_bundle_says_so() {
+        let b = carried_bundle();
+        assert_eq!(b.completeness(), Completeness::InputsCarried);
+        assert!(b.carries_its_inputs());
         assert!(b.not_carried().is_empty(), "{:?}", b.not_carried());
     }
 
@@ -783,7 +901,7 @@ mod tests {
 
     #[test]
     fn undecodable_action_data_blocks_self_containment() {
-        let mut b = self_contained_bundle();
+        let mut b = carried_bundle();
         b.actions[0].data_base64 = Some("!!!!".into());
         assert_eq!(b.completeness(), Completeness::IdentifiedOnly);
         assert!(b
@@ -827,7 +945,7 @@ mod tests {
 
     #[test]
     fn corrupt_payload_outranks_every_other_verdict() {
-        let mut b = self_contained_bundle();
+        let mut b = carried_bundle();
         b.programs[0].code = match &b.programs[0].code {
             Artifact::Inline { sha256, len, .. } => Artifact::Inline {
                 sha256: sha256.clone(),
@@ -837,7 +955,7 @@ mod tests {
             other => other.clone(),
         };
         assert_eq!(b.completeness(), Completeness::Corrupt);
-        assert!(!b.is_self_contained());
+        assert!(!b.carries_its_inputs());
         assert_eq!(b.integrity_failures(), vec!["anchor program bytes"]);
     }
 
@@ -882,7 +1000,7 @@ mod tests {
 
     #[test]
     fn missing_feature_set_leaves_the_comparison_undefined() {
-        let mut b = self_contained_bundle();
+        let mut b = carried_bundle();
         b.feature_set = None;
         assert_eq!(b.completeness(), Completeness::Incomplete);
         assert_eq!(b.missing(), vec!["the activated feature set"]);
@@ -897,7 +1015,7 @@ mod tests {
 
     #[test]
     fn bundle_round_trips_through_json() {
-        let b = self_contained_bundle().with_slot(300_000_000);
+        let b = carried_bundle().with_slot(300_000_000);
         let encoded = serde_json::to_string(&b).unwrap();
         let decoded: ReproBundle = serde_json::from_str(&encoded).unwrap();
         assert_eq!(b, decoded);

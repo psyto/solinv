@@ -146,6 +146,15 @@ Across all of them, **the Anchor W4 and Pinocchio W4 programs produce
 byte-identical state**. That is the equivalence proof a paying customer
 gets along with the CU savings.
 
+> **Scope of this 2026-06-07 result.** "No execution-parity violation"
+> here means under the boolean accept/reject check that was in place at
+> the time. The rejection *reason* was not compared. Re-running the same
+> harness after the 2026-08-05 error-code upgrade does report a
+> divergence — see
+> [error-code divergence](#error-code-divergence-across-the-bench-rewrites-2026-08-05).
+> The byte-identical-state claim above is unaffected; it is a different
+> comparison surface.
+
 ### What this catches that single-side fuzz doesn't
 
 - Pinocchio rewrite using `<` instead of `<=` in binary search → wrong
@@ -389,42 +398,77 @@ transaction limit and fail where the original succeeded.
 crucible run amm_diff invariant_amm_diff_cu_no_regression_only --release --timeout 30
 ```
 
-**W8 result (20s campaign, 2026-08-05)**: 1,747 executions / ~151K
-actions / **0 violations**. The Pinocchio side is cheaper on every
-probe, which is the expected direction — a null result, recorded here
-the same way the other calibration nulls are.
+**Results (20s campaigns each, 2026-08-05)** — all six clean:
 
-## Error-code divergence found on the W8 rewrite (2026-08-05)
+| harness | executions | actions | violations |
+|---|---|---|---|
+| `amm-diff` | 1,747 | ~151K | 0 |
+| `matching-diff` | 6,729 | ~529K | 0 |
+| `refresh-diff` | 4,223 | ~350K | 0 |
+| `vault-diff` | 1,601 | ~113K | 0 |
+| `oracle-diff` | 8,921 | ~562K | 0 |
+| `perp-diff` | 5,600 | ~267K | 0 |
 
-Adding the rejection *reason* to execution parity immediately surfaced
-a real divergence in the W8 AMM pair, on the first campaign:
+The Pinocchio side is cheaper on every probe of every workload, which
+is the expected direction — a null result, recorded the same way the
+other calibration nulls are.
+
+## Error-code divergence across the bench rewrites (2026-08-05)
+
+Adding the rejection *reason* to execution parity surfaced a real
+divergence on the first campaign, in four of the six pairs:
 
 ```
-execution-parity divergence on swap(amount_in=1, min_out=0):
-  anchor=rejected(6001) pino=rejected
+W4  place_order(price=500, qty=10):        anchor=rejected(6000) pino=rejected
+W8  swap(amount_in=1, min_out=0):          anchor=rejected(6001) pino=rejected
+W11 publish(price=1e8, conf=50000, slot=200): anchor=rejected(6000) pino=rejected
+W12 open_position(size=1, slot=1):         anchor=rejected(6000) pino=rejected
 ```
 
-20s campaign: 5,998 violations / 5,999 executions — pervasive, not an
-edge case.
-
-**Cause.** `anchor-w8-amm` declares three custom errors via
-`#[error_code]`, which Anchor numbers from 6000:
-
-| code | Anchor variant | condition |
+| harness | verdict | violations / executions |
 |---|---|---|
-| 6000 | `SlippageExceeded` | `amount_out < min_out` |
-| 6001 | `ZeroOutput` | `amount_out == 0` |
-| 6002 | `ZeroDenominator` | `denom == 0` |
+| `matching-diff` (W4) | DIVERGED | 8,270 / 12,000 |
+| `amm-diff` (W8) | DIVERGED | 5,998 / 5,999 |
+| `refresh-diff` (W9) | clean | 0 / 4,520 |
+| `vault-diff` (W10) | not reached — see below | 0 / 1,626 |
+| `oracle-diff` (W11) | DIVERGED | 18,999 / 19,000 |
+| `perp-diff` (W12) | DIVERGED | 13,999 / 14,000 |
 
-`pinocchio-w8-amm` returns the builtin `ProgramError::InvalidArgument`
-for all three conditions. A builtin is not `Custom(n)`, so the runtime
-reports no custom error code at all.
+**Cause — systemic, not per-workload.** Each Anchor program declares
+custom errors via `#[error_code]`, which Anchor numbers from 6000:
+
+| workload | Anchor error enum | codes |
+|---|---|---|
+| W4 | `MatchErr` | 6000 `TickFull`, 6001 `BookFull` |
+| W8 | `AmmErr` | 6000 `SlippageExceeded`, 6001 `ZeroOutput`, 6002 `ZeroDenominator` |
+| W10 | `VaultErr` | 6000 `ZeroDeposit`, 6001 `ZeroShares`, 6002 invariant-broken |
+| W11 | `OracleErr` | 6000 `StaleSlot` |
+| W12 | `PerpErr` | 6000 `PositionAlreadyOpen`, 6001 `ZeroSize`, 6002 `InsufficientMargin`, 6003 `InsufficientCollateral` |
+
+**None of the twelve Pinocchio programs emits `Custom(n)` at all.**
+Every rejection path returns a builtin `ProgramError` variant
+(`InvalidArgument`, `AccountDataTooSmall`, …), which the runtime does
+not report as a custom code. So each rewrite collapses its Anchor
+counterpart's distinct error codes into one undifferentiated builtin.
 
 **Why the old check missed it.** Both sides reject, so a boolean
 accept/reject comparison reads it as agreement. It is nonetheless a
 behavioural divergence a caller can observe: code branching on
 "slippage" vs "zero output" cannot distinguish them against the
 rewrite, and code matching on `6001` never matches at all.
+
+**The two non-diverging results mean different things.**
+
+- **W9 `refresh-diff` is genuinely clean**: `anchor-w9-refresh` declares
+  no `#[error_code]` at all, so there is no error-code surface for the
+  two sides to disagree on.
+- **W10 `vault-diff` is *not* evidence of agreement.** Its campaign ran
+  at a 100% success rate (112,812 / 112,812 actions accepted), meaning
+  no probe ever reached a rejection — yet `anchor-w10-vault` does
+  declare `VaultErr`. The divergence is latent and simply unreached by
+  the current probe set. Treat this row as a probe-coverage gap, not a
+  pass. Same caveat applies to the W9 row's *rejection* coverage, though
+  there the conclusion happens to hold for a different reason.
 
 **Status.** Recorded, not fixed. Whether the Pinocchio programs should
 reproduce Anchor's error numbering is a design question for

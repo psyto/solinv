@@ -10,3 +10,8 @@ publish = false
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+
+# Report digests + repro-bundle content hashes. Deliberately the only
+# non-serde dependency: a consumer verifying a report must not have to
+# build the fuzzing stack. See lib.rs "Why this is a separate crate".
+sha2 = "0.10"

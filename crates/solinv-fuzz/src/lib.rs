@@ -40,7 +40,7 @@ pub use capability::{
 };
 pub use differential::{
     check_all_pairs, check_pair_equivalent, read_pair_bodies, BodyDivergence,
-    DiffAccountPair, DifferentialFixture, ParityDivergence,
+    CuComparison, DiffAccountPair, DifferentialFixture, ParityDivergence,
 };
 pub use state_coverage::{
     fingerprint_key, TokenFlowShape, TransitionObservation,
@@ -64,7 +64,7 @@ pub mod prelude {
     };
     pub use crate::differential::{
         check_all_pairs, check_pair_equivalent, read_pair_bodies, BodyDivergence,
-        DiffAccountPair, DifferentialFixture, ParityDivergence,
+        CuComparison, DiffAccountPair, DifferentialFixture, ParityDivergence,
     };
     pub use crate::state_coverage::{
         fingerprint_key, TokenFlowShape, TransitionObservation,

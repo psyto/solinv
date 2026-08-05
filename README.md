@@ -48,6 +48,12 @@ declaration as a library:
 6. **Disclosure templates** — Immunefi / Sherlock / direct-to-protocol
    markdown templates with field-by-field guidance + a worked example
    from solinv's own planted-bug detection.
+7. **Differential equivalence + reproducible reports** — a three-surface
+   oracle for "do these two programs behave the same?" (written state,
+   accept/reject *and reason*, compute units), and a finding format that
+   carries the inputs needed to re-execute it. See
+   [differential equivalence](#differential-equivalence--do-two-programs-behave-the-same)
+   below.
 
 Engine performance is **not** the wedge — solinv runs on Crucible and
 inherits its sBPF coverage and libafl scheduling.
@@ -86,10 +92,97 @@ the dataset:
 
 Pinocchio-bench answers _"how much CU is on the table?"_. Solinv
 answers _"can a Pinocchio rewrite preserve the original program's
-behavior?"_. The leaderboard lists 5-6 invariants per workload that a
+behavior?"_ — see [differential equivalence](#differential-equivalence--do-two-programs-behave-the-same)
+below. The leaderboard lists 5-6 invariants per workload that a
 fuzzer "would attach" for each surface (orderbook tick insert, AMM
 constant-product, lending refresh, vault NAV, oracle publish, perp
 margin); solinv is the framework that actually attaches them.
+
+## Differential equivalence — do two programs behave the same?
+
+Invariants ask whether a program violates a property. A rewrite, a
+refactor or an optimization asks something else: whether the new
+version still does what the old one did.
+
+On Ethereum a differential runner can diff against a commitment — the
+state root, the receipts trie. **Solana publishes no equivalent**, so
+there is nothing to compare except the other run, and the definition of
+"same outcome" is a choice the tool makes rather than something the
+chain hands you. Get it wrong and you don't get an error, you get
+silent false confidence.
+
+Solinv spells the oracle out as three surfaces, all of them observable
+by a caller and therefore all of them load-bearing:
+
+| Surface | Type | Fault when |
+|---|---|---|
+| Written account state | `BodyDivergence` | any byte of the compared body differs |
+| Accept/reject **and the reason** | `ParityDivergence` | decisions differ, or both reject with *different error codes* |
+| Compute units consumed | `CuComparison` | the rewrite consumed **more** than the original |
+
+Two of these are easy to omit and expensive to omit:
+
+- **Error codes are ABI.** A caller branching on `6001` behaves
+  differently against a rewrite returning `6002` — yet a boolean
+  accept/reject check calls that agreement, because both sides
+  "failed". `ParityDivergence::check_outcomes` compares the reason too.
+- **CU is consensus-relevant.** Two runs writing byte-identical state at
+  different CU are not equivalent: the dearer one can exceed the
+  transaction limit and fail where the other succeeds. `CuComparison` is
+  recorded on every action rather than only on disagreement — for a
+  rewrite the CU difference is the measurement the work exists to
+  produce, and only a *regression* is a fault.
+
+A harness that checks written state alone will pass a rewrite that
+changed its error codes or got slower.
+
+### Findings that someone else can check
+
+A finding that only says *what* diverged is an assertion. `solinv-disclose`
+packages it with the inputs needed to re-execute it:
+
+```
+# Divergence report — amm-diff (raydium-amm swap)
+
+- **Sides**: `anchor` (left) vs `pinocchio` (right)
+- **Verdict**: DIVERGED
+- **Report digest**: `9fbd48ca…`
+- **Reproducible**: yes — re-run the bundle below and compare
+
+## Where they parted
+
+- [recorded] `swap` CU: 12400 → 3900 (-8500)
+- **[fault]** `swap(100, 0)` outcome diverged: left rejected (6001), right rejected (6002)
+```
+
+…followed by SHA-256 of each side's `.so`, of every account's
+pre-state, the activated feature set, and the action sequence. Program
+IDs are upgradeable, so an ID names a slot in time rather than a
+binary; the feature set matters because Solana's runtime semantics are
+gated by flags that activate at epoch boundaries, which makes "same
+instruction, same accounts" two different executions on two different
+days. An incomplete bundle renders as **`Reproducible: NO`** with the
+list of gaps, rather than presenting itself as checkable.
+
+The report digest pins **the claim**, so a finding can be quoted or
+referenced without ambiguity about which version is meant. It does not
+attest that the claim is *true* — no hash can. Confirming a finding
+means re-running the bundle. The digest makes the claim immutable;
+re-execution makes it true or false.
+
+`solinv-disclose` depends on serde and sha2 and nothing else: finding a
+divergence needs Crucible, LiteSVM and the Solana crates, but *checking
+a report about one* should not.
+
+Design rationale, API walkthrough and current gaps:
+[`docs/differential-equivalence.md`](docs/differential-equivalence.md).
+
+**Adoption status is honest**: the six differential harnesses under
+`examples/pinocchio-bench-fuzz/fuzz/` (`amm-diff`, `matching-diff`,
+`oracle-diff`, `perp-diff`, `refresh-diff`, `vault-diff`) still use the
+boolean accept/reject check and no CU comparison, so all six carry both
+holes today. Wiring them to `check_codes` / `CuComparison` and emitting
+reports is pending.
 
 ## Quickstart — escrow-demo (catalog 10/10)
 
@@ -220,9 +313,11 @@ solinv/
 ├── crates/
 │   ├── solinv-core/       # 7 implemented invariants + regression tests
 │   ├── solinv-fuzz/       # Crucible re-exports + HasContext/HasInstructionSet traits
+│   │                      #   + bytepoke + differential equivalence oracle
 │   ├── solinv-cheat/      # LiteSVM cheatcode wrappers
 │   ├── solinv-corpus/     # Yellowstone gRPC seeder (scaffold)
-│   ├── solinv-disclose/   # Disclosure formatter (scaffold; templates in docs/)
+│   ├── solinv-disclose/   # Reproducible divergence reports (serde+sha2 only,
+│   │                      #   no Crucible/Solana); platform formatters pending
 │   └── solinv-cli/        # `solinv` binary — score, init, check, fuzz, corpus, disclose
 ├── examples/
 │   ├── escrow-demo/             # planted-bug acceptance fixture (7 invariants)
@@ -234,6 +329,7 @@ solinv/
 │   └── target-scoring.example.toml  # config schema reference
 ├── docs/
 │   ├── invariants/                  # per-invariant 8-section specs
+│   ├── differential-equivalence.md  # oracle rationale + report format
 │   ├── disclosure-template-*.md     # Immunefi / Sherlock / generic templates
 │   ├── research-*.md                # research deliverables
 │   ├── harness-pattern-raw-call.md  # reusable Anchor-version-independent harness
@@ -331,6 +427,13 @@ form shape) with a worked example built from solinv's own
 When a real finding does emerge during dogfooding, the templates make
 it directly submittable without a from-scratch write-up.
 
+These are human-authored submissions for **invariant** findings —
+severity argument, impact narrative, remediation. The machine-generated
+evidence for **differential** findings is `solinv-disclose`'s
+`DivergenceReport` (above). They are complementary: the template is what
+a triage team reads, the report is what they re-run. Wiring the report
+into the platform-specific templates is not implemented yet.
+
 ## Methodology — pre-commit kill criteria
 
 Every gated invariant ships with a §9 in its spec doc that pre-commits
@@ -349,7 +452,10 @@ thing" drift after a negative result.
 
 ```bash
 cargo check --workspace               # verify scaffold (~5s)
+cargo test  --workspace               # all crates (119 tests)
 cargo test  -p solinv-core            # invariant regression tests
+cargo test  -p solinv-fuzz            # bytepoke + differential oracle
+cargo test  -p solinv-disclose        # divergence reports (no Solana deps)
 cargo build --release                 # build CLI binary
 ./target/release/solinv --help
 ```

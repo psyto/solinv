@@ -22,3 +22,8 @@ solana-instruction.workspace = true
 
 # bytepoke module: Anchor discriminator + ix sighash (sha256 of "account:Foo" / "global:bar")
 sha2 = "0.10"
+
+# differential module: convert findings into reproducible reports.
+# Edge points this way (fuzz -> disclose) on purpose: disclose stays
+# free of Crucible/Solana so report consumers don't build the fuzzer.
+solinv-disclose = { path = "../solinv-disclose" }

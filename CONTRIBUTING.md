@@ -66,6 +66,19 @@ checkout: `env!("RAYDIUM_AMM_SO", "set ...")`. See
 [`examples/raydium-amm-fuzz/`](examples/raydium-amm-fuzz/) as the
 canonical template.
 
+A **differential** harness (`*-diff`, two implementations of the same
+program driven through identical actions) additionally needs all three
+oracle surfaces, not just written state:
+
+1. `check_pair_equivalent` / `check_all_pairs` — account bodies.
+2. `ParityDivergence::check_outcomes` — accept/reject **and the error
+   code**. The boolean `::check` cannot see two sides rejecting for
+   different reasons, and error codes are part of a program's ABI.
+3. `CuComparison` — recorded per action, escalated only on regression.
+
+Rationale for all three:
+[`docs/differential-equivalence.md`](docs/differential-equivalence.md).
+
 ### 3. Run calibration on a new protocol
 
 The Phase 2.5 calibration dataset (5 invariants × Raydium ×

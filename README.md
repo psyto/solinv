@@ -164,7 +164,8 @@ packages it with the inputs needed to re-execute it:
 
 - **Sides**: `anchor` (left) vs `pinocchio` (right)
 - **Verdict**: DIVERGED
-- **Claim digest**: `9fbd48ca…` (schema v1)
+- **Claim digest**: `9fbd48ca…` (schema v2, build-scoped — contains a
+  builtin rejection token whose text depends on the producing toolchain)
 - **Reproducible**: NOT FROM THIS REPORT ALONE — the inputs are
   identified by digest, not carried. Obtain them independently, verify
   them against the hashes below, then re-execute.
@@ -172,7 +173,8 @@ packages it with the inputs needed to re-execute it:
 ## Where they parted
 
 - [recorded] `swap` CU: 12400 → 3900 (-8500)
-- **[fault]** `swap(100, 0)` outcome diverged: left rejected (6001), right rejected (6002)
+- **[fault]** `swap(100, 0)` outcome diverged: left rejected (custom:6001),
+  right rejected (builtin:InvalidArgument)
 ```
 
 …followed by each side's `.so`, every account's pre-state and metadata,

@@ -50,7 +50,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use crate::divergence::{Divergence, Sides};
-use crate::repro::{sha256_hex, Completeness, ReproBundle};
+use crate::repro::{sha256_hex, Completeness, ReproBundle, SignerPolicy};
 
 /// What produced the report, so a stale finding can be traced back to
 /// the tool version that made it.
@@ -101,10 +101,37 @@ pub struct Claim {
 }
 
 /// One differential comparison run: what was found, and who found it.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// `Serialize` is implemented by hand rather than derived, so that a
+/// report declaring a schema this build cannot read back cannot be
+/// written out *by any route* — including `serde_json::to_vec` called
+/// directly on the value, which a derived impl would have allowed.
+/// Checking inside [`Self::canonical_json`] alone made the rule a
+/// discipline; here it is an invariant of the type.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub struct DivergenceReport {
     pub tool: ToolStamp,
     pub claim: Claim,
+}
+
+impl Serialize for DivergenceReport {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        use serde::ser::{Error, SerializeStruct};
+        if self.claim.schema != SCHEMA_VERSION {
+            return Err(S::Error::custom(format!(
+                "report declares schema {} but this build understands schema {}; \
+                 refusing to emit a document its own producer would reject",
+                self.claim.schema, SCHEMA_VERSION,
+            )));
+        }
+        let mut st = serializer.serialize_struct("DivergenceReport", 2)?;
+        st.serialize_field("tool", &self.tool)?;
+        st.serialize_field("claim", &self.claim)?;
+        st.end()
+    }
 }
 
 impl DivergenceReport {
@@ -210,6 +237,14 @@ impl DivergenceReport {
         Ok(())
     }
 
+    /// Serialize the claim without the whole-report wrapper. Kept
+    /// separate because `Claim` derives `Serialize` — the schema guard
+    /// lives on [`DivergenceReport`], so this path checks explicitly.
+    fn claim_bytes(&self) -> Result<Vec<u8>> {
+        self.check_schema()?;
+        Ok(serde_json::to_vec(&self.claim)?)
+    }
+
     /// Canonical bytes of the whole report. See the module docs for the
     /// encoding rules and the scope of their guarantee.
     pub fn canonical_json(&self) -> Result<Vec<u8>> {
@@ -219,8 +254,7 @@ impl DivergenceReport {
 
     /// Canonical bytes of the finding alone, excluding provenance.
     pub fn claim_json(&self) -> Result<Vec<u8>> {
-        self.check_schema()?;
-        Ok(serde_json::to_vec(&self.claim)?)
+        self.claim_bytes()
     }
 
     /// Lowercase-hex SHA-256 over [`Self::canonical_json`] — names one
@@ -316,9 +350,11 @@ impl DivergenceReport {
         match self.claim.bundle.completeness() {
             Completeness::InputsCarried => out.push_str(
                 "- **Inputs**: carried — every input this report models \
-                 travels with it and matches its own digest, and the \
-                 execution context is stated. Reconstruct that context, \
-                 then re-execute and compare.\n",
+                 travels with the *serialized* report and matches its own \
+                 digest, and the execution context is stated. Reconstruct \
+                 that context, then re-execute and compare. The payloads \
+                 themselves are base64 in the JSON; the tables below \
+                 identify them rather than reproducing them.\n",
             ),
             Completeness::IdentifiedOnly => {
                 out.push_str(
@@ -388,24 +424,60 @@ impl DivergenceReport {
         if !self.claim.bundle.accounts.is_empty() {
             out.push_str(
                 "| account | pubkey | len | owner | lamports | executable | \
-                 pre-state sha256 | bytes carried |\n",
+                 rent epoch | pre-state sha256 | bytes carried |\n",
             );
-            out.push_str("|---|---|---|---|---|---|---|---|\n");
+            out.push_str("|---|---|---|---|---|---|---|---|---|\n");
             for a in &self.claim.bundle.accounts {
                 let dash = || "—".to_string();
                 out.push_str(&format!(
-                    "| {} | `{}` | {} | {} | {} | {} | `{}` | {} |\n",
+                    "| {} | `{}` | {} | {} | {} | {} | {} | `{}` | {} |\n",
                     a.label,
                     a.pubkey,
                     a.pre_state.len(),
                     a.owner.clone().unwrap_or_else(dash),
                     a.lamports.map(|l| l.to_string()).unwrap_or_else(dash),
                     a.executable.map(|e| e.to_string()).unwrap_or_else(dash),
+                    a.rent_epoch.map(|r| r.to_string()).unwrap_or_else(dash),
                     a.pre_state.sha256(),
                     carried(&a.pre_state),
                 ));
             }
             out.push('\n');
+        }
+
+        if let Some(c) = &self.claim.bundle.context {
+            out.push_str("Execution context:\n\n");
+            out.push_str(&format!("- Runtime: `{}`\n", c.runtime));
+            out.push_str(&format!(
+                "- Clock: slot {}, unix timestamp {}\n",
+                c.clock_slot
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "—".into()),
+                c.clock_unix_timestamp
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "—".into()),
+            ));
+            match &c.signer_policy {
+                SignerPolicy::SigverifyDisabled => out.push_str(
+                    "- Signers: signature verification was OFF; reproduce with \
+                     it off. No keys are needed.\n",
+                ),
+                SignerPolicy::KeysSuppliedOutOfBand { signers } => out.push_str(&format!(
+                    "- Signers: signatures were verified. **Keys are not included \
+                     in this report and never will be.** Supply keypairs for: {}\n",
+                    signers
+                        .iter()
+                        .map(|s| format!("`{s}`"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )),
+            }
+            out.push('\n');
+        } else {
+            out.push_str(
+                "Execution context: not stated — the environment this ran in is \
+                 unknown, so a re-run cannot be assumed comparable.\n\n",
+            );
         }
 
         if !self.claim.bundle.actions.is_empty() {
@@ -420,6 +492,13 @@ impl DivergenceReport {
                         _ => "  [not encoded — description only]".to_string(),
                     }
                 ));
+                for (pubkey, is_signer, is_writable) in &action.accounts {
+                    out.push_str(&format!(
+                        "     {pubkey}{}{}\n",
+                        if *is_signer { " signer" } else { "" },
+                        if *is_writable { " writable" } else { "" },
+                    ));
+                }
             }
             out.push_str("```\n");
         }
@@ -581,6 +660,22 @@ mod tests {
     }
 
     #[test]
+    fn derived_serialization_cannot_bypass_the_schema_guard() {
+        // The hole this closes: fields are public, so a caller can
+        // serialize the value directly. With a derived Serialize that
+        // would emit a document from_json rejects.
+        let mut r = report();
+        r.claim.schema = SCHEMA_VERSION + 1;
+        let err = serde_json::to_vec(&r).unwrap_err();
+        assert!(err.to_string().contains("refusing to emit"), "{err}");
+
+        // The valid case still round-trips through plain serde.
+        let ok = report();
+        let bytes = serde_json::to_vec(&ok).unwrap();
+        assert_eq!(DivergenceReport::from_json(&bytes).unwrap(), ok);
+    }
+
+    #[test]
     fn a_report_this_build_could_not_read_back_is_not_serialized() {
         // claim is public, so an unsupported version can be set in
         // process. Emitting it would produce a document its own
@@ -640,11 +735,19 @@ mod tests {
                         .with_metadata("Owner111", 5_000_000, false, 0),
                 )
                 .with_feature_set("mainnet-beta@epoch-812")
-                .with_action(ActionRef::encoded("swap", "Anch111", &[1, 2], vec![]))
-                .with_context(ExecutionContext::new(
-                    "litesvm 0.9.1 via crucible v0.1.0",
-                    SignerPolicy::SigverifyDisabled,
-                )),
+                .with_action(ActionRef::encoded(
+                    "swap",
+                    "Anch111",
+                    &[1, 2],
+                    vec![("User111".into(), true, true)],
+                ))
+                .with_context(
+                    ExecutionContext::new(
+                        "litesvm 0.9.1 via crucible v0.1.0",
+                        SignerPolicy::SigverifyDisabled,
+                    )
+                    .with_clock(300_000_000, 1_775_000_000),
+                ),
         )
         .with_divergence(body_divergence());
         let md = r.to_markdown();
@@ -652,10 +755,65 @@ mod tests {
         // inputs it models, which is a smaller claim than replayability.
         assert!(md.contains("**Inputs**: carried"), "{md}");
         assert!(md.contains("Reconstruct that context"), "{md}");
+        // A header that says the inputs travel must be backed by the
+        // report actually showing them.
         assert!(
-            md.contains("| pool | `Pool111` | 24 | Owner111 | 5000000 |"),
+            md.contains("| pool | `Pool111` | 24 | Owner111 | 5000000 | false | 0 |"),
             "{md}"
         );
+        assert!(
+            md.contains("Runtime: `litesvm 0.9.1 via crucible v0.1.0`"),
+            "{md}"
+        );
+        assert!(
+            md.contains("slot 300000000, unix timestamp 1775000000"),
+            "{md}"
+        );
+        assert!(md.contains("verification was OFF"), "{md}");
+        assert!(md.contains("User111 signer writable"), "{md}");
+        // …while being clear that the payloads live in the JSON.
+        assert!(md.contains("base64 in the JSON"), "{md}");
+    }
+
+    #[test]
+    fn a_report_without_a_context_says_the_environment_is_unknown() {
+        let md = report().with_divergence(body_divergence()).to_markdown();
+        assert!(md.contains("Execution context: not stated"), "{md}");
+    }
+
+    #[test]
+    fn out_of_band_signers_are_named_and_keys_disclaimed() {
+        use crate::repro::AccountRef;
+        let r = DivergenceReport::new(
+            "amm-diff",
+            Sides::anchor_pinocchio(),
+            ReproBundle::new()
+                .with_program(ProgramRef::with_code_inline("anchor", "Anch111", b"a"))
+                .with_program(ProgramRef::with_code_inline("pinocchio", "Pino111", b"p"))
+                .with_account(
+                    AccountRef::with_data_inline("pool", "Pool111", &[0u8; 24])
+                        .with_metadata("Owner111", 5_000_000, false, 0),
+                )
+                .with_feature_set("mainnet-beta@epoch-812")
+                .with_action(ActionRef::encoded(
+                    "swap",
+                    "Anch111",
+                    &[1],
+                    vec![("User111".into(), true, false)],
+                ))
+                .with_context(
+                    ExecutionContext::new(
+                        "litesvm 0.9.1",
+                        SignerPolicy::KeysSuppliedOutOfBand {
+                            signers: vec!["User111".into()],
+                        },
+                    )
+                    .with_clock(1, 2),
+                ),
+        );
+        let md = r.to_markdown();
+        assert!(md.contains("Keys are not included"), "{md}");
+        assert!(md.contains("`User111`"), "{md}");
     }
 
     #[test]

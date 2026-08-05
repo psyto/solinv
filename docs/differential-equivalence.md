@@ -320,7 +320,7 @@ into the platform-specific templates is not done yet — see Status.
   its own `*_cu_no_regression_only` invariant variant.
 - `Divergence` / `ReproBundle` / `DivergenceReport`, canonical
   encoding, digest, Markdown rendering (`solinv-disclose`,
-  46 tests + 6 doctests).
+  54 tests + 6 doctests).
 
 **Not implemented**
 
@@ -330,10 +330,10 @@ into the platform-specific templates is not done yet — see Status.
   `DivergenceReport` conversions are not wired into any of them — a
   finding still leaves the fuzz worker as a `fuzz_assert!` log line,
   not as a bundle.
-- **Nothing populates a self-contained bundle.** Every report this
+- **Nothing populates a fully carried bundle.** Every report this
   repository can currently produce is `IdentifiedOnly`. The inline
-  carrier, account metadata and instruction encoding all exist and are
-  tested; no producer fills them in.
+  carrier, account metadata, instruction encoding, execution context and
+  signer policy all exist and are tested; no producer fills them in.
 - The `TxOutcome` adapters (`check_outcomes`, `from_outcomes`,
   `regression`) are thin forwarding over tested decision logic and are
   not themselves covered — constructing a `TxOutcome` needs

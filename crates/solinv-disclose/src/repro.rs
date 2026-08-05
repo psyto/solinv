@@ -485,6 +485,39 @@ pub struct ExecutionContext {
 }
 
 impl ExecutionContext {
+    /// Whether this context actually states an environment, as opposed
+    /// to merely existing.
+    ///
+    /// A present-but-empty context is the same failure mode as a
+    /// present-but-unverified payload: a field satisfied structurally
+    /// while saying nothing. The runtime string is free-form and cannot
+    /// be machine-checked against reality — so the one thing that *can*
+    /// be enforced, that it says something, is enforced here.
+    pub fn is_stated(&self) -> bool {
+        !self.runtime.trim().is_empty()
+            && self.clock_slot.is_some()
+            && self.clock_unix_timestamp.is_some()
+    }
+
+    /// Whether the policy accounts for every signer the actions
+    /// declare.
+    ///
+    /// `SigverifyDisabled` covers any set: nothing is checked at
+    /// execution, so nothing needs supplying. `KeysSuppliedOutOfBand`
+    /// has to name every pubkey an action meta marks as a signer —
+    /// an empty list beside signing metas is a policy that does not
+    /// describe the run.
+    pub fn covers_signers(&self, actions: &[ActionRef]) -> bool {
+        match &self.signer_policy {
+            SignerPolicy::SigverifyDisabled => true,
+            SignerPolicy::KeysSuppliedOutOfBand { signers } => actions
+                .iter()
+                .flat_map(|a| a.accounts.iter())
+                .filter(|(_, is_signer, _)| *is_signer)
+                .all(|(pubkey, _, _)| signers.contains(pubkey)),
+        }
+    }
+
     pub fn new(runtime: impl Into<String>, signer_policy: SignerPolicy) -> Self {
         Self {
             runtime: runtime.into(),
@@ -615,7 +648,10 @@ impl ReproBundle {
             && self.accounts.iter().all(|a| a.is_complete())
             && self.actions.iter().all(|a| a.is_replayable())
             && !self.accounts.is_empty()
-            && self.context.is_some();
+            && self
+                .context
+                .as_ref()
+                .is_some_and(|c| c.is_stated() && c.covers_signers(&self.actions));
         if carried {
             Completeness::InputsCarried
         } else {
@@ -689,9 +725,13 @@ impl ReproBundle {
         for a in &self.accounts {
             if !a.pre_state.is_carried() {
                 gaps.push(format!("`{}` account data", a.label));
-            } else if a.owner.is_none() || a.lamports.is_none() || a.executable.is_none() {
+            } else if a.owner.is_none()
+                || a.lamports.is_none()
+                || a.executable.is_none()
+                || a.rent_epoch.is_none()
+            {
                 gaps.push(format!(
-                    "`{}` account metadata (owner/lamports/executable)",
+                    "`{}` account metadata (owner/lamports/executable/rent_epoch)",
                     a.label
                 ));
             }
@@ -701,8 +741,15 @@ impl ReproBundle {
                 gaps.push(format!("encoding for action `{}`", a.label));
             }
         }
-        if self.context.is_none() {
-            gaps.push("the execution context and signer policy".to_string());
+        match &self.context {
+            None => gaps.push("the execution context and signer policy".to_string()),
+            Some(c) if !c.is_stated() => {
+                gaps.push("a stated execution context (runtime description and clock)".to_string())
+            }
+            Some(c) if !c.covers_signers(&self.actions) => {
+                gaps.push("a signer policy covering every signer the actions declare".to_string())
+            }
+            Some(_) => {}
         }
         gaps
     }
@@ -782,10 +829,13 @@ mod tests {
                 &[1, 2, 3],
                 vec![("Pool111".into(), false, true)],
             ))
-            .with_context(ExecutionContext::new(
-                "litesvm 0.9.1 via crucible v0.1.0",
-                SignerPolicy::SigverifyDisabled,
-            ))
+            .with_context(
+                ExecutionContext::new(
+                    "litesvm 0.9.1 via crucible v0.1.0",
+                    SignerPolicy::SigverifyDisabled,
+                )
+                .with_clock(300_000_000, 1_775_000_000),
+            )
     }
 
     #[test]
@@ -827,10 +877,82 @@ mod tests {
     }
 
     #[test]
-    fn account_without_rent_epoch_is_not_carried() {
+    fn account_without_rent_epoch_is_not_carried_and_says_which_field() {
         let mut b = carried_bundle();
         b.accounts[0].rent_epoch = None;
         assert_eq!(b.completeness(), Completeness::IdentifiedOnly);
+        assert!(
+            b.not_carried().iter().any(|g| g.contains("rent_epoch")),
+            "a gap that blocks the verdict must be named: {:?}",
+            b.not_carried()
+        );
+    }
+
+    #[test]
+    fn a_context_that_states_nothing_does_not_count_as_stated() {
+        // Present-but-empty is the same failure as present-but-
+        // unverified: a field satisfied structurally while saying
+        // nothing.
+        let mut b = carried_bundle();
+        b.context = Some(ExecutionContext::new(
+            "   ",
+            SignerPolicy::SigverifyDisabled,
+        ));
+        assert_eq!(b.completeness(), Completeness::IdentifiedOnly);
+        assert!(b
+            .not_carried()
+            .iter()
+            .any(|g| g.contains("runtime description")));
+
+        let mut b = carried_bundle();
+        b.context = Some(ExecutionContext::new(
+            "litesvm 0.9.1",
+            SignerPolicy::SigverifyDisabled,
+        )); // no clock
+        assert_eq!(b.completeness(), Completeness::IdentifiedOnly);
+    }
+
+    #[test]
+    fn signer_policy_must_cover_the_signers_the_actions_declare() {
+        let signing_action = ActionRef::encoded(
+            "swap",
+            "Anch111",
+            &[1],
+            vec![
+                ("User111".into(), true, true),
+                ("Pool111".into(), false, true),
+            ],
+        );
+
+        let bundle = |policy: SignerPolicy| {
+            let mut b = carried_bundle();
+            b.actions = vec![signing_action.clone()];
+            b.context = Some(ExecutionContext::new("litesvm 0.9.1", policy).with_clock(1, 2));
+            b
+        };
+
+        // Nothing is verified at execution, so nothing needs supplying.
+        assert_eq!(
+            bundle(SignerPolicy::SigverifyDisabled).completeness(),
+            Completeness::InputsCarried
+        );
+
+        // An empty list beside a signing meta is a policy that does not
+        // describe the run.
+        let empty = bundle(SignerPolicy::KeysSuppliedOutOfBand { signers: vec![] });
+        assert_eq!(empty.completeness(), Completeness::IdentifiedOnly);
+        assert!(empty
+            .not_carried()
+            .iter()
+            .any(|g| g.contains("signer policy")));
+
+        assert_eq!(
+            bundle(SignerPolicy::KeysSuppliedOutOfBand {
+                signers: vec!["User111".into()]
+            })
+            .completeness(),
+            Completeness::InputsCarried
+        );
     }
 
     #[test]

@@ -38,16 +38,14 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use solinv_fuzz::{
-    check_all_pairs, read_pair_bodies, DiffAccountPair, DifferentialFixture, HasContext,
-    ParityDivergence,
+    check_all_pairs, read_pair_bodies, CuComparison, DiffAccountPair, DifferentialFixture,
+    HasContext, ParityDivergence, TxOutcome,
 };
 
 const ANCHOR_W10_PROGRAM_ID_STR: &str = "2N5cmNMVnqrQDWaKE2oP92bVDwMvGNW69k7mpQfyyiMh";
 const PINO_W10_PROGRAM_ID_STR: &str = "BHTGrn49Rw47mahPPhupKShja328C13ibSve4b2gAF9E";
-const ANCHOR_W10_SO_PATH: &str =
-    "../../../../pinocchio-bench/target/deploy/anchor_w10_vault.so";
-const PINO_W10_SO_PATH: &str =
-    "../../../../pinocchio-bench/target/deploy/pinocchio_w10_vault.so";
+const ANCHOR_W10_SO_PATH: &str = "../../../../pinocchio-bench/target/deploy/anchor_w10_vault.so";
+const PINO_W10_SO_PATH: &str = "../../../../pinocchio-bench/target/deploy/pinocchio_w10_vault.so";
 
 const SYSTEM_PROGRAM_ID: Pubkey = Pubkey::new_from_array([0u8; 32]);
 const TOKEN_PROGRAM_ID_STR: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
@@ -316,10 +314,7 @@ impl VaultDiffFixture {
     /// Range is 1..1M so the first ~10 deposits fit within user_underlying's
     /// 10M starting balance — past that, deposits would fail SPL transfer
     /// and exercise the execution-parity path instead.
-    pub fn action_deposit(
-        &mut self,
-        #[range(1..1_000_000)] deposit_amount: u64,
-    ) -> bool {
+    pub fn action_deposit(&mut self, #[range(1..1_000_000)] deposit_amount: u64) -> bool {
         let anchor_ix = build_anchor_deposit_ix(
             self.anchor_program_id,
             self.user.pubkey(),
@@ -423,7 +418,23 @@ impl DifferentialFixture for VaultDiffFixture {
 // Differential checks
 // ---------------------------------------------------------------------
 
-fn check_execution_parity(fixture: &mut VaultDiffFixture) {
+/// Drive the probe actions through both sides and hand back the raw
+/// outcomes, labelled by the action that produced them.
+///
+/// The outcomes are returned rather than collapsed to booleans on the
+/// spot because two of the three comparison surfaces live inside them:
+/// the rejection *reason* (custom error code) and the compute units
+/// consumed. `map(|o| o.is_success())` throws both away.
+///
+/// `None` on a side means `send()` itself failed — a harness-level
+/// failure (blockhash, signers, serialization), not a statement about
+/// program behaviour. Callers skip those probes rather than reading
+/// them as a divergence.
+fn probe_actions(
+    fixture: &mut VaultDiffFixture,
+) -> Vec<(String, Option<TxOutcome>, Option<TxOutcome>)> {
+    let mut out = Vec::new();
+
     let probes: &[u64] = &[1, 100, 1_000, 10_000, 100_000];
     for &deposit_amount in probes {
         let anchor_ix = build_anchor_deposit_ix(
@@ -447,30 +458,71 @@ fn check_execution_parity(fixture: &mut VaultDiffFixture) {
             deposit_amount,
         );
 
-        let anchor_ok = fixture
+        let anchor = fixture
             .ctx
             .raw_call(anchor_ix)
             .fee_payer(&*fixture.fee_payer)
             .signers(&[&*fixture.fee_payer, &*fixture.user])
             .send()
-            .map(|o| o.is_success())
-            .unwrap_or(false);
+            .ok();
 
-        let pino_ok = fixture
+        let pino = fixture
             .ctx
             .raw_call(pino_ix)
             .fee_payer(&*fixture.fee_payer)
             .signers(&[&*fixture.fee_payer, &*fixture.user])
             .send()
-            .map(|o| o.is_success())
-            .unwrap_or(false);
+            .ok();
 
-        if let Some(div) = ParityDivergence::check(
-            &format!("deposit(amount={})", deposit_amount),
-            anchor_ok,
-            pino_ok,
-        ) {
+        out.push((format!("deposit(amount={})", deposit_amount), anchor, pino));
+    }
+
+    out
+}
+
+/// Execution parity: the two sides must make the same accept/reject
+/// decision **and**, when they reject, reject for the same reason.
+///
+/// The error code is checked because it is part of the program's
+/// observable ABI — a caller branching on `6001` behaves differently
+/// against a rewrite that returns `6002`, even though a boolean
+/// accept/reject comparison calls that agreement.
+fn check_execution_parity(fixture: &mut VaultDiffFixture) {
+    for (label, anchor, pino) in probe_actions(fixture) {
+        let (Some(anchor), Some(pino)) = (anchor, pino) else {
+            // Harness-level send failure on at least one side — nothing
+            // can be concluded about program behaviour. Fail-soft, in
+            // line with `read_pair_bodies`.
+            continue;
+        };
+
+        if let Some(div) = ParityDivergence::check_outcomes(&label, &anchor, &pino) {
             fuzz_assert!(false, "{}", div);
+        }
+    }
+}
+
+/// CU non-regression: the Pinocchio side must not cost more than the
+/// Anchor side it replaces.
+///
+/// Deliberately its own variant rather than part of the parity check.
+/// A CU difference is the *point* of the rewrite, so it is a
+/// measurement, not a defect — only the wrong direction is a defect,
+/// and mixing that into a correctness campaign would report a
+/// performance finding as a behavioural one.
+///
+/// It still belongs in the differential rather than in the
+/// pinocchio-bench leaderboard: CU is consensus-relevant, so a slower
+/// rewrite writing byte-identical state is not equivalent — it can
+/// exceed the transaction limit and fail where the original succeeded.
+fn check_cu_no_regression(fixture: &mut VaultDiffFixture) {
+    for (label, anchor, pino) in probe_actions(fixture) {
+        let (Some(anchor), Some(pino)) = (anchor, pino) else {
+            continue;
+        };
+
+        if let Some(cmp) = CuComparison::regression(&label, &anchor, &pino) {
+            fuzz_assert!(false, "{}", cmp);
         }
     }
 }
@@ -548,4 +600,9 @@ fn invariant_vault_diff_state_equivalent_only(fixture: &mut VaultDiffFixture) {
 #[invariant_test]
 fn invariant_vault_diff_nav_match_only(fixture: &mut VaultDiffFixture) {
     check_nav_match(fixture);
+}
+
+#[invariant_test]
+fn invariant_vault_diff_cu_no_regression_only(fixture: &mut VaultDiffFixture) {
+    check_cu_no_regression(fixture);
 }

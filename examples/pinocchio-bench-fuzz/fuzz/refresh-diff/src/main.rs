@@ -4,7 +4,8 @@
 //! Pinocchio W9 lending-refresh programs from `psyto/pinocchio-bench` in one
 //! Crucible `TestContext` and asserts:
 //!
-//! 1. **Execution parity** — both refreshes succeed or both fail
+//! 1. **Execution parity** — both refreshes succeed or both fail, and when
+//!    they fail they fail with the same custom error code
 //! 2. **Obligation body equivalence** — `(deposit, borrow, last_health, last_update_slot)`
 //!    byte-identical after stripping Anchor's 8-byte account discriminator
 //! 3. **Reserve body equivalence** — both reserve_a and reserve_b match byte-for-byte
@@ -42,8 +43,8 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use solinv_fuzz::{
-    check_all_pairs, check_pair_equivalent, read_pair_bodies, DiffAccountPair,
-    DifferentialFixture, HasContext, ParityDivergence,
+    check_all_pairs, check_pair_equivalent, read_pair_bodies, CuComparison, DiffAccountPair,
+    DifferentialFixture, HasContext, ParityDivergence, TxOutcome,
 };
 
 // ---------------------------------------------------------------------
@@ -53,10 +54,8 @@ use solinv_fuzz::{
 
 const ANCHOR_W9_PROGRAM_ID_STR: &str = "AhdfeAdeXFQNoqfg6XMHU59bi5cty5CZS7b92A1ERZK9";
 const PINO_W9_PROGRAM_ID_STR: &str = "AUfBb1dJr392vYKgKMqEYJoWTTjeE6GsWctcrir6mg3";
-const ANCHOR_W9_SO_PATH: &str =
-    "../../../../pinocchio-bench/target/deploy/anchor_w9_refresh.so";
-const PINO_W9_SO_PATH: &str =
-    "../../../../pinocchio-bench/target/deploy/pinocchio_w9_refresh.so";
+const ANCHOR_W9_SO_PATH: &str = "../../../../pinocchio-bench/target/deploy/anchor_w9_refresh.so";
+const PINO_W9_SO_PATH: &str = "../../../../pinocchio-bench/target/deploy/pinocchio_w9_refresh.so";
 
 const SYSTEM_PROGRAM_ID: Pubkey = Pubkey::new_from_array([0u8; 32]);
 
@@ -298,8 +297,10 @@ impl RefreshDiffFixture {
             make_oracle_body(INITIAL_ORACLE_B_PRICE, 1),
         );
 
-        let pino_obligation =
-            make_pino_acc(&mut ctx, make_obligation_body(INITIAL_DEPOSIT, INITIAL_BORROW));
+        let pino_obligation = make_pino_acc(
+            &mut ctx,
+            make_obligation_body(INITIAL_DEPOSIT, INITIAL_BORROW),
+        );
         let pino_reserve_a = make_pino_acc(
             &mut ctx,
             make_reserve_body(
@@ -356,10 +357,7 @@ impl RefreshDiffFixture {
     /// SVM session the fuzzer can probe with arbitrary slot values
     /// including ones that go backward — useful to exercise the
     /// `saturating_sub` logic in the math.
-    pub fn action_refresh(
-        &mut self,
-        #[range(1..10_000_000)] current_slot: u64,
-    ) -> bool {
+    pub fn action_refresh(&mut self, #[range(1..10_000_000)] current_slot: u64) -> bool {
         let anchor_ix = build_anchor_refresh_ix(
             self.anchor_program_id,
             self.user.pubkey(),
@@ -467,7 +465,23 @@ impl DifferentialFixture for RefreshDiffFixture {
 // Differential checks
 // ---------------------------------------------------------------------
 
-fn check_execution_parity(fixture: &mut RefreshDiffFixture) {
+/// Drive the probe actions through both sides and hand back the raw
+/// outcomes, labelled by the action that produced them.
+///
+/// The outcomes are returned rather than collapsed to booleans on the
+/// spot because two of the three comparison surfaces live inside them:
+/// the rejection *reason* (custom error code) and the compute units
+/// consumed. `map(|o| o.is_success())` throws both away.
+///
+/// `None` on a side means `send()` itself failed — a harness-level
+/// failure (blockhash, signers, serialization), not a statement about
+/// program behaviour. Callers skip those probes rather than reading
+/// them as a divergence.
+fn probe_actions(
+    fixture: &mut RefreshDiffFixture,
+) -> Vec<(String, Option<TxOutcome>, Option<TxOutcome>)> {
+    let mut out = Vec::new();
+
     // Probe slots specifically chosen to stress saturating_sub paths.
     let probes: &[u64] = &[1, 1_000, 1_000_000, 0, 100, u64::MAX / 2];
 
@@ -493,30 +507,75 @@ fn check_execution_parity(fixture: &mut RefreshDiffFixture) {
             current_slot,
         );
 
-        let anchor_ok = fixture
+        let anchor = fixture
             .ctx
             .raw_call(anchor_ix)
             .fee_payer(&*fixture.fee_payer)
             .signers(&[&*fixture.fee_payer, &*fixture.user])
             .send()
-            .map(|o| o.is_success())
-            .unwrap_or(false);
+            .ok();
 
-        let pino_ok = fixture
+        let pino = fixture
             .ctx
             .raw_call(pino_ix)
             .fee_payer(&*fixture.fee_payer)
             .signers(&[&*fixture.fee_payer, &*fixture.user])
             .send()
-            .map(|o| o.is_success())
-            .unwrap_or(false);
+            .ok();
 
-        if let Some(div) = ParityDivergence::check(
-            &format!("refresh(current_slot={})", current_slot),
-            anchor_ok,
-            pino_ok,
-        ) {
+        out.push((
+            format!("refresh(current_slot={})", current_slot),
+            anchor,
+            pino,
+        ));
+    }
+
+    out
+}
+
+/// Execution parity: the two sides must make the same accept/reject
+/// decision **and**, when they reject, reject for the same reason.
+///
+/// The error code is checked because it is part of the program's
+/// observable ABI — a caller branching on `6001` behaves differently
+/// against a rewrite that returns `6002`, even though a boolean
+/// accept/reject comparison calls that agreement.
+fn check_execution_parity(fixture: &mut RefreshDiffFixture) {
+    for (label, anchor, pino) in probe_actions(fixture) {
+        let (Some(anchor), Some(pino)) = (anchor, pino) else {
+            // Harness-level send failure on at least one side — nothing
+            // can be concluded about program behaviour. Fail-soft, in
+            // line with `read_pair_bodies`.
+            continue;
+        };
+
+        if let Some(div) = ParityDivergence::check_outcomes(&label, &anchor, &pino) {
             fuzz_assert!(false, "{}", div);
+        }
+    }
+}
+
+/// CU non-regression: the Pinocchio side must not cost more than the
+/// Anchor side it replaces.
+///
+/// Deliberately its own variant rather than part of the parity check.
+/// A CU difference is the *point* of the rewrite, so it is a
+/// measurement, not a defect — only the wrong direction is a defect,
+/// and mixing that into a correctness campaign would report a
+/// performance finding as a behavioural one.
+///
+/// It still belongs in the differential rather than in the
+/// pinocchio-bench leaderboard: CU is consensus-relevant, so a slower
+/// rewrite writing byte-identical state is not equivalent — it can
+/// exceed the transaction limit and fail where the original succeeded.
+fn check_cu_no_regression(fixture: &mut RefreshDiffFixture) {
+    for (label, anchor, pino) in probe_actions(fixture) {
+        let (Some(anchor), Some(pino)) = (anchor, pino) else {
+            continue;
+        };
+
+        if let Some(cmp) = CuComparison::regression(&label, &anchor, &pino) {
+            fuzz_assert!(false, "{}", cmp);
         }
     }
 }
@@ -711,4 +770,9 @@ fn invariant_refresh_diff_monotonic_rate_only(fixture: &mut RefreshDiffFixture) 
 #[invariant_test]
 fn invariant_refresh_diff_monotonic_slot_only(fixture: &mut RefreshDiffFixture) {
     check_monotonic_slot(fixture);
+}
+
+#[invariant_test]
+fn invariant_refresh_diff_cu_no_regression_only(fixture: &mut RefreshDiffFixture) {
+    check_cu_no_regression(fixture);
 }

@@ -177,21 +177,23 @@ into the platform-specific templates is not done yet — see Status.
 
 - All three oracle surfaces, with `From` conversions into the report
   types (`solinv-fuzz`, 29 tests).
+- Adoption across all six differential harnesses
+  (`examples/pinocchio-bench-fuzz/fuzz/{amm,matching,oracle,perp,refresh,vault}-diff`):
+  each drives its probe actions through `probe_actions`, which returns
+  the raw `TxOutcome`s instead of collapsing them to booleans, then
+  applies `check_outcomes` for parity and exposes CU non-regression as
+  its own `*_cu_no_regression_only` invariant variant.
 - `Divergence` / `ReproBundle` / `DivergenceReport`, canonical
   encoding, digest, Markdown rendering (`solinv-disclose`,
   23 tests + 5 doctests).
 
 **Not implemented**
 
-- **No harness emits a report yet, and none has adopted the two new
-  checks.** Six differential harnesses live under
-  `examples/pinocchio-bench-fuzz/fuzz/` — `amm-diff`, `matching-diff`,
-  `oracle-diff`, `perp-diff`, `refresh-diff`, `vault-diff`. All of them
-  currently call `check_pair_equivalent` / `check_all_pairs` plus the
-  boolean `ParityDivergence::check`, so all six still carry both holes:
-  a rewrite that changes an error code or regresses on CU passes.
-  Adopting `check_codes` / `CuComparison` and emitting a
-  `DivergenceReport` is a change in this repository, per harness.
+- **No harness emits a report yet.** All six differential harnesses
+  under `examples/pinocchio-bench-fuzz/fuzz/` now check all three
+  surfaces (see below), but the `DivergenceReport` conversions are not
+  wired into any of them — a finding still leaves the fuzz worker as a
+  `fuzz_assert!` log line, not as a reproducible bundle.
 - The `TxOutcome` adapters (`check_outcomes`, `from_outcomes`,
   `regression`) are untested — constructing a `TxOutcome` needs
   `Signature` / `InnerInstructionsList` / `TransactionReturnData`,

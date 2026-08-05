@@ -40,3 +40,6 @@ invariant_amm_diff_execution_parity_only = []
 invariant_amm_diff_pool_equivalent_only = []
 invariant_amm_diff_token_accounts_equivalent_only = []
 invariant_amm_diff_constant_product_only = []
+# CU non-regression is kept separate from the correctness variants: a CU
+# difference is the goal of the rewrite, only the wrong direction is a bug.
+invariant_amm_diff_cu_no_regression_only = []

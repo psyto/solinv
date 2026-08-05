@@ -59,8 +59,8 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use solinv_fuzz::{
-    check_all_pairs, check_pair_equivalent, read_pair_bodies, DiffAccountPair,
-    DifferentialFixture, HasContext, ParityDivergence,
+    check_all_pairs, check_pair_equivalent, read_pair_bodies, CuComparison, DiffAccountPair,
+    DifferentialFixture, HasContext, ParityDivergence, TxOutcome,
 };
 
 // ---------------------------------------------------------------------
@@ -70,10 +70,8 @@ use solinv_fuzz::{
 
 const ANCHOR_W4_PROGRAM_ID_STR: &str = "F84VDYJd5ukacECaHVkR6QJR1rD9nGmd2AJUw3qDvMN2";
 const PINO_W4_PROGRAM_ID_STR: &str = "EZxAdAKQbnD6HZqchzuFdD3UZYVUeF5u7ffYj2pHPbc8";
-const ANCHOR_W4_SO_PATH: &str =
-    "../../../../pinocchio-bench/target/deploy/anchor_w4_matching.so";
-const PINO_W4_SO_PATH: &str =
-    "../../../../pinocchio-bench/target/deploy/pinocchio_w4_matching.so";
+const ANCHOR_W4_SO_PATH: &str = "../../../../pinocchio-bench/target/deploy/anchor_w4_matching.so";
+const PINO_W4_SO_PATH: &str = "../../../../pinocchio-bench/target/deploy/pinocchio_w4_matching.so";
 
 const SYSTEM_PROGRAM_ID: Pubkey = Pubkey::new_from_array([0u8; 32]);
 
@@ -354,12 +352,7 @@ impl DifferentialFixture for MatchingDiffFixture {
                 self.pino_market,
                 W4_MARKET_BODY,
             ),
-            DiffAccountPair::anchor_disc_8(
-                "book",
-                self.anchor_book,
-                self.pino_book,
-                W4_BOOK_BODY,
-            ),
+            DiffAccountPair::anchor_disc_8("book", self.anchor_book, self.pino_book, W4_BOOK_BODY),
         ]
     }
 }
@@ -369,9 +362,26 @@ impl DifferentialFixture for MatchingDiffFixture {
 // ---------------------------------------------------------------------
 
 /// Replays the last fuzz-derived action against both sides and asserts
-/// execution parity: either both succeed or both fail. A divergence
+/// execution parity: either both succeed or both fail, and failures
+/// carry the same custom error code. A divergence
 /// where one side accepts and the other rejects is an immediate bug.
-fn check_execution_parity(fixture: &mut MatchingDiffFixture) {
+/// Drive the probe actions through both sides and hand back the raw
+/// outcomes, labelled by the action that produced them.
+///
+/// The outcomes are returned rather than collapsed to booleans on the
+/// spot because two of the three comparison surfaces live inside them:
+/// the rejection *reason* (custom error code) and the compute units
+/// consumed. `map(|o| o.is_success())` throws both away.
+///
+/// `None` on a side means `send()` itself failed — a harness-level
+/// failure (blockhash, signers, serialization), not a statement about
+/// program behaviour. Callers skip those probes rather than reading
+/// them as a divergence.
+fn probe_actions(
+    fixture: &mut MatchingDiffFixture,
+) -> Vec<(String, Option<TxOutcome>, Option<TxOutcome>)> {
+    let mut out = Vec::new();
+
     // Use a deterministic probe input. The real fuzz inputs already
     // went through action_place_order above and produced any state
     // changes; this probe is a stress against ordering edge cases.
@@ -401,30 +411,75 @@ fn check_execution_parity(fixture: &mut MatchingDiffFixture) {
             qty,
         );
 
-        let anchor_ok = fixture
+        let anchor = fixture
             .ctx
             .raw_call(anchor_ix)
             .fee_payer(&*fixture.fee_payer)
             .signers(&[&*fixture.fee_payer, &*fixture.user])
             .send()
-            .map(|o| o.is_success())
-            .unwrap_or(false);
+            .ok();
 
-        let pino_ok = fixture
+        let pino = fixture
             .ctx
             .raw_call(pino_ix)
             .fee_payer(&*fixture.fee_payer)
             .signers(&[&*fixture.fee_payer, &*fixture.user])
             .send()
-            .map(|o| o.is_success())
-            .unwrap_or(false);
+            .ok();
 
-        if let Some(div) = ParityDivergence::check(
-            &format!("place_order(price={}, qty={})", price, qty),
-            anchor_ok,
-            pino_ok,
-        ) {
+        out.push((
+            format!("place_order(price={}, qty={})", price, qty),
+            anchor,
+            pino,
+        ));
+    }
+
+    out
+}
+
+/// Execution parity: the two sides must make the same accept/reject
+/// decision **and**, when they reject, reject for the same reason.
+///
+/// The error code is checked because it is part of the program's
+/// observable ABI — a caller branching on `6001` behaves differently
+/// against a rewrite that returns `6002`, even though a boolean
+/// accept/reject comparison calls that agreement.
+fn check_execution_parity(fixture: &mut MatchingDiffFixture) {
+    for (label, anchor, pino) in probe_actions(fixture) {
+        let (Some(anchor), Some(pino)) = (anchor, pino) else {
+            // Harness-level send failure on at least one side — nothing
+            // can be concluded about program behaviour. Fail-soft, in
+            // line with `read_pair_bodies`.
+            continue;
+        };
+
+        if let Some(div) = ParityDivergence::check_outcomes(&label, &anchor, &pino) {
             fuzz_assert!(false, "{}", div);
+        }
+    }
+}
+
+/// CU non-regression: the Pinocchio side must not cost more than the
+/// Anchor side it replaces.
+///
+/// Deliberately its own variant rather than part of the parity check.
+/// A CU difference is the *point* of the rewrite, so it is a
+/// measurement, not a defect — only the wrong direction is a defect,
+/// and mixing that into a correctness campaign would report a
+/// performance finding as a behavioural one.
+///
+/// It still belongs in the differential rather than in the
+/// pinocchio-bench leaderboard: CU is consensus-relevant, so a slower
+/// rewrite writing byte-identical state is not equivalent — it can
+/// exceed the transaction limit and fail where the original succeeded.
+fn check_cu_no_regression(fixture: &mut MatchingDiffFixture) {
+    for (label, anchor, pino) in probe_actions(fixture) {
+        let (Some(anchor), Some(pino)) = (anchor, pino) else {
+            continue;
+        };
+
+        if let Some(cmp) = CuComparison::regression(&label, &anchor, &pino) {
+            fuzz_assert!(false, "{}", cmp);
         }
     }
 }
@@ -510,4 +565,9 @@ fn invariant_diff_state_equivalent_only(fixture: &mut MatchingDiffFixture) {
 #[invariant_test]
 fn invariant_diff_sequence_match_only(fixture: &mut MatchingDiffFixture) {
     check_sequence_match(fixture);
+}
+
+#[invariant_test]
+fn invariant_diff_cu_no_regression_only(fixture: &mut MatchingDiffFixture) {
+    check_cu_no_regression(fixture);
 }

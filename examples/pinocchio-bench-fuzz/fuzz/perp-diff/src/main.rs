@@ -47,16 +47,14 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use solinv_fuzz::{
-    check_all_pairs, read_pair_bodies, DiffAccountPair, DifferentialFixture, HasContext,
-    ParityDivergence,
+    check_all_pairs, read_pair_bodies, CuComparison, DiffAccountPair, DifferentialFixture,
+    HasContext, ParityDivergence, TxOutcome,
 };
 
 const ANCHOR_W12_PROGRAM_ID_STR: &str = "AUe7aMBwQieB84WLK2CpbySsiQdjU5E3D3xmtY4s1vNd";
 const PINO_W12_PROGRAM_ID_STR: &str = "FF8a4bNwL6CP2bbd295kMCAut3UtK8Fiw2KkhhHaRbCR";
-const ANCHOR_W12_SO_PATH: &str =
-    "../../../../pinocchio-bench/target/deploy/anchor_w12_perp.so";
-const PINO_W12_SO_PATH: &str =
-    "../../../../pinocchio-bench/target/deploy/pinocchio_w12_perp.so";
+const ANCHOR_W12_SO_PATH: &str = "../../../../pinocchio-bench/target/deploy/anchor_w12_perp.so";
+const PINO_W12_SO_PATH: &str = "../../../../pinocchio-bench/target/deploy/pinocchio_w12_perp.so";
 
 const SYSTEM_PROGRAM_ID: Pubkey = Pubkey::new_from_array([0u8; 32]);
 const TOKEN_PROGRAM_ID_STR: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
@@ -320,7 +318,11 @@ impl PerpDiffFixture {
         let anchor_market = make_anchor_acc(
             &mut ctx,
             "PerpMarket",
-            make_market_body(INITIAL_MARK_PRICE, INITIAL_MAX_LEVERAGE_BPS, INITIAL_FEE_BPS),
+            make_market_body(
+                INITIAL_MARK_PRICE,
+                INITIAL_MAX_LEVERAGE_BPS,
+                INITIAL_FEE_BPS,
+            ),
             W12_MARKET_BODY,
         );
         let anchor_oracle = make_anchor_acc(
@@ -335,7 +337,11 @@ impl PerpDiffFixture {
         let pino_user = make_pino_acc(&mut ctx, make_user_body(INITIAL_COLLATERAL));
         let pino_market = make_pino_acc(
             &mut ctx,
-            make_market_body(INITIAL_MARK_PRICE, INITIAL_MAX_LEVERAGE_BPS, INITIAL_FEE_BPS),
+            make_market_body(
+                INITIAL_MARK_PRICE,
+                INITIAL_MAX_LEVERAGE_BPS,
+                INITIAL_FEE_BPS,
+            ),
         );
         let pino_oracle = make_pino_acc(&mut ctx, make_oracle_body(INITIAL_MARK_PRICE));
         let pino_user_token = make_token(&mut ctx, USER_TOKEN_BALANCE);
@@ -439,12 +445,7 @@ impl DifferentialFixture for PerpDiffFixture {
     /// 2 SPL token accounts. The bench's largest combined surface.
     fn diff_pairs(&self) -> Vec<DiffAccountPair> {
         vec![
-            DiffAccountPair::anchor_disc_8(
-                "user",
-                self.anchor_user,
-                self.pino_user,
-                W12_USER_BODY,
-            ),
+            DiffAccountPair::anchor_disc_8("user", self.anchor_user, self.pino_user, W12_USER_BODY),
             DiffAccountPair::anchor_disc_8(
                 "perp_market",
                 self.anchor_market,
@@ -477,13 +478,29 @@ impl DifferentialFixture for PerpDiffFixture {
 // Differential checks
 // ---------------------------------------------------------------------
 
-fn check_execution_parity(fixture: &mut PerpDiffFixture) {
+/// Drive the probe actions through both sides and hand back the raw
+/// outcomes, labelled by the action that produced them.
+///
+/// The outcomes are returned rather than collapsed to booleans on the
+/// spot because two of the three comparison surfaces live inside them:
+/// the rejection *reason* (custom error code) and the compute units
+/// consumed. `map(|o| o.is_success())` throws both away.
+///
+/// `None` on a side means `send()` itself failed — a harness-level
+/// failure (blockhash, signers, serialization), not a statement about
+/// program behaviour. Callers skip those probes rather than reading
+/// them as a divergence.
+fn probe_actions(
+    fixture: &mut PerpDiffFixture,
+) -> Vec<(String, Option<TxOutcome>, Option<TxOutcome>)> {
+    let mut out = Vec::new();
+
     // Probes target boundary cases: tiny size, near-margin-limit size,
     // over-margin rejection, and the double-open protection.
     let probes: &[(u64, u64)] = &[
         (1, 1),
         (100_000, 200),
-        (10_000_000_000, 250),  // exceeds margin → both reject
+        (10_000_000_000, 250), // exceeds margin → both reject
         (50_000, 300),
     ];
 
@@ -513,30 +530,78 @@ fn check_execution_parity(fixture: &mut PerpDiffFixture) {
             current_slot,
         );
 
-        let anchor_ok = fixture
+        let anchor = fixture
             .ctx
             .raw_call(anchor_ix)
             .fee_payer(&*fixture.fee_payer)
             .signers(&[&*fixture.fee_payer, &*fixture.user])
             .send()
-            .map(|o| o.is_success())
-            .unwrap_or(false);
+            .ok();
 
-        let pino_ok = fixture
+        let pino = fixture
             .ctx
             .raw_call(pino_ix)
             .fee_payer(&*fixture.fee_payer)
             .signers(&[&*fixture.fee_payer, &*fixture.user])
             .send()
-            .map(|o| o.is_success())
-            .unwrap_or(false);
+            .ok();
 
-        if let Some(div) = ParityDivergence::check(
-            &format!("open_position(size={}, slot={})", position_size, current_slot),
-            anchor_ok,
-            pino_ok,
-        ) {
+        out.push((
+            format!(
+                "open_position(size={}, slot={})",
+                position_size, current_slot
+            ),
+            anchor,
+            pino,
+        ));
+    }
+
+    out
+}
+
+/// Execution parity: the two sides must make the same accept/reject
+/// decision **and**, when they reject, reject for the same reason.
+///
+/// The error code is checked because it is part of the program's
+/// observable ABI — a caller branching on `6001` behaves differently
+/// against a rewrite that returns `6002`, even though a boolean
+/// accept/reject comparison calls that agreement.
+fn check_execution_parity(fixture: &mut PerpDiffFixture) {
+    for (label, anchor, pino) in probe_actions(fixture) {
+        let (Some(anchor), Some(pino)) = (anchor, pino) else {
+            // Harness-level send failure on at least one side — nothing
+            // can be concluded about program behaviour. Fail-soft, in
+            // line with `read_pair_bodies`.
+            continue;
+        };
+
+        if let Some(div) = ParityDivergence::check_outcomes(&label, &anchor, &pino) {
             fuzz_assert!(false, "{}", div);
+        }
+    }
+}
+
+/// CU non-regression: the Pinocchio side must not cost more than the
+/// Anchor side it replaces.
+///
+/// Deliberately its own variant rather than part of the parity check.
+/// A CU difference is the *point* of the rewrite, so it is a
+/// measurement, not a defect — only the wrong direction is a defect,
+/// and mixing that into a correctness campaign would report a
+/// performance finding as a behavioural one.
+///
+/// It still belongs in the differential rather than in the
+/// pinocchio-bench leaderboard: CU is consensus-relevant, so a slower
+/// rewrite writing byte-identical state is not equivalent — it can
+/// exceed the transaction limit and fail where the original succeeded.
+fn check_cu_no_regression(fixture: &mut PerpDiffFixture) {
+    for (label, anchor, pino) in probe_actions(fixture) {
+        let (Some(anchor), Some(pino)) = (anchor, pino) else {
+            continue;
+        };
+
+        if let Some(cmp) = CuComparison::regression(&label, &anchor, &pino) {
+            fuzz_assert!(false, "{}", cmp);
         }
     }
 }
@@ -697,4 +762,9 @@ fn invariant_perp_diff_open_interest_match_only(fixture: &mut PerpDiffFixture) {
 #[invariant_test]
 fn invariant_perp_diff_margin_invariant_only(fixture: &mut PerpDiffFixture) {
     check_margin_invariant(fixture);
+}
+
+#[invariant_test]
+fn invariant_perp_diff_cu_no_regression_only(fixture: &mut PerpDiffFixture) {
+    check_cu_no_regression(fixture);
 }

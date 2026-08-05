@@ -4,7 +4,8 @@
 //! Anchor and Pinocchio W8 AMM programs from `psyto/pinocchio-bench` in one
 //! Crucible `TestContext` and asserts:
 //!
-//! 1. **Execution parity** — both swaps succeed or both fail
+//! 1. **Execution parity** — both swaps succeed or both fail, and when
+//!    they fail they fail with the same custom error code
 //! 2. **Pool body equivalence** — `(reserve_in, reserve_out, fee_bps)` byte-identical
 //!    after stripping Anchor's 8-byte account discriminator
 //! 3. **Token-account equivalence** — all four token-account pairs match byte-for-byte
@@ -38,8 +39,8 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use solinv_fuzz::{
-    check_all_pairs, check_pair_equivalent, DiffAccountPair, DifferentialFixture, HasContext,
-    ParityDivergence,
+    check_all_pairs, check_pair_equivalent, CuComparison, DiffAccountPair, DifferentialFixture,
+    HasContext, ParityDivergence, TxOutcome,
 };
 
 // ---------------------------------------------------------------------
@@ -49,10 +50,8 @@ use solinv_fuzz::{
 
 const ANCHOR_W8_PROGRAM_ID_STR: &str = "Hf89Tqt9FdVdAEsgt3UkmzriXRLPFYqeYE4hHJaSzTjN";
 const PINO_W8_PROGRAM_ID_STR: &str = "DRJ9FZj2xNjSnydfSMiagn49JcXDmDfqV8miH4hhfZds";
-const ANCHOR_W8_SO_PATH: &str =
-    "../../../../pinocchio-bench/target/deploy/anchor_w8_amm.so";
-const PINO_W8_SO_PATH: &str =
-    "../../../../pinocchio-bench/target/deploy/pinocchio_w8_amm.so";
+const ANCHOR_W8_SO_PATH: &str = "../../../../pinocchio-bench/target/deploy/anchor_w8_amm.so";
+const PINO_W8_SO_PATH: &str = "../../../../pinocchio-bench/target/deploy/pinocchio_w8_amm.so";
 
 const SYSTEM_PROGRAM_ID: Pubkey = Pubkey::new_from_array([0u8; 32]);
 const TOKEN_PROGRAM_ID_STR: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
@@ -244,7 +243,10 @@ impl AmmDiffFixture {
         // Shared mints — Token Program owns these; both sides reference them
         let mint_a = Keypair::new();
         let mint_b = Keypair::new();
-        for (kp, supply) in [(&mint_a, 1_000_000_000_000u64), (&mint_b, 1_000_000_000_000u64)] {
+        for (kp, supply) in [
+            (&mint_a, 1_000_000_000_000u64),
+            (&mint_b, 1_000_000_000_000u64),
+        ] {
             ctx.write_account(
                 &kp.pubkey(),
                 Account {
@@ -462,7 +464,21 @@ impl DifferentialFixture for AmmDiffFixture {
 // Differential checks
 // ---------------------------------------------------------------------
 
-fn check_execution_parity(fixture: &mut AmmDiffFixture) {
+/// Drive the probe swaps through both sides and hand back the raw
+/// outcomes, labelled by the action that produced them.
+///
+/// The outcomes are returned rather than collapsed to booleans on the
+/// spot because two of the three comparison surfaces live inside them:
+/// the rejection *reason* (custom error code) and the compute units
+/// consumed. `map(|o| o.is_success())` throws both away.
+///
+/// `None` on a side means `send()` itself failed — a harness-level
+/// failure (blockhash, signers, serialization), not a statement about
+/// program behaviour. Callers skip those probes rather than reading
+/// them as a divergence.
+fn probe_swaps(
+    fixture: &mut AmmDiffFixture,
+) -> Vec<(String, Option<TxOutcome>, Option<TxOutcome>)> {
     let probes: &[(u64, u64)] = &[
         (1, 0),
         (100, 0),
@@ -471,6 +487,8 @@ fn check_execution_parity(fixture: &mut AmmDiffFixture) {
         (10_000, 500),
         (50_000, 0),
     ];
+
+    let mut out = Vec::with_capacity(probes.len());
 
     for &(amount_in, min_out) in probes {
         let anchor_ix = build_anchor_swap_ix(
@@ -498,30 +516,75 @@ fn check_execution_parity(fixture: &mut AmmDiffFixture) {
             min_out,
         );
 
-        let anchor_ok = fixture
+        let anchor = fixture
             .ctx
             .raw_call(anchor_ix)
             .fee_payer(&*fixture.fee_payer)
             .signers(&[&*fixture.fee_payer, &*fixture.user])
             .send()
-            .map(|o| o.is_success())
-            .unwrap_or(false);
+            .ok();
 
-        let pino_ok = fixture
+        let pino = fixture
             .ctx
             .raw_call(pino_ix)
             .fee_payer(&*fixture.fee_payer)
             .signers(&[&*fixture.fee_payer, &*fixture.user])
             .send()
-            .map(|o| o.is_success())
-            .unwrap_or(false);
+            .ok();
 
-        if let Some(div) = ParityDivergence::check(
-            &format!("swap(amount_in={}, min_out={})", amount_in, min_out),
-            anchor_ok,
-            pino_ok,
-        ) {
+        out.push((
+            format!("swap(amount_in={}, min_out={})", amount_in, min_out),
+            anchor,
+            pino,
+        ));
+    }
+
+    out
+}
+
+/// Execution parity: the two sides must make the same accept/reject
+/// decision **and**, when they reject, reject for the same reason.
+///
+/// The error code is checked because it is part of the program's
+/// observable ABI — a caller branching on `6001` behaves differently
+/// against a rewrite that returns `6002`, even though a boolean
+/// accept/reject comparison calls that agreement.
+fn check_execution_parity(fixture: &mut AmmDiffFixture) {
+    for (label, anchor, pino) in probe_swaps(fixture) {
+        let (Some(anchor), Some(pino)) = (anchor, pino) else {
+            // Harness-level send failure on at least one side — nothing
+            // can be concluded about program behaviour. Fail-soft, in
+            // line with `read_pair_bodies`.
+            continue;
+        };
+
+        if let Some(div) = ParityDivergence::check_outcomes(&label, &anchor, &pino) {
             fuzz_assert!(false, "{}", div);
+        }
+    }
+}
+
+/// CU non-regression: the Pinocchio side must not cost more than the
+/// Anchor side it replaces.
+///
+/// Deliberately its own variant rather than part of the parity check.
+/// A CU difference is the *point* of the rewrite, so it is a
+/// measurement, not a defect — only the wrong direction is a defect,
+/// and mixing that into a correctness campaign would report a
+/// performance finding as a behavioural one.
+///
+/// It still belongs in the differential rather than in the
+/// pinocchio-bench leaderboard: CU is consensus-relevant, so a slower
+/// rewrite writing byte-identical state is not equivalent — it can
+/// exceed the transaction limit and fail where the original succeeded.
+fn check_cu_no_regression(fixture: &mut AmmDiffFixture) {
+    for (label, anchor, pino) in probe_swaps(fixture) {
+        let (Some(anchor), Some(pino)) = (anchor, pino) else {
+            continue;
+        };
+
+        if let Some(cmp) = CuComparison::regression(&label, &anchor, &pino) {
+            fuzz_assert!(false, "{}", cmp);
         }
     }
 }
@@ -529,8 +592,12 @@ fn check_execution_parity(fixture: &mut AmmDiffFixture) {
 /// Pool-body equivalence check (single-pair variant, isolated for an
 /// orthogonal libafl violation report).
 fn check_pool_equivalent(fixture: &mut AmmDiffFixture) {
-    let pair =
-        DiffAccountPair::anchor_disc_8("pool", fixture.anchor_pool, fixture.pino_pool, W8_POOL_BODY);
+    let pair = DiffAccountPair::anchor_disc_8(
+        "pool",
+        fixture.anchor_pool,
+        fixture.pino_pool,
+        W8_POOL_BODY,
+    );
     if let Some(div) = check_pair_equivalent(fixture.ctx(), &pair) {
         fuzz_assert!(false, "{}", div);
     }
@@ -620,4 +687,9 @@ fn invariant_amm_diff_token_accounts_equivalent_only(fixture: &mut AmmDiffFixtur
 #[invariant_test]
 fn invariant_amm_diff_constant_product_only(fixture: &mut AmmDiffFixture) {
     check_constant_product(fixture);
+}
+
+#[invariant_test]
+fn invariant_amm_diff_cu_no_regression_only(fixture: &mut AmmDiffFixture) {
+    check_cu_no_regression(fixture);
 }

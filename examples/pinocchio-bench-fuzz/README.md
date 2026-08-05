@@ -117,8 +117,11 @@ same `user` keypair to sign both transactions (so the `owner_pk` field
 written into Order slots matches across sides), and after every
 fuzz-derived `place_order(price, qty)` asserts:
 
-1. **Execution parity** — both transactions succeed or both fail. A
-   divergence where one side accepts what the other rejects is a bug.
+1. **Execution parity** — both transactions succeed or both fail, and
+   when both fail they fail with the same custom error code. A
+   divergence where one side accepts what the other rejects is a bug;
+   so is one where both reject for different reasons, since error codes
+   are part of the program's observable ABI.
 2. **Market body equivalence** — the 16-byte Market body
    (`sequence + side + pad`) is byte-identical, stripping Anchor's
    8-byte account discriminator from the Anchor side.
@@ -188,7 +191,7 @@ mints (mint_a, mint_b) and user keypair across sides so symmetric
 SPL Token CPIs produce byte-comparable post-state.
 
 Checks:
-1. Execution parity (both succeed or both fail)
+1. Execution parity (same decision, same error code on rejection)
 2. Pool body equivalence (24 bytes after stripping Anchor's discriminator)
 3. Token-account equivalence — all 4 pairs byte-identical
 4. Constant-product `k = reserve_in × reserve_out` non-decreasing per side
@@ -207,7 +210,7 @@ obligation + 2 reserves + 2 oracles. No CPI in W9, so framework
 overhead and math are the only cost — the cleanest differential target.
 
 Checks:
-1. Execution parity
+1. Execution parity (same decision, same error code on rejection)
 2. Obligation body equivalence
 3. Reserve body equivalence (both reserve_a and reserve_b)
 4. Oracle body equivalence (both oracle_a and oracle_b)
@@ -234,7 +237,7 @@ The math under test is NAV-weighted share computation:
 special case).
 
 Checks:
-1. Execution parity
+1. Execution parity (same decision, same error code on rejection)
 2. Body equivalence across all 4 pairs (via `check_all_pairs(fixture)`)
 3. NAV cross-product equality:
    `anchor.total_assets × pino.total_shares == pino.total_assets × anchor.total_shares`
@@ -282,7 +285,8 @@ new_slot)` enforces strict slot monotonicity and updates a 5-field EMA
 struct with α = 1/8 smoothing.
 
 Checks:
-1. Execution parity (deterministic probes including stale-slot rejection)
+1. Execution parity (deterministic probes including stale-slot rejection;
+   same decision, same error code)
 2. Body equivalence (single pair via `check_all_pairs(fixture)`)
 3. EMA field equivalence (surface-specific math invariant — pinpoints
    smoothing-formula bugs)
@@ -312,7 +316,7 @@ Phase 0's final harness. Largest combined surface in the bench: 5 pairs
 margin check + fee compute + oracle propagation + 1 SPL CPI.
 
 Checks:
-1. Execution parity
+1. Execution parity (same decision, same error code on rejection)
 2. Body equivalence across all 5 pairs (via `check_all_pairs(fixture)`)
 3. Open-interest match: both sides' `perp_market.open_interest` agree,
    and each equals that side's `user.position_size` (single-user fixture)
@@ -361,6 +365,76 @@ The math W9 exercises includes `saturating_sub` against arbitrary
 fuzz-derived `current_slot` values (including ones that would cause
 overflow if not handled), and `cumulative_borrow_rate` accumulates via
 `saturating_add` over the campaign to test the saturation path itself.
+
+## CU non-regression (all six harnesses)
+
+Every `*-diff` harness carries a `*_cu_no_regression_only` variant that
+compares compute units consumed by the two sides on the same action and
+fires only when the **Pinocchio side costs more** than the Anchor side
+it replaces.
+
+It is a separate variant rather than part of execution parity on
+purpose. A CU difference is the *point* of the rewrite — the two sides
+are supposed to disagree, in one direction — so it is a measurement,
+not a defect. Folding it into a correctness campaign would report a
+performance finding as a behavioural one.
+
+It belongs in the differential rather than only on the
+[pinocchio-bench](https://github.com/psyto/pinocchio-bench) leaderboard
+because CU is consensus-relevant: a slower rewrite that writes
+byte-identical state is still not equivalent, since it can exceed the
+transaction limit and fail where the original succeeded.
+
+```bash
+crucible run amm_diff invariant_amm_diff_cu_no_regression_only --release --timeout 30
+```
+
+**W8 result (20s campaign, 2026-08-05)**: 1,747 executions / ~151K
+actions / **0 violations**. The Pinocchio side is cheaper on every
+probe, which is the expected direction — a null result, recorded here
+the same way the other calibration nulls are.
+
+## Error-code divergence found on the W8 rewrite (2026-08-05)
+
+Adding the rejection *reason* to execution parity immediately surfaced
+a real divergence in the W8 AMM pair, on the first campaign:
+
+```
+execution-parity divergence on swap(amount_in=1, min_out=0):
+  anchor=rejected(6001) pino=rejected
+```
+
+20s campaign: 5,998 violations / 5,999 executions — pervasive, not an
+edge case.
+
+**Cause.** `anchor-w8-amm` declares three custom errors via
+`#[error_code]`, which Anchor numbers from 6000:
+
+| code | Anchor variant | condition |
+|---|---|---|
+| 6000 | `SlippageExceeded` | `amount_out < min_out` |
+| 6001 | `ZeroOutput` | `amount_out == 0` |
+| 6002 | `ZeroDenominator` | `denom == 0` |
+
+`pinocchio-w8-amm` returns the builtin `ProgramError::InvalidArgument`
+for all three conditions. A builtin is not `Custom(n)`, so the runtime
+reports no custom error code at all.
+
+**Why the old check missed it.** Both sides reject, so a boolean
+accept/reject comparison reads it as agreement. It is nonetheless a
+behavioural divergence a caller can observe: code branching on
+"slippage" vs "zero output" cannot distinguish them against the
+rewrite, and code matching on `6001` never matches at all.
+
+**Status.** Recorded, not fixed. Whether the Pinocchio programs should
+reproduce Anchor's error numbering is a design question for
+[pinocchio-bench](https://github.com/psyto/pinocchio-bench) — the
+programs are CU benchmarks first, and error-code fidelity was never a
+stated goal. The point here is that the differential now *reports* it
+rather than passing it silently.
+
+Rationale for all three comparison surfaces:
+[`docs/differential-equivalence.md`](../../docs/differential-equivalence.md).
 
 ## Cumulative differential proof (W4 + W8 + W9 + W10 + W11 + W12)
 

@@ -177,12 +177,14 @@ a report about one* should not.
 Design rationale, API walkthrough and current gaps:
 [`docs/differential-equivalence.md`](docs/differential-equivalence.md).
 
-**Adoption status is honest**: the six differential harnesses under
+All six differential harnesses under
 `examples/pinocchio-bench-fuzz/fuzz/` (`amm-diff`, `matching-diff`,
-`oracle-diff`, `perp-diff`, `refresh-diff`, `vault-diff`) still use the
-boolean accept/reject check and no CU comparison, so all six carry both
-holes today. Wiring them to `check_codes` / `CuComparison` and emitting
-reports is pending.
+`oracle-diff`, `perp-diff`, `refresh-diff`, `vault-diff`) check all
+three surfaces, with CU non-regression as its own
+`*_cu_no_regression_only` variant so a performance finding is never
+reported as a behavioural one. **Emitting reports is still pending** —
+a finding leaves the fuzz worker as a log line, not yet as a
+reproducible bundle.
 
 ## Quickstart — escrow-demo (catalog 10/10)
 

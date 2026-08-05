@@ -33,6 +33,9 @@ path = "src/main.rs"
 [features]
 invariant_refresh_diff_smoke = []
 invariant_refresh_diff_execution_parity_only = []
+# CU non-regression is kept separate from the correctness variants: a CU
+# difference is the goal of the rewrite, only the wrong direction is a bug.
+invariant_refresh_diff_cu_no_regression_only = []
 invariant_refresh_diff_obligation_equivalent_only = []
 invariant_refresh_diff_reserves_equivalent_only = []
 invariant_refresh_diff_oracles_equivalent_only = []

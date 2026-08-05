@@ -38,6 +38,9 @@ path = "src/main.rs"
 # Differential mode invariants — each asserts a different aspect of
 # anchor↔pinocchio equivalence under randomized input.
 invariant_diff_smoke = []                  # all checks in one variant
-invariant_diff_execution_parity_only = []  # both succeed XOR both fail
+invariant_diff_execution_parity_only = []
+# CU non-regression is kept separate from the correctness variants: a CU
+# difference is the goal of the rewrite, only the wrong direction is a bug.
+invariant_diff_cu_no_regression_only = []  # both succeed XOR both fail
 invariant_diff_state_equivalent_only = []  # post-state body bytes match
 invariant_diff_sequence_match_only = []    # market.sequence increments identically

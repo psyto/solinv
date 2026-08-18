@@ -10,10 +10,20 @@ set -euo pipefail
 # The classification is the load-bearing part, so it is spelled out:
 #
 #   build fails                       -> build_failed  (excluded)
-#   harness reports violation         -> killed        (by the named invariant)
+#   violation the baseline lacks      -> killed        (by the named invariant)
 #   neither run emitted any [reached] -> harness_error (excluded)
 #   enclosing ix never executed       -> not_reached   (excluded)
 #   otherwise                         -> survived
+#
+# "A violation the baseline lacks" is the whole rule, and the qualifier
+# is what makes it a rule. Crediting a mutant with any violation at all
+# assumes the unmutated program is clean. escrow-demo is not: its
+# planted bugs mean cu-dos and unchecked-math fire thousands of times
+# before a single line is mutated, and a campaign that ignored that
+# scored 17 of 17 killed with not one killed by the invariant its
+# operator predicted. The mutation has to be shown to have *added*
+# something, so the baseline's detector set is subtracted from every
+# mutant's.
 #
 # `harness_error` sits ahead of both reachability and the survived
 # fallback on purpose. A harness that never started is silent in exactly
@@ -177,6 +187,33 @@ echo "baseline reaches:"
 grep -o '\[solinv\]\[reached\] ix=[A-Za-z0-9_]*' "$LOGDIR/baseline-reach.log" \
   | sort -u | sed 's/^/  /'
 
+# The scoring run on the unmutated program. Whatever fires here fires
+# for reasons that predate every mutant, so it cannot be evidence that a
+# mutation was caught.
+DETECTORS='(signer-skip|owner-skip|discriminator-skip|pda-forge|account-swap|unchecked-math|cu-dos|cpi-reentrancy|realloc-race|bump-seed-canonicalization)'
+run_test "$TEST" "$LOGDIR/baseline-score.log" || true
+grep -oE "\[${DETECTORS}:" "$LOGDIR/baseline-score.log" | tr -d '[:' | sort -u \
+  > "$WORK/baseline-detectors.txt" || true
+
+if [[ -s "$WORK/baseline-detectors.txt" ]]; then
+  echo "baseline already violates (these cannot credit any mutant):"
+  sed 's/^/  /' "$WORK/baseline-detectors.txt"
+  # A mutant whose predicted killer already fires on the unmutated
+  # program is unscoreable on this target, not merely hard to kill.
+  # Saying so before the builds start is the difference between a
+  # measurement and a rediscovery.
+  blocked=0
+  while IFS= read -r d; do
+    n=$(jq -r --arg d "$d" '[.mutants[] | select(.expected_killer==$d)] | length' "$PLAN")
+    blocked=$((blocked + n))
+  done < "$WORK/baseline-detectors.txt"
+  if [[ "$blocked" -gt 0 ]]; then
+    echo "  warning: $blocked of ${#IDS[@]} mutants predict a killer that already" >&2
+    echo "  fires before mutation; they cannot be credited to their mutation." >&2
+    echo "  Mutation testing wants a target whose invariants hold pre-mutation." >&2
+  fi
+fi
+
 # Instructions the plan needs but the baseline never reaches are dead
 # weight: they will be excluded per-mutant, one rebuild at a time. Say so
 # now, while the number still means something to a reader deciding
@@ -220,8 +257,11 @@ for id in "${IDS[@]}"; do
     # e.g. "[unchecked-math:<pid>] ...". Attribution matters: a mutant
     # killed by an unexpected detector is still dead, but the report
     # separates the two.
-    by=$(grep -oE '\[(signer-skip|owner-skip|discriminator-skip|pda-forge|account-swap|unchecked-math|cu-dos|cpi-reentrancy|realloc-race|bump-seed-canonicalization):' \
-      "$LOGDIR/$slug.score.log" | head -1 | tr -d '[:' || true)
+    #
+    # Detectors that also fired on the unmutated program are dropped
+    # first. They were going to fire whatever this mutant did.
+    by=$(grep -oE "\[${DETECTORS}:" "$LOGDIR/$slug.score.log" | tr -d '[:' | sort -u \
+      | grep -vxF -f "$WORK/baseline-detectors.txt" 2>/dev/null | head -1 || true)
 
     cat "$LOGDIR/$slug.score.log" "$LOGDIR/$slug.reach.log" > "$WORK/both.log"
 

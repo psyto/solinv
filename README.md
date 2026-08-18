@@ -48,7 +48,16 @@ declaration as a library:
 6. **Disclosure templates** — Immunefi / Sherlock / direct-to-protocol
    markdown templates with field-by-field guidance + a worked example
    from solinv's own planted-bug detection.
-7. **Differential equivalence + checkable findings** — a three-surface
+7. **Field schemas + relation invariants** — state invariants name
+   `pool.total_deposits` instead of byte offset 40, and can assert
+   relations across accounts (`liquidity + borrowed == total`). A wrong
+   offset used to fail *silently*; it now fails at declaration time.
+   See [field schemas](#field-schemas--naming-fields-instead-of-counting-bytes).
+8. **Mutation testing** — `solinv-mutate` plants known Solana bug
+   classes in a program's source and measures which detectors kill
+   them, with a denominator that excludes mutants nothing ever reached.
+   See [mutation testing](#mutation-testing--measuring-detector-power-on-a-real-target).
+9. **Differential equivalence + checkable findings** — a three-surface
    oracle for "do these two programs behave the same?" (written state,
    accept/reject *and reason*, compute units), and a finding format that
    identifies every input by digest and states plainly whether it
@@ -240,6 +249,121 @@ divergence, and `SOLINV_REPORT_INLINE=1` carries the program bytes and
 account pre-state rather than only naming them. The other five
 harnesses still leave a finding as a log line.
 
+## Field schemas — naming fields instead of counting bytes
+
+A state invariant reads a little-endian integer at a byte offset.
+Declaring that offset by hand is the most error-prone part of adopting
+solinv, and it fails in the worst possible way: **silently**. The
+detector reads eight bytes belonging to some other field, they move
+plausibly, nothing fires, and the campaign reports a clean run. A
+harness checking the wrong bytes is indistinguishable from one that
+found no bug — which matters more here than elsewhere, because solinv's
+headline result *is* a null result.
+
+`AccountSchema` moves the layout into a single checkable declaration:
+
+```rust
+let pool = AccountSchema::anchor("Pool")   // cursor starts past the 8-byte disc
+    .field("authority", 32)                // declared for its offset only
+    .field("total_deposits", 8)
+    .field("total_borrows", 8);
+
+pool.validate_len(account.data.len())?;    // check the claim against reality
+
+let inv = pool.monotonic(
+    "deposits grow", vec![0], "total_deposits", MonotonicDir::NonDecreasing,
+)?;
+```
+
+| Mistake | Before | After |
+|---|---|---|
+| Offset off by one field | silent wrong read | `UnknownField`, listing the real names |
+| Asserting on a 32-byte pubkey | silent truncation | `UnreadableWidth` |
+| Layout drifted from the program | silent wrong read | `ShortAccount` from `validate_len` |
+
+`StateInvariantKind::Relation` adds the shape the other three kinds
+cannot express — two sides, each a sum of terms, compared with `==`,
+`<=`, `<`, `>=` or `>`:
+
+```rust
+relation(
+    "liquidity + borrowed == total",
+    vec![reserve.term(0, "liquidity")?, reserve.term(0, "borrowed")?],
+    RelOp::Eq,
+    vec![reserve.term(0, "total")?],
+    0,
+)?
+```
+
+A relation fires only when it **held before the ix and failed after**:
+one that was already false indicts the declaration, not the
+instruction. Because a relation that never holds also never fires, that
+case is *reported* rather than dropped — as are unreadable fields, once
+per site, un-gated by any env var. A harness that is silently checking
+nothing has to say so by default.
+
+The grammar stays deliberately closed (integers plus an operator), so a
+candidate invariant can be validated before it ever executes. Ratios
+are not expressible in v1; that is a stated limit, not an oversight.
+Design rationale: [`docs/invariants/field-schema.md`](docs/invariants/field-schema.md).
+
+## Mutation testing — measuring detector power on a real target
+
+`solinv-mutate` plants a known bug class in a program's source, runs
+the catalog against it, and records whether the detector that was
+supposed to catch it did. **It does not find bugs** — every bug in a
+campaign is one the tool planted, and nothing it produces is
+submittable anywhere.
+
+What it produces is the missing half of the calibration argument. The
+sensitivity claim behind "0 violations on production code" currently
+rests on `examples/escrow-demo`, and escrow-demo is not Raydium. A
+silent run is evidence only if the same harness on that same program
+demonstrably kills planted bugs.
+
+The denominator is the design:
+
+```
+score = killed / (killed + survived)      # reached mutants only
+```
+
+`not_reached` and `build_failed` are excluded and reported next to the
+headline, never folded in. solinv already measured why this matters
+from the other direction — `bump-seed-canonicalization` detects its
+planted bug at ~2% because reachability, not sensitivity, sets the
+rate. Two consequences: a campaign that reached nothing has **no**
+score rather than 0%, and a run below its committed `min_reached`
+reports `INCONCLUSIVE` rather than FAIL.
+
+Identifying unreached mutants needs evidence, since a silent run and an
+unasked detector look identical. Plans record each mutant's
+`enclosing_fn`; solinv emits `[solinv][reached] ix=<name>` under
+`SOLINV_REACHABILITY=1` when a canonical instruction executes; the
+campaign script joins them. The join is sound in one direction only —
+an instruction that never ran proves the mutation never ran, but an
+instruction that ran does not prove the mutated *branch* did — so every
+ambiguity resolves to `survived`, erring against the detector.
+
+```bash
+solinv mutate operators                    # 9 operators, 6 of 10 invariants
+solinv mutate plan --target escrow-demo \
+  --src examples/escrow-demo/programs/escrow/src/lib.rs \
+  --out plan.json --statement "..." --min-score 0.8 --min-reached 10
+./scripts/run_mutation_campaign.sh plan.json \
+  examples/escrow-demo/programs/escrow/Cargo.toml escrow results.json
+solinv mutate score --plan plan.json --results results.json
+```
+
+The kill criterion is committed at `plan` time, before any mutant runs
+— the §9 pre-commit discipline applied to the campaign itself.
+
+v1 operators reach 6 of the 10 catalog invariants; `cu-dos`,
+`cpi-reentrancy`, `realloc-race` and `account-swap` need structural
+rather than textual mutation and are named in every campaign summary so
+a score is never mistaken for a verdict on all ten. **No real campaign
+has been run yet** — the crate is tooling, not evidence. Design note:
+[`docs/mutation-testing.md`](docs/mutation-testing.md).
+
 ## Quickstart — escrow-demo (catalog 10/10)
 
 ```bash
@@ -370,6 +494,10 @@ solinv/
 │   ├── solinv-core/       # 7 implemented invariants + regression tests
 │   ├── solinv-fuzz/       # Crucible re-exports + HasContext/HasInstructionSet traits
 │   │                      #   + bytepoke + differential equivalence oracle
+│   │                      #   + AccountSchema (named fields) + Relation
+│   ├── solinv-mutate/     # Mutation operators, campaign planning, and
+│   │                      #   reachability-aware scoring (serde+regex only,
+│   │                      #   no Crucible/Solana)
 │   ├── solinv-cheat/      # LiteSVM cheatcode wrappers
 │   ├── solinv-corpus/     # Yellowstone gRPC seeder (scaffold)
 │   ├── solinv-disclose/   # Divergence findings as checkable evidence
@@ -386,6 +514,8 @@ solinv/
 │   └── target-scoring.example.toml  # config schema reference
 ├── docs/
 │   ├── invariants/                  # per-invariant 8-section specs
+│   │   └── field-schema.md          # named fields + relation invariants
+│   ├── mutation-testing.md          # operator catalog + scoring rationale
 │   ├── differential-equivalence.md  # oracle rationale + report format
 │   ├── disclosure-template-*.md     # Immunefi / Sherlock / generic templates
 │   ├── research-*.md                # research deliverables
@@ -509,9 +639,10 @@ thing" drift after a negative result.
 
 ```bash
 cargo check --workspace               # verify scaffold (~5s)
-cargo test  --workspace               # all crates (155 tests)
+cargo test  --workspace               # all crates (219 tests)
 cargo test  -p solinv-core            # invariant regression tests
-cargo test  -p solinv-fuzz            # bytepoke + differential oracle
+cargo test  -p solinv-fuzz            # bytepoke + differential oracle + schema
+cargo test  -p solinv-mutate          # operators + mutants + scoring (no Solana deps)
 cargo test  -p solinv-disclose        # divergence reports (no Solana deps)
 cargo build --release                 # build CLI binary
 ./target/release/solinv --help
@@ -526,6 +657,10 @@ solinv fuzz <target>                         # run coverage-guided fuzzer
 solinv score --config targets.toml           # rank targets by ROI proxy score
 solinv corpus fetch --rpc URL --program-id   # ingest mainnet corpus (scaffold)
 solinv disclose <bug-id>                     # generate disclosure report (scaffold)
+solinv mutate operators                      # list the mutation operator catalog
+solinv mutate plan --target T --src F ...    # plan a campaign + commit its kill criterion
+solinv mutate apply --plan P --mutant ID     # write one mutant's patched source
+solinv mutate score --plan P --results R     # score a completed campaign
 ```
 
 ## Contributing

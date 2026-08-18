@@ -50,6 +50,11 @@ pub mod bump_seed_canonicalization;
 /// Shared utilities for invariant implementations.
 pub(crate) mod util;
 
+/// Ledger of which instructions a campaign actually drove. Consumed by
+/// mutation testing to tell a detector blind spot apart from a code
+/// path the run never reached.
+pub mod reachability;
+
 /// Number of unique state-transition fingerprints seen in this process.
 pub fn unique_transition_fingerprint_count() -> usize {
     util::unique_transition_fingerprint_count()
@@ -58,6 +63,16 @@ pub fn unique_transition_fingerprint_count() -> usize {
 /// Clear accumulated state-transition fingerprints.
 pub fn reset_transition_fingerprints() {
     util::reset_transition_fingerprints();
+}
+
+/// Clear recorded declaration diagnostics.
+///
+/// Declaration warnings ("this invariant is reading nothing") are
+/// emitted once per process per site. A harness that deliberately
+/// exercises a broken declaration — a test for the diagnostic itself —
+/// needs to reset that memory between cases.
+pub fn reset_declaration_warnings() {
+    util::reset_declaration_warnings();
 }
 
 /// Run one invariant check and, when enabled, emit transition-signal rate.

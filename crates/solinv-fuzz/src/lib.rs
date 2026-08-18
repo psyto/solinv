@@ -22,6 +22,7 @@ pub use crucible_test_context::{
 pub mod bytepoke;
 pub mod capability;
 pub mod differential;
+pub mod schema;
 pub mod state_coverage;
 pub use bytepoke::{
     anchor_account_disc, anchor_ix_sighash, rent_for_anchor_body, rent_for_raw, write_bytes_at,
@@ -30,7 +31,10 @@ pub use bytepoke::{
 };
 pub use capability::{
     BumpSeedCheckConfig, CpiReentrancyConfig, HasContext, HasInstructionSet, InstructionSpec,
-    MonotonicDir, ReallocCheckConfig, StateInvariant, StateInvariantKind,
+    MonotonicDir, ReallocCheckConfig, RelOp, RelTerm, StateInvariant, StateInvariantKind,
+};
+pub use schema::{
+    relation, AccountSchema, SchemaError, SchemaField, ANCHOR_DISCRIMINATOR_LEN, READABLE_WIDTHS,
 };
 pub use differential::{
     check_all_pairs, check_pair_equivalent, read_pair_bodies, BodyDivergence, CuComparison,
@@ -50,9 +54,10 @@ pub mod prelude {
         write_u8_at, AnchorAccountBuilder,
     };
     pub use crate::capability::{
-        HasContext, HasInstructionSet, InstructionSpec, MonotonicDir, StateInvariant,
-        StateInvariantKind,
+        HasContext, HasInstructionSet, InstructionSpec, MonotonicDir, RelOp, RelTerm,
+        StateInvariant, StateInvariantKind,
     };
+    pub use crate::schema::{relation, AccountSchema, SchemaError, SchemaField};
     pub use crate::differential::{
         check_all_pairs, check_pair_equivalent, read_pair_bodies, BodyDivergence, CuComparison,
         DiffAccountPair, DifferentialFixture, ParityDivergence, SendFailure, SideResult,

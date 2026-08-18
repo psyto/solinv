@@ -1,0 +1,19 @@
+[package]
+name = "solinv-mutate"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+# Operator patterns are regexes over program source. This is the crate's
+# only non-serde dependency on purpose: mutation planning and scoring are
+# text and arithmetic, so this crate deliberately does NOT depend on
+# Crucible, LiteSVM or the Solana crates — same edge direction as
+# solinv-disclose. Planning a campaign must not require building a fuzzer.
+regex = "1"

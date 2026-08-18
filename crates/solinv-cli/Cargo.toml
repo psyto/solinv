@@ -21,3 +21,4 @@ solinv-fuzz = { path = "../solinv-fuzz" }
 solinv-cheat = { path = "../solinv-cheat" }
 solinv-corpus = { path = "../solinv-corpus" }
 solinv-disclose = { path = "../solinv-disclose" }
+solinv-mutate = { path = "../solinv-mutate" }

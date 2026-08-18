@@ -53,6 +53,17 @@ pub enum MutantOutcome {
     /// The mutant did not compile. Excluded from the score: a mutant
     /// that cannot run tells you nothing about a detector.
     BuildFailed { reason: String },
+    /// The harness itself failed to run, or ran and produced no
+    /// evidence of having executed anything. Excluded from the score.
+    ///
+    /// This variant exists because its absence was a live bug. A
+    /// harness that never started looks, from the outside, exactly like
+    /// one that ran and found nothing: no violations on stdout either
+    /// way. Folding that case into `Survived` turned a misconfigured
+    /// campaign into a confident report of detector blind spots. The
+    /// fallback for "no evidence" must be its own outcome, not the
+    /// outcome that happens to be adjacent.
+    HarnessError { reason: String },
 }
 
 /// One mutant's result, as reported by the campaign runner.
@@ -98,6 +109,9 @@ pub struct Score {
     pub survived: usize,
     pub not_reached: usize,
     pub build_failed: usize,
+    /// Mutants whose run produced no evidence at all. Non-zero means
+    /// the campaign is partly measuring itself rather than the target.
+    pub harness_error: usize,
     /// `killed + survived` — reached mutants only.
     pub denominator: usize,
     /// `killed / denominator`. `None` when nothing was reached: a
@@ -116,6 +130,7 @@ impl Score {
             survived: 0,
             not_reached: 0,
             build_failed: 0,
+            harness_error: 0,
             denominator: 0,
             score: None,
         };
@@ -132,6 +147,7 @@ impl Score {
                 MutantOutcome::Survived => s.survived += 1,
                 MutantOutcome::NotReached => s.not_reached += 1,
                 MutantOutcome::BuildFailed { .. } => s.build_failed += 1,
+                MutantOutcome::HarnessError { .. } => s.harness_error += 1,
             }
         }
         s.denominator = s.killed + s.survived;
@@ -142,7 +158,7 @@ impl Score {
     /// Total mutants considered, including those excluded from the
     /// denominator.
     pub fn total(&self) -> usize {
-        self.denominator + self.not_reached + self.build_failed
+        self.denominator + self.not_reached + self.build_failed + self.harness_error
     }
 
     /// Share of mutants that produced no evidence. The figure that
@@ -152,7 +168,7 @@ impl Score {
         if total == 0 {
             return 0.0;
         }
-        (self.not_reached + self.build_failed) as f64 / total as f64
+        (self.not_reached + self.build_failed + self.harness_error) as f64 / total as f64
     }
 }
 
@@ -308,10 +324,11 @@ impl CampaignReport {
             self.score.denominator,
         ));
         out.push_str(&format!(
-            "- **Excluded from the denominator**: {} not reached, {} failed to build \
-             ({:.0}% of {} mutants produced no evidence)\n",
+            "- **Excluded from the denominator**: {} not reached, {} failed to build, \
+             {} harness error ({:.0}% of {} mutants produced no evidence)\n",
             self.score.not_reached,
             self.score.build_failed,
+            self.score.harness_error,
             self.score.excluded_fraction() * 100.0,
             self.score.total(),
         ));
@@ -323,6 +340,20 @@ impl CampaignReport {
             "- **Not covered by any v1 operator**: {}\n",
             self.uncovered_invariants.join(", ")
         ));
+
+        // Placed above everything else a reader would act on. A harness
+        // that did not run does not weaken any number below — it
+        // removes their subject.
+        if self.score.harness_error > 0 {
+            out.push_str(&format!(
+                "\n> **{} of {} mutants produced no evidence that the harness ran.** \
+                 Fix the harness before reading anything below as a statement about \
+                 the detectors: a run that never started and a run that found nothing \
+                 are the same silence.\n",
+                self.score.harness_error,
+                self.score.total(),
+            ));
+        }
 
         out.push_str("\n## Pre-committed criterion\n\n");
         out.push_str(&format!("> {}\n\n", self.criterion.statement));
@@ -339,16 +370,25 @@ impl CampaignReport {
         }
 
         out.push_str("\n## Per invariant\n\n");
-        out.push_str("| Invariant | Killed | Reached | Score | Not reached | Build failed |\n");
-        out.push_str("|---|---:|---:|---:|---:|---:|\n");
+        out.push_str(
+            "| Invariant | Killed | Reached | Score | Not reached | Build failed | \
+             Harness error |\n",
+        );
+        out.push_str("|---|---:|---:|---:|---:|---:|---:|\n");
         for (inv, s) in &self.per_invariant {
             let cell = match s.score {
                 Some(v) => format!("{:.0}%", v * 100.0),
                 None => "n/a".to_string(),
             };
             out.push_str(&format!(
-                "| {} | {} | {} | {} | {} | {} |\n",
-                inv, s.killed, s.denominator, cell, s.not_reached, s.build_failed
+                "| {} | {} | {} | {} | {} | {} | {} |\n",
+                inv,
+                s.killed,
+                s.denominator,
+                cell,
+                s.not_reached,
+                s.build_failed,
+                s.harness_error,
             ));
         }
 
@@ -515,6 +555,50 @@ mod tests {
         assert!(md.contains("not reached"), "{md}");
         assert!(md.contains("Not covered by any v1 operator"), "{md}");
         assert!(md.contains("cu-dos"), "uncovered list must be named: {md}");
+    }
+
+    fn harness_error(reason: &str) -> MutantOutcome {
+        MutantOutcome::HarnessError {
+            reason: reason.to_string(),
+        }
+    }
+
+    #[test]
+    fn harness_errors_stay_out_of_the_denominator() {
+        let results = vec![
+            res("a", "signer-skip", killed("signer-skip")),
+            res("b", "signer-skip", MutantOutcome::Survived),
+            res("c", "signer-skip", harness_error("crucible exited 1")),
+        ];
+        let s = Score::tally(&results);
+        assert_eq!(s.harness_error, 1);
+        assert_eq!(s.denominator, 2, "a failed harness is not a survivor");
+        assert_eq!(s.score, Some(0.5));
+        assert_eq!(s.total(), 3, "excluded mutants still count as attempted");
+    }
+
+    #[test]
+    fn a_campaign_of_only_harness_errors_scores_nothing() {
+        // The regression this variant exists for: before it, these three
+        // were `Survived` and the report read 0% over 3 reached — a
+        // confident verdict on detectors that were never invoked.
+        let results = vec![
+            res("a", "signer-skip", harness_error("no fuzz/ directory")),
+            res("b", "signer-skip", harness_error("no fuzz/ directory")),
+            res("c", "unchecked-math", harness_error("no fuzz/ directory")),
+        ];
+        let s = Score::tally(&results);
+        assert_eq!(s.denominator, 0);
+        assert_eq!(s.score, None, "no evidence must not render as 0%");
+        assert!((s.excluded_fraction() - 1.0).abs() < f64::EPSILON);
+
+        let md = CampaignReport::build(&campaign(), &results).to_markdown();
+        assert!(md.contains("no evidence that the harness ran"), "{md}");
+        assert!(md.contains("nothing reached"), "{md}");
+        assert!(
+            !md.contains("## Survivors"),
+            "a harness failure must not be reported as a blind spot: {md}"
+        );
     }
 
     #[test]

@@ -913,6 +913,52 @@ fn invariant_realloc_race_only(fixture: &mut EscrowFixture) {
     });
 }
 
+// Mutation-campaign variant: every detector in one test.
+//
+// `scripts/run_mutation_campaign.sh` needs a single run that can both
+// kill a mutant and say what it reached, and no existing variant does
+// both. `invariant_solinv_acceptance` runs the Critical 5, which are
+// exactly the detectors that send *tampered* instructions and so record
+// no reachability; the `_only` variants each record but see one bug
+// class. Scoring a campaign against either alone measures the harness's
+// shape, not the detectors'.
+//
+// Two consequences worth stating, because they are visible in the
+// report and would otherwise look like defects:
+//
+//   - first-violation-wins masking applies across all ten here, and it
+//     is severe, not incidental. Measured on the unmutated program:
+//     with the Critical 5 first, only signer-skip and owner-skip ever
+//     report; with the four canonical-send detectors first, only
+//     unchecked-math and cu-dos do. Whichever detector is listed first
+//     is the one that speaks. A single run therefore cannot score all
+//     ten — a campaign that needs a per-detector verdict has to use the
+//     `_only` variants, one run per detector.
+//   - reachability still comes only from the four canonical-send
+//     detectors. A mutant in an instruction that only the Critical 5
+//     drive reads as `not_reached`, which is the honest answer: nothing
+//     here proves its line ran.
+// The four canonical-send detectors run FIRST, ahead of the Critical 5.
+// Order is load-bearing here, not stylistic: the fuzzer stops an
+// iteration at the first violation, and the Critical 5 fire almost
+// immediately on this target. Running them first aborts the iteration
+// before the recording detectors ever send, so the reachability ledger
+// comes back nearly empty and mutants get scored `not_reached` for a
+// reason that has nothing to do with their code.
+#[invariant_test]
+fn invariant_all(fixture: &mut EscrowFixture) {
+    solinv_core::invariants::unchecked_math::check(fixture);
+    solinv_core::invariants::cu_dos::check(fixture);
+    solinv_core::invariants::cpi_reentrancy::check(fixture);
+    solinv_core::invariants::realloc_race::check(fixture);
+    solinv_core::invariants::signer_skip::check(fixture);
+    solinv_core::invariants::owner_skip::check(fixture);
+    solinv_core::invariants::discriminator_skip::check(fixture);
+    solinv_core::invariants::pda_forge::check(fixture);
+    solinv_core::invariants::account_swap::check(fixture);
+    solinv_core::invariants::bump_seed_canonicalization::check(fixture);
+}
+
 // Day 60 — bump-seed-canonicalization Gate 1 variant. Per
 // docs/invariants/bump-seed-canonicalization.md §9: must detect the
 // alt-PDA substitution (vault re-derived with non-canonical bump,

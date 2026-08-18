@@ -41,6 +41,9 @@ path = "src/main.rs"
 [features]
 invariant_escrow = []
 invariant_solinv_acceptance = []
+# Every detector in one run — the variant the mutation campaign scores
+# against. See the note on `invariant_all` in src/main.rs.
+invariant_all = []
 invariant_signer_skip_only = []
 invariant_owner_skip_only = []
 invariant_discriminator_skip_only = []

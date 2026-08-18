@@ -58,12 +58,26 @@ TIMEOUT="${SOLINV_TIMEOUT:-30}"
 SOLINV="${SOLINV_BIN:-./target/release/solinv}"
 
 command -v jq >/dev/null || { echo "error: jq is required" >&2; exit 1; }
+command -v crucible >/dev/null || { echo "error: crucible is required" >&2; exit 1; }
+cargo build-sbf --version >/dev/null 2>&1 || {
+  echo "error: cargo build-sbf is required" >&2; exit 1; }
 [[ -x "$SOLINV" ]] || { echo "error: solinv binary not found at $SOLINV" >&2; exit 1; }
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
-mapfile -t IDS < <(jq -r '.mutants[].id' "$PLAN")
+# Read ids with a `while read` loop, not `mapfile`: macOS ships bash 3.2,
+# where `mapfile` does not exist.
+IDS=()
+while IFS= read -r line; do
+  [[ -n "$line" ]] && IDS+=("$line")
+done < <(jq -r '.mutants[].id' "$PLAN")
+
+if [[ "${#IDS[@]}" -eq 0 ]]; then
+  echo "error: no mutants in $PLAN" >&2
+  exit 1
+fi
+
 echo "campaign: ${#IDS[@]} mutants against $TARGET"
 echo "[" > "$RESULTS"
 FIRST=1

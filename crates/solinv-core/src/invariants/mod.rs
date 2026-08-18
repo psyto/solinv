@@ -47,6 +47,13 @@ pub mod cpi_reentrancy;
 pub mod realloc_race;
 pub mod bump_seed_canonicalization;
 
+// Asks the question the other ten do not: not what an instruction did
+// to state, but whether it was allowed to run at all. Added after a
+// mutation campaign on escrow-clean found five surviving `require!`
+// drops that nothing in the catalog modelled — including the timelock
+// race escrow-demo plants as its flagship bug.
+pub mod precondition_skip;
+
 /// Shared utilities for invariant implementations.
 pub(crate) mod util;
 

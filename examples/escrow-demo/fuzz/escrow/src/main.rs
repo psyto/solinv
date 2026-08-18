@@ -637,6 +637,7 @@ impl HasInstructionSet for EscrowFixture {
             cpi_reentrancy: None,       // cpi-reentrancy planted-bug surface is unsafe_callback_dispatch (Day 58)
             realloc_check: None,        // realloc-race planted-bug surface is unsafe_realloc_grow (Day 59)
             bump_seed_check: None,      // bump-seed-canonicalization planted-bug surface is unsafe_withdraw_with_bump (Day 60)
+            guards: vec![],
         };
 
         // Day 13 — additional ix for owner-skip unmask. unsafe_set_amount_from_source
@@ -672,7 +673,9 @@ impl HasInstructionSet for EscrowFixture {
             cu_budget: None,
             cpi_reentrancy: None,
             realloc_check: None,
-            bump_seed_check: None,            };
+            bump_seed_check: None,
+            guards: vec![],
+        };
 
         // Day 33 — accumulate_yield ix for unchecked-math detection.
         // data_sample carries rate_bps = u64::MAX so solinv's re-execution
@@ -722,6 +725,7 @@ impl HasInstructionSet for EscrowFixture {
             cpi_reentrancy: None,
             realloc_check: None,
             bump_seed_check: None,
+            guards: vec![],
             };
 
         // Day 37 — compute_dos ix for cu-dos detection. data_sample
@@ -748,7 +752,9 @@ impl HasInstructionSet for EscrowFixture {
             cu_budget: Some(5_000),
             cpi_reentrancy: None,
             realloc_check: None,
-            bump_seed_check: None,            };
+            bump_seed_check: None,
+            guards: vec![],
+        };
 
         // Day 58 — self_reentry ix for cpi-reentrancy detection. No
         // data args (the bug is structural). InstructionSpec exposes
@@ -782,7 +788,9 @@ impl HasInstructionSet for EscrowFixture {
             cu_budget: None,
             cpi_reentrancy: Some(CpiReentrancyConfig::default()),
             realloc_check: None,
-            bump_seed_check: None,        };
+            bump_seed_check: None,
+            guards: vec![],
+        };
 
         // Day 59 — realloc_grow ix for realloc-race detection.
         // data_sample pins delta = 200 so solinv's re-execution
@@ -817,7 +825,9 @@ impl HasInstructionSet for EscrowFixture {
             cu_budget: None,
             cpi_reentrancy: None,
             realloc_check: Some(ReallocCheckConfig::default()),
-            bump_seed_check: None,        };
+            bump_seed_check: None,
+            guards: vec![],
+        };
 
         // Day 60 — withdraw_with_bump spec for bump-seed-canonicalization
         // detection. data_sample carries amount=1 + the CANONICAL bump
@@ -864,6 +874,7 @@ impl HasInstructionSet for EscrowFixture {
             bump_seed_check: Some(BumpSeedCheckConfig {
                 bump_data_offset: Some(16),
             }),
+            guards: vec![],
         };
 
         vec![

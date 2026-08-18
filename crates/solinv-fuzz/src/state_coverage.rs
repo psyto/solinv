@@ -131,6 +131,7 @@ mod tests {
             cpi_reentrancy: None,
             realloc_check: None,
             bump_seed_check: None,
+            guards: vec![],
         }
     }
 

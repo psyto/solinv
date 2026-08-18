@@ -26,8 +26,8 @@ use solana_pubkey::Pubkey;
 use solana_signer::Signer;
 use std::sync::Arc;
 
-use solinv_fuzz::{HasContext, HasInstructionSet, InstructionSpec, StateInvariant,
-                  StateInvariantKind};
+use solinv_fuzz::{GuardCondition, GuardOp, GuardOperand, HasContext, HasInstructionSet,
+                  InstructionSpec, StateInvariant, StateInvariantKind};
 
 const INITIAL_BALANCE: u64 = 10_000_000_000;
 const UNLOCK_DELAY: u64 = 10;
@@ -63,7 +63,35 @@ fn vault_discriminator() -> [u8; 8] {
 
 // Vault layout: 8-byte discriminator, then depositor (32), beneficiary
 // (32), unlock_slot (8), amount (8).
+const VAULT_UNLOCK_SLOT_OFFSET: usize = 8 + 32 + 32;
 const VAULT_AMOUNT_OFFSET: usize = 8 + 32 + 32 + 8;
+
+// Anchor puts the 8-byte sighash first, so the first argument starts here.
+const IX_ARG0_OFFSET: usize = 8;
+
+fn vault_field(offset: usize) -> GuardOperand {
+    GuardOperand::Field {
+        account_index: 0,
+        field_offset: offset,
+        field_size: 8,
+    }
+}
+
+fn arg_amount() -> GuardOperand {
+    GuardOperand::IxData {
+        offset: IX_ARG0_OFFSET,
+        size: 8,
+    }
+}
+
+fn guard(name: &str, lhs: GuardOperand, op: GuardOp, rhs: GuardOperand) -> GuardCondition {
+    GuardCondition {
+        name: name.to_string(),
+        lhs,
+        op,
+        rhs,
+    }
+}
 
 fn build_initialize_ix(
     program_id: Pubkey,
@@ -394,6 +422,12 @@ impl HasInstructionSet for EscrowCleanFixture {
             cpi_reentrancy: None,
             realloc_check: None,
             bump_seed_check: None,
+            guards: vec![guard(
+                "deposit only a positive amount",
+                arg_amount(),
+                GuardOp::Gt,
+                GuardOperand::Const(0),
+            )],
         };
 
         let mut withdraw_data = ix_sighash("withdraw").to_vec();
@@ -429,6 +463,29 @@ impl HasInstructionSet for EscrowCleanFixture {
             cpi_reentrancy: None,
             realloc_check: None,
             bump_seed_check: None,
+            // The three `require!`s at the top of `withdraw`. The first
+            // is the timelock, and dropping it reproduces exactly the
+            // race `escrow` plants as its flagship bug.
+            guards: vec![
+                guard(
+                    "withdraw only strictly before unlock",
+                    GuardOperand::Slot,
+                    GuardOp::Lt,
+                    vault_field(VAULT_UNLOCK_SLOT_OFFSET),
+                ),
+                guard(
+                    "withdraw only a positive amount",
+                    arg_amount(),
+                    GuardOp::Gt,
+                    GuardOperand::Const(0),
+                ),
+                guard(
+                    "withdraw no more than the vault holds",
+                    arg_amount(),
+                    GuardOp::Le,
+                    vault_field(VAULT_AMOUNT_OFFSET),
+                ),
+            ],
         };
 
         // claim — beneficiary is the signer here, not the depositor,
@@ -457,6 +514,20 @@ impl HasInstructionSet for EscrowCleanFixture {
             cpi_reentrancy: None,
             realloc_check: None,
             bump_seed_check: None,
+            guards: vec![
+                guard(
+                    "claim only at or after unlock",
+                    GuardOperand::Slot,
+                    GuardOp::Ge,
+                    vault_field(VAULT_UNLOCK_SLOT_OFFSET),
+                ),
+                guard(
+                    "claim only a non-empty vault",
+                    vault_field(VAULT_AMOUNT_OFFSET),
+                    GuardOp::Gt,
+                    GuardOperand::Const(0),
+                ),
+            ],
         };
 
         // initialize — declared so the Critical 5 attack it too. Without
@@ -499,6 +570,7 @@ impl HasInstructionSet for EscrowCleanFixture {
             cpi_reentrancy: None,
             realloc_check: None,
             bump_seed_check: None,
+            guards: vec![],
         };
 
         vec![initialize_spec, deposit_spec, withdraw_spec, claim_spec]
@@ -527,4 +599,5 @@ fn invariant_all(fixture: &mut EscrowCleanFixture) {
     solinv_core::invariants::discriminator_skip::check(fixture);
     solinv_core::invariants::pda_forge::check(fixture);
     solinv_core::invariants::account_swap::check(fixture);
+    solinv_core::invariants::precondition_skip::check(fixture);
 }

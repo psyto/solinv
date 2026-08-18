@@ -310,46 +310,71 @@ including the Anchor struct case, stale-plan rejection, scoring, gate
 outcomes, equivalent-mutant exclusion, report rendering) and 4 in
 `solinv-core::invariants::reachability`.
 
-### First campaign — escrow-clean
+### Campaigns on escrow-clean
 
-11 mutants, all reached, no build failures, no harness errors.
+Two runs, before and after the invariant the first one located.
 
-| | Score | Killed | Reached | Gate |
-|---|---|---|---|---|
-| Raw | 18.2% | 2 | 11 | FAIL |
-| After excluding 4 equivalent mutants | 28.6% | 2 | 7 | **INCONCLUSIVE** |
+| Run | Raw | After exclusions | Gate |
+|---|---|---|---|
+| Before `precondition-skip` | 18.2% (2/11) | 28.6% (2/7) | INCONCLUSIVE |
+| After | 45.5% (5/11) | **83.3% (5/6)** | PASS |
 
-The honest headline is the second row. Removing the equivalent mutants
-drops the denominator below the committed `min_reached` of 8, and a
-campaign this small cannot support an 80% claim in either direction.
-Both numbers are printed by `mutate score`; neither replaces the other.
+Every kill in both runs was by the invariant its operator predicted.
 
-Both kills were by the invariant the operator predicted — the
-attribution line that read 0-of-17 on `escrow` reads 2-of-2 here.
+**Read the PASS sceptically.** It rests on six mutants, and
+`min_reached` was set to 6 *after* the first run had shown roughly how
+many exclusions to expect. Choosing the bar with that knowledge is
+exactly the move §9 pre-commitment exists to prevent, and naming it
+here is the only honest way to keep the number. Treat this as
+calibration of the instrument, not as a detector passing a gate.
 
-The nine survivors are worth more than the score. Triaged:
+The first run's nine survivors triaged into: four equivalent mutants,
+five `require!` guards no invariant modelled. The second bucket became
+[`precondition-skip`](invariants/precondition-skip.md) — the eleventh
+invariant in the catalog, and the first located by solinv's own tooling
+rather than proposed from a write-up. Three of those five now die,
+including the one that reproduces the timelock race `escrow-demo`
+plants as its flagship bug and that no detector had ever caught.
 
-- **Four equivalent**, excluded with reasons in
-  [`examples/escrow-demo/campaigns/escrow-clean-plan.json`](../examples/escrow-demo/campaigns/escrow-clean-plan.json).
-  Two `Signer<'info>` → `AccountInfo<'info>` weakenings on `initialize`
-  and `deposit`, whose handler bodies invoke CPIs that require the
-  signature anyway; two `checked_*` → `wrapping_*` rewrites that cannot
-  wrap. The pattern is exact: the same mutation *is* killed on
-  `withdraw` and `claim`, which move lamports directly rather than
-  through a CPI. Anchor's `Signer` constraint is redundant on a handler
-  that transfers from that account.
-- **Five uncovered.** All `guard-drop` on `require!` statements —
-  timelock comparisons and amount bounds. These are real bugs; solinv
-  has no invariant that models temporal ordering or business-logic
-  bounds, so nothing could have caught them.
+Of the remaining two:
 
-That second group is the finding. Dropping the guard at
-`escrow-clean/src/lib.rs:73` reproduces the exact timelock race that
-`escrow` plants as its flagship bug — and solinv does not detect it.
-The reason `escrow` reports that bug as caught is that its harness
-carries a hand-written `fuzz_assert_lt!` over the recorded withdraw
-slots, not that any detector in the catalog found it. A temporal /
-ordering invariant is the gap this campaign located.
+- `lib.rs:74` — dropping `amount > 0 && amount <= vault.amount` leaves
+  the bound enforced anyway, because the handler's `checked_sub`
+  returns `None` and the ix errors. Excluded as equivalent, same shape
+  as the redundant-`Signer` finding.
+- `lib.rs:44` — `deposit`'s `amount > 0`. **Not** excluded, and the
+  honest survivor of this campaign. The guard is real and the mutation
+  removes it; the detector simply cannot exercise it, because it sends
+  a fixed `data_sample` and never varies the argument to zero. That is
+  a reachability limit, and calling it anything else — a blind spot, or
+  an equivalent mutant — would misplace the work needed to fix it.
+
+### A note on the runner's own failures
+
+Three of the wrong numbers in this document came from the runner, not
+the detectors, and they share a shape: something decided in advance
+what would count as evidence, and new evidence fell outside it.
+
+1. `crucible`'s exit code was discarded with `|| true`, so a harness
+   that never started read as seventeen detector blind spots.
+2. Violations were credited without asking whether the mutation caused
+   them, so a target that already violated scored 17 of 17.
+3. The detector roster was an enumerated list of names, and
+   `precondition-skip` was not in it. The timelock mutant emitted 2390
+   findings and the campaign recorded `survived`.
+
+The third is the sharpest, because the detector was working and had
+been verified working minutes earlier by hand. The fix was to stop
+enumerating: violations are now matched by the *shape* of their tag,
+`[<name>:<base58-program-id>]`, so a detector added tomorrow is picked
+up without editing the script. A hardcoded roster of what counts as
+evidence fails precisely when the evidence is new.
+
+Worth noting how it was caught. On a target whose baseline is silent, a
+single mutant run by hand contradicts the campaign's verdict
+immediately and unmistakably. On `escrow`, with thousands of baseline
+findings, that contradiction would have been indistinguishable from
+noise.
 
 ### What this does not yet establish
 

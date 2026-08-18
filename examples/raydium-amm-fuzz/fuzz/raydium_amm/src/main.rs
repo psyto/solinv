@@ -684,6 +684,7 @@ impl HasInstructionSet for RaydiumAmmFixture {
             cpi_reentrancy: Some(CpiReentrancyConfig { allowlist: vec![] }),
             realloc_check: Some(ReallocCheckConfig::default()),
             bump_seed_check: Some(BumpSeedCheckConfig { bump_data_offset: None }),
+            guards: vec![],
             };
 
         // SwapBaseOutV2 — Day 21 addition. Same 8-account layout as InV2,
@@ -775,6 +776,7 @@ impl HasInstructionSet for RaydiumAmmFixture {
             cpi_reentrancy: Some(CpiReentrancyConfig { allowlist: vec![] }),
             realloc_check: Some(ReallocCheckConfig::default()),
             bump_seed_check: Some(BumpSeedCheckConfig { bump_data_offset: None }),
+            guards: vec![],
             };
 
         vec![swap_base_in_v2_spec, swap_base_out_v2_spec]

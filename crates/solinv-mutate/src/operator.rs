@@ -143,13 +143,17 @@ pub fn catalog() -> Vec<MutationOperator> {
         MutationOperator {
             id: "guard-drop",
             description: "delete an Anchor `require!`-family guard",
-            expected_killer: "unchecked-math",
+            expected_killer: "precondition-skip",
             tier: Tier::High,
             pattern: r"require(?:_eq|_neq|_gt|_gte|_lt|_lte|_keys_eq|_keys_neq)?!\s*\([^;]*\)\s*;",
             replacement: "",
             rationale: "The most common real shape: a validation guard removed during a \
-                        refactor. Which invariant catches it depends on what the guard \
-                        protected, so a kill by an unexpected detector is informative here.",
+                        refactor. It was labelled `unchecked-math` until a campaign on \
+                        escrow-clean showed why that was wrong: five guard-drops survived, \
+                        none of them arithmetic bugs, and no invariant modelled the shape \
+                        at all. `precondition-skip` was built from those survivors. A kill \
+                        by another detector is still informative — which invariant catches \
+                        a dropped guard depends on what the guard protected.",
         },
         MutationOperator {
             id: "checked-to-wrapping",

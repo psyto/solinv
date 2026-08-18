@@ -30,8 +30,9 @@ pub use bytepoke::{
     write_u8_at, AnchorAccountBuilder,
 };
 pub use capability::{
-    BumpSeedCheckConfig, CpiReentrancyConfig, HasContext, HasInstructionSet, InstructionSpec,
-    MonotonicDir, ReallocCheckConfig, RelOp, RelTerm, StateInvariant, StateInvariantKind,
+    BumpSeedCheckConfig, CpiReentrancyConfig, GuardCondition, GuardOp, GuardOperand, HasContext,
+    HasInstructionSet, InstructionSpec, MonotonicDir, ReallocCheckConfig, RelOp, RelTerm,
+    StateInvariant, StateInvariantKind,
 };
 pub use schema::{
     relation, AccountSchema, SchemaError, SchemaField, ANCHOR_DISCRIMINATOR_LEN, READABLE_WIDTHS,

@@ -18,11 +18,12 @@ provide coverage-guided execution and snapshot infrastructure. They
 ask the user to declare what counts as a bug. Solinv ships that
 declaration as a library:
 
-1. **Pre-built Solana invariants — catalog 10/10** end-to-end against
-   planted bugs and clean against hardened production code:
-   **Critical 5** (signer-skip, owner-skip, discriminator-skip,
-   pda-forge, account-swap) + **High 5** (unchecked-math, cu-dos,
-   cpi-reentrancy, realloc-race, bump-seed-canonicalization). Each
+1. **Pre-built Solana invariants — 11 in the catalog**, each tested
+   end-to-end against planted bugs and clean against hardened
+   production code: **Critical 5** (signer-skip, owner-skip,
+   discriminator-skip, pda-forge, account-swap) + **High 6**
+   (unchecked-math, cu-dos, cpi-reentrancy, realloc-race,
+   bump-seed-canonicalization, precondition-skip). Each
    ships with a 10-section spec doc, Gate 1 planted-bug acceptance,
    and Gate 2 production-target calibration evidence.
 2. **Honest calibration data** — production code is mostly clean.
@@ -82,6 +83,7 @@ inherits its sBPF coverage and libafl scheduling.
 | discriminator-skip | none | total |
 | pda-forge | none at read-time (runtime checks `invoke_signed` only) | total |
 | account-swap | none | total |
+| precondition-skip | none | total (the runtime has no notion of a protocol's entry conditions) |
 
 The scale anchors solinv's value-add: detectors target precisely the
 layer Solana's runtime doesn't own, where the protocol's
@@ -376,26 +378,41 @@ solinv mutate score --plan plan.json --results results.json
 The kill criterion is committed at `plan` time, before any mutant runs
 — the §9 pre-commit discipline applied to the campaign itself.
 
-**First campaign — escrow-clean:** 18.2% raw (2 killed / 11 reached),
-28.6% after excluding four equivalent mutants (2 / 7), which drops the
-denominator below the committed `min_reached` and lands the gate on
-**INCONCLUSIVE**. Both kills were by the predicted invariant. Exclusions
-carry a mandatory reason and the pre-exclusion score is always printed
-beside the adjusted one.
+**Campaigns on escrow-clean**, before and after the invariant the
+first one located:
 
-The nine survivors matter more than the score. Four were equivalent
-mutants — an Anchor `Signer` constraint is redundant on a handler whose
-body invokes a CPI that requires the signature anyway, and the same
-mutation *is* killed on the two handlers that move lamports directly.
-The other five were `require!` guards on timelocks and amount bounds:
-real bugs that no solinv invariant models. Dropping the guard at
-`escrow-clean/src/lib.rs:73` reproduces escrow's flagship planted bug,
-and **solinv does not detect it** — that bug reads as caught in
-escrow-demo because the harness carries a hand-written assertion, not
-because a detector found it. A temporal / ordering invariant is the gap
-this campaign located.
+| Run | Raw | After exclusions | Gate |
+|---|---|---|---|
+| Before `precondition-skip` | 18.2% (2/11) | 28.6% (2/7) | INCONCLUSIVE |
+| After | 45.5% (5/11) | **83.3% (5/6)** | PASS |
 
-v1 operators reach 6 of the 10 catalog invariants; `cu-dos`,
+Every kill in both runs was by the invariant its operator predicted.
+Read the PASS sceptically: it rests on six mutants, and `min_reached`
+was set to 6 after the first run had shown how many exclusions to
+expect — choosing the bar with that knowledge is what §9 pre-commitment
+exists to prevent. This is calibration of the instrument, not a
+detector clearing a gate.
+
+The first run's nine survivors are what made it worth running. Four
+were equivalent mutants — an Anchor `Signer` constraint is redundant on
+a handler whose body invokes a CPI that requires the signature anyway,
+and the same mutation *is* killed on the two handlers that move
+lamports directly. The other five were `require!` guards on timelocks
+and amount bounds, which **no invariant in the catalog modelled**. That
+bucket became [`precondition-skip`](docs/invariants/precondition-skip.md),
+the eleventh invariant — the first solinv located with its own tooling
+rather than taking from a write-up. Three of the five now die,
+including the timelock race `escrow-demo` plants as its flagship bug,
+which until now read as detected only because that harness carries a
+hand-written assertion.
+
+One honest survivor remains: `deposit`'s `amount > 0`. The guard is
+real and the mutation removes it, but the detector sends a fixed
+`data_sample` and never varies the argument to zero. That is a
+reachability limit, not a blind spot, and the distinction decides what
+work would fix it.
+
+v1 operators reach 7 of the 11 catalog invariants; `cu-dos`,
 `cpi-reentrancy`, `realloc-race` and `account-swap` need structural
 rather than textual mutation and are named in every campaign summary so
 a score is never mistaken for a verdict on all ten. This campaign
@@ -403,7 +420,7 @@ exercised two of them — a four-handler escrow does not contain the
 shapes the rest detect. Design note:
 [`docs/mutation-testing.md`](docs/mutation-testing.md).
 
-## Quickstart — escrow-demo (catalog 10/10)
+## Quickstart — escrow-demo
 
 ```bash
 # Install Crucible CLI (one-time)
@@ -458,7 +475,7 @@ the empirical backbone of solinv's "honest tested-and-found-nothing"
 framing. Full per-Gate methodology in
 [`docs/phase5-day60-bump-seed-canonicalization-gates.md`](docs/phase5-day60-bump-seed-canonicalization-gates.md).
 
-## Invariant catalog (10/10 complete)
+## Invariant catalog (11 invariants)
 
 The catalog targets Solana's distinctive account model and
 runtime-specific bug surfaces.
@@ -475,6 +492,14 @@ runtime-specific bug surfaces.
 | 8 | High | cpi-reentrancy | CPI cycle through caller program → state-coherence break (Mango v3 class) | [`docs/invariants/cpi-reentrancy.md`](docs/invariants/cpi-reentrancy.md) |
 | 9 | High | realloc-race | data buffer grown past rent-exempt threshold without lamport top-up | [`docs/invariants/realloc-race.md`](docs/invariants/realloc-race.md) |
 | 10 | High | bump-seed-canonicalization | non-canonical PDA bump accepted; alt-PDA substitution attack | [`docs/invariants/bump-seed-canonicalization.md`](docs/invariants/bump-seed-canonicalization.md) |
+| 11 | High | precondition-skip | ix succeeds while a declared entry guard was false — dropped timelock or bound | [`docs/invariants/precondition-skip.md`](docs/invariants/precondition-skip.md) |
+
+Invariant 11 was located by a mutation campaign rather than proposed:
+five survivors on `escrow-clean` were dropped `require!` guards that
+nothing in the catalog modelled, one of which reproduces the timelock
+race `escrow-demo` plants as its flagship bug — a bug that read as
+"detected" only because that harness carries a hand-written assertion.
+See [mutation testing](#mutation-testing--measuring-detector-power-on-a-real-target).
 
 Medium tier (roadmap, not yet specced): close-reopen,
 sysvar-manipulation, permissionless-misuse, rent-exemption,

@@ -27,32 +27,35 @@
 ,
 {
   "mutant_id": "guard-drop@examples/escrow-demo/programs/escrow-clean/src/lib.rs:44#0",
-  "expected_killer": "unchecked-math",
+  "expected_killer": "precondition-skip",
   "outcome": "survived"
 }
 ,
 {
   "mutant_id": "guard-drop@examples/escrow-demo/programs/escrow-clean/src/lib.rs:73#1",
-  "expected_killer": "unchecked-math",
-  "outcome": "survived"
+  "expected_killer": "precondition-skip",
+  "outcome": "killed",
+  "by": "precondition-skip"
 }
 ,
 {
   "mutant_id": "guard-drop@examples/escrow-demo/programs/escrow-clean/src/lib.rs:74#2",
-  "expected_killer": "unchecked-math",
+  "expected_killer": "precondition-skip",
   "outcome": "survived"
 }
 ,
 {
   "mutant_id": "guard-drop@examples/escrow-demo/programs/escrow-clean/src/lib.rs:95#3",
-  "expected_killer": "unchecked-math",
-  "outcome": "survived"
+  "expected_killer": "precondition-skip",
+  "outcome": "killed",
+  "by": "precondition-skip"
 }
 ,
 {
   "mutant_id": "guard-drop@examples/escrow-demo/programs/escrow-clean/src/lib.rs:97#4",
-  "expected_killer": "unchecked-math",
-  "outcome": "survived"
+  "expected_killer": "precondition-skip",
+  "outcome": "killed",
+  "by": "precondition-skip"
 }
 ,
 {

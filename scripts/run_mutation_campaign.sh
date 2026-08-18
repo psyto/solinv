@@ -190,9 +190,20 @@ grep -o '\[solinv\]\[reached\] ix=[A-Za-z0-9_]*' "$LOGDIR/baseline-reach.log" \
 # The scoring run on the unmutated program. Whatever fires here fires
 # for reasons that predate every mutant, so it cannot be evidence that a
 # mutation was caught.
-DETECTORS='(signer-skip|owner-skip|discriminator-skip|pda-forge|account-swap|unchecked-math|cu-dos|cpi-reentrancy|realloc-race|bump-seed-canonicalization)'
+# Violations are tagged `[<detector-name>:<program-id>]`. Match that
+# SHAPE rather than a list of names.
+#
+# The list used to be enumerated here, and it silently swallowed the
+# first detector added after it was written: `precondition-skip` fired
+# 2390 times against the timelock mutant and the campaign recorded
+# `survived`, because the name was not in the regex. A hardcoded roster
+# of what counts as evidence fails exactly when the evidence is new,
+# which is when it matters. The base58 program id is what keeps the
+# pattern from matching ordinary bracketed prose.
+DETECTOR_TAG='\[[a-z][a-z0-9-]*:[1-9A-HJ-NP-Za-km-z]{32,44}\]'
 run_test "$TEST" "$LOGDIR/baseline-score.log" || true
-grep -oE "\[${DETECTORS}:" "$LOGDIR/baseline-score.log" | tr -d '[:' | sort -u \
+grep -oE "$DETECTOR_TAG" "$LOGDIR/baseline-score.log" \
+  | sed -E 's/^\[([a-z0-9-]+):.*/\1/' | sort -u \
   > "$WORK/baseline-detectors.txt" || true
 
 if [[ -s "$WORK/baseline-detectors.txt" ]]; then
@@ -260,7 +271,8 @@ for id in "${IDS[@]}"; do
     #
     # Detectors that also fired on the unmutated program are dropped
     # first. They were going to fire whatever this mutant did.
-    by=$(grep -oE "\[${DETECTORS}:" "$LOGDIR/$slug.score.log" | tr -d '[:' | sort -u \
+    by=$(grep -oE "$DETECTOR_TAG" "$LOGDIR/$slug.score.log" \
+      | sed -E 's/^\[([a-z0-9-]+):.*/\1/' | sort -u \
       | grep -vxF -f "$WORK/baseline-detectors.txt" 2>/dev/null | head -1 || true)
 
     cat "$LOGDIR/$slug.score.log" "$LOGDIR/$slug.reach.log" > "$WORK/both.log"

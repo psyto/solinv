@@ -12,9 +12,35 @@ adopting solinv on their own protocols.
 
 ```
 escrow-demo/
-├── programs/escrow/   # Anchor program — safe + unsafe handlers
-└── fuzz/escrow/       # Crucible fuzz harness — fixture + 7 invariant variants
+├── programs/escrow/         # Anchor program — safe + unsafe handlers
+├── programs/escrow-clean/   # the same escrow with no planted bugs
+├── fuzz/escrow/             # Crucible harness — fixture + invariant variants
+└── fuzz/escrow_clean/       # Crucible harness for the clean program
 ```
+
+## Two programs, opposite jobs
+
+`escrow` answers "does the detector fire on a bug that is there?" Every
+detector in the catalog has a handler in it built to trip that detector,
+which is what makes it a good acceptance fixture.
+
+`escrow-clean` answers the other question — "does the detector fire on a
+bug I just introduced?" — and needs the opposite property. Mutation
+testing is only interpretable on a program that was correct beforehand,
+and `escrow` is unusable for it by construction: a scoring run against
+the unmutated program produces 7202 `cu-dos` and 796 `unchecked-math`
+findings, so every mutant "kills" something. A campaign run there
+scored 17 of 17 with none of the kills caused by a mutation.
+
+So `escrow-clean` is the same escrow with the timelock comparison
+corrected (`<` rather than `<=`) and all nine `unsafe_*` handlers
+dropped. Four handlers, all meant to be correct. Its defining property
+is checked, not assumed: the scoring run on the unmutated program
+reports nothing at all.
+
+**Keep it that way.** A planted bug added to `escrow-clean` does not
+make a richer example — it silently voids every mutation score the
+target produces. New planted bugs belong in `escrow`.
 
 ## Program — safe and unsafe handlers
 

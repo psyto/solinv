@@ -47,3 +47,9 @@ examples/*/coverage/
 examples/*/Cargo.lock
 examples/*/programs/*/target/
 examples/*/programs/*/Cargo.lock
+
+# Mutation campaign working files. The plan + results worth keeping live
+# in examples/*/campaigns/; per-mutant logs are large and reproducible.
+/plan*.json
+/results*.json
+*-logs/

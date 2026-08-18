@@ -115,6 +115,24 @@ enum MutateAction {
         #[arg(long)]
         out: Option<PathBuf>,
     },
+    /// Record a mutant as equivalent, excluding it from the score.
+    ///
+    /// For a mutation that compiles and runs but cannot produce
+    /// incorrect behaviour, so no detector could have caught it. The
+    /// reason is mandatory and is printed in the report next to the
+    /// adjusted score — an exclusion nobody can check is an exclusion
+    /// that flatters the number.
+    Exclude {
+        /// Campaign JSON produced by `plan`
+        #[arg(long)]
+        plan: PathBuf,
+        /// Mutant id to exclude
+        #[arg(long)]
+        mutant: String,
+        /// Why this mutation cannot produce incorrect behaviour
+        #[arg(long)]
+        reason: String,
+    },
     /// Score a completed campaign
     Score {
         /// Campaign JSON produced by `plan`
@@ -244,7 +262,8 @@ fn compute_scores(cfg: ScoringConfig) -> Vec<TargetScore> {
 
 fn run_mutate(action: MutateAction) -> Result<()> {
     use solinv_mutate::{
-        apply, catalog, generate, Campaign, CampaignReport, KillCriterion, MutantResult,
+        apply, catalog, generate, Campaign, CampaignReport, EquivalentMutant, KillCriterion,
+        MutantResult,
         UNCOVERED_INVARIANTS,
     };
 
@@ -310,6 +329,7 @@ fn run_mutate(action: MutateAction) -> Result<()> {
                     min_reached,
                 },
                 mutants,
+                equivalent: Vec::new(),
             };
             fs::write(&out, serde_json::to_string_pretty(&campaign)?)
                 .with_context(|| format!("failed to write plan: {}", out.display()))?;
@@ -350,6 +370,39 @@ fn run_mutate(action: MutateAction) -> Result<()> {
                 }
                 None => print!("{patched}"),
             }
+        }
+
+        MutateAction::Exclude {
+            plan,
+            mutant,
+            reason,
+        } => {
+            if reason.trim().is_empty() {
+                anyhow::bail!("--reason must say why the mutation cannot misbehave");
+            }
+            let mut campaign: Campaign = serde_json::from_str(
+                &fs::read_to_string(&plan)
+                    .with_context(|| format!("failed to read plan: {}", plan.display()))?,
+            )
+            .context("invalid campaign JSON")?;
+
+            // Refuse an id the plan does not contain. Silently accepting
+            // one would let a typo read as an applied exclusion.
+            if !campaign.mutants.iter().any(|m| m.id == mutant) {
+                anyhow::bail!("no mutant `{mutant}` in {}", plan.display());
+            }
+            if let Some(existing) = campaign.equivalent.iter_mut().find(|e| e.mutant_id == mutant) {
+                existing.reason = reason;
+                println!("updated the reason for {mutant}");
+            } else {
+                campaign.equivalent.push(EquivalentMutant {
+                    mutant_id: mutant.clone(),
+                    reason,
+                });
+                println!("excluded {mutant} as equivalent");
+            }
+            fs::write(&plan, serde_json::to_string_pretty(&campaign)?)
+                .with_context(|| format!("failed to write plan: {}", plan.display()))?;
         }
 
         MutateAction::Score {

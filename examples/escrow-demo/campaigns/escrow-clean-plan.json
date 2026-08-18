@@ -1,0 +1,182 @@
+{
+  "target": "escrow-clean",
+  "criterion": {
+    "statement": "escrow-clean はベースラインで全検出器が沈黙することを実測済み。発火した違反は変異が原因である。等価変異は理由を明記して除外し、除外前スコアも併記する。この条件下で到達 mutant の 80% 未満しか殺せなければ、それは検出器の盲点である",
+    "min_score": 0.8,
+    "min_reached": 8
+  },
+  "mutants": [
+    {
+      "id": "signer-type-weaken@examples/escrow-demo/programs/escrow-clean/src/lib.rs:121#0",
+      "operator": "signer-type-weaken",
+      "expected_killer": "signer-skip",
+      "tier": "critical",
+      "file": "examples/escrow-demo/programs/escrow-clean/src/lib.rs",
+      "line": 121,
+      "byte_start": 4374,
+      "byte_end": 4387,
+      "original": "Signer<'info>",
+      "mutated": "AccountInfo<'info>",
+      "source_digest": "a2cc712d62d80063",
+      "enclosing_fn": "initialize"
+    },
+    {
+      "id": "signer-type-weaken@examples/escrow-demo/programs/escrow-clean/src/lib.rs:135#1",
+      "operator": "signer-type-weaken",
+      "expected_killer": "signer-skip",
+      "tier": "critical",
+      "file": "examples/escrow-demo/programs/escrow-clean/src/lib.rs",
+      "line": 135,
+      "byte_start": 4697,
+      "byte_end": 4710,
+      "original": "Signer<'info>",
+      "mutated": "AccountInfo<'info>",
+      "source_digest": "a2cc712d62d80063",
+      "enclosing_fn": "deposit"
+    },
+    {
+      "id": "signer-type-weaken@examples/escrow-demo/programs/escrow-clean/src/lib.rs:149#2",
+      "operator": "signer-type-weaken",
+      "expected_killer": "signer-skip",
+      "tier": "critical",
+      "file": "examples/escrow-demo/programs/escrow-clean/src/lib.rs",
+      "line": 149,
+      "byte_start": 5021,
+      "byte_end": 5034,
+      "original": "Signer<'info>",
+      "mutated": "AccountInfo<'info>",
+      "source_digest": "a2cc712d62d80063",
+      "enclosing_fn": "withdraw"
+    },
+    {
+      "id": "signer-type-weaken@examples/escrow-demo/programs/escrow-clean/src/lib.rs:165#3",
+      "operator": "signer-type-weaken",
+      "expected_killer": "signer-skip",
+      "tier": "critical",
+      "file": "examples/escrow-demo/programs/escrow-clean/src/lib.rs",
+      "line": 165,
+      "byte_start": 5442,
+      "byte_end": 5455,
+      "original": "Signer<'info>",
+      "mutated": "AccountInfo<'info>",
+      "source_digest": "a2cc712d62d80063",
+      "enclosing_fn": "claim"
+    },
+    {
+      "id": "guard-drop@examples/escrow-demo/programs/escrow-clean/src/lib.rs:44#0",
+      "operator": "guard-drop",
+      "expected_killer": "unchecked-math",
+      "tier": "high",
+      "file": "examples/escrow-demo/programs/escrow-clean/src/lib.rs",
+      "line": 44,
+      "byte_start": 1795,
+      "byte_end": 1844,
+      "original": "require!(amount > 0, EscrowError::InvalidAmount);",
+      "mutated": "",
+      "source_digest": "a2cc712d62d80063",
+      "enclosing_fn": "deposit"
+    },
+    {
+      "id": "guard-drop@examples/escrow-demo/programs/escrow-clean/src/lib.rs:73#1",
+      "operator": "guard-drop",
+      "expected_killer": "unchecked-math",
+      "tier": "high",
+      "file": "examples/escrow-demo/programs/escrow-clean/src/lib.rs",
+      "line": 73,
+      "byte_start": 2957,
+      "byte_end": 3028,
+      "original": "require!(clock.slot < vault.unlock_slot, EscrowError::AlreadyUnlocked);",
+      "mutated": "",
+      "source_digest": "a2cc712d62d80063",
+      "enclosing_fn": "withdraw"
+    },
+    {
+      "id": "guard-drop@examples/escrow-demo/programs/escrow-clean/src/lib.rs:74#2",
+      "operator": "guard-drop",
+      "expected_killer": "unchecked-math",
+      "tier": "high",
+      "file": "examples/escrow-demo/programs/escrow-clean/src/lib.rs",
+      "line": 74,
+      "byte_start": 3037,
+      "byte_end": 3146,
+      "original": "require!(\n            amount > 0 && amount <= vault.amount,\n            EscrowError::InvalidAmount\n        );",
+      "mutated": "",
+      "source_digest": "a2cc712d62d80063",
+      "enclosing_fn": "withdraw"
+    },
+    {
+      "id": "guard-drop@examples/escrow-demo/programs/escrow-clean/src/lib.rs:95#3",
+      "operator": "guard-drop",
+      "expected_killer": "unchecked-math",
+      "tier": "high",
+      "file": "examples/escrow-demo/programs/escrow-clean/src/lib.rs",
+      "line": 95,
+      "byte_start": 3651,
+      "byte_end": 3719,
+      "original": "require!(clock.slot >= vault.unlock_slot, EscrowError::StillLocked);",
+      "mutated": "",
+      "source_digest": "a2cc712d62d80063",
+      "enclosing_fn": "claim"
+    },
+    {
+      "id": "guard-drop@examples/escrow-demo/programs/escrow-clean/src/lib.rs:97#4",
+      "operator": "guard-drop",
+      "expected_killer": "unchecked-math",
+      "tier": "high",
+      "file": "examples/escrow-demo/programs/escrow-clean/src/lib.rs",
+      "line": 97,
+      "byte_start": 3763,
+      "byte_end": 3809,
+      "original": "require!(amount > 0, EscrowError::EmptyVault);",
+      "mutated": "",
+      "source_digest": "a2cc712d62d80063",
+      "enclosing_fn": "claim"
+    },
+    {
+      "id": "checked-to-wrapping@examples/escrow-demo/programs/escrow-clean/src/lib.rs:60#0",
+      "operator": "checked-to-wrapping",
+      "expected_killer": "unchecked-math",
+      "tier": "high",
+      "file": "examples/escrow-demo/programs/escrow-clean/src/lib.rs",
+      "line": 60,
+      "byte_start": 2356,
+      "byte_end": 2419,
+      "original": ".checked_add(amount)\n            .ok_or(EscrowError::Overflow)?",
+      "mutated": ".wrapping_add(amount)",
+      "source_digest": "a2cc712d62d80063",
+      "enclosing_fn": "deposit"
+    },
+    {
+      "id": "checked-to-wrapping@examples/escrow-demo/programs/escrow-clean/src/lib.rs:87#1",
+      "operator": "checked-to-wrapping",
+      "expected_killer": "unchecked-math",
+      "tier": "high",
+      "file": "examples/escrow-demo/programs/escrow-clean/src/lib.rs",
+      "line": 87,
+      "byte_start": 3422,
+      "byte_end": 3485,
+      "original": ".checked_sub(amount)\n            .ok_or(EscrowError::Overflow)?",
+      "mutated": ".wrapping_sub(amount)",
+      "source_digest": "a2cc712d62d80063",
+      "enclosing_fn": "withdraw"
+    }
+  ],
+  "equivalent": [
+    {
+      "mutant_id": "signer-type-weaken@examples/escrow-demo/programs/escrow-clean/src/lib.rs:121#0",
+      "reason": "initialize carries `init, payer = depositor`, whose CreateAccount CPI requires the payer's signature at the runtime level. Weakening the Anchor type to AccountInfo removes a check that the CPI underneath re-imposes, so the tampered send still fails and no incorrect behaviour is reachable."
+    },
+    {
+      "mutant_id": "signer-type-weaken@examples/escrow-demo/programs/escrow-clean/src/lib.rs:135#1",
+      "reason": "deposit's body invokes a system transfer from the depositor, which the runtime rejects unless the depositor signed the transaction. The Anchor Signer constraint is redundant with that requirement, so removing it opens nothing. Contrast withdraw and claim, which move lamports directly and where the same mutation IS killed."
+    },
+    {
+      "mutant_id": "checked-to-wrapping@examples/escrow-demo/programs/escrow-clean/src/lib.rs:87#1",
+      "reason": "the subtraction is guarded by `amount <= vault.amount` two lines above, which this mutant leaves intact, so wrapping_sub never wraps. Reachable only in combination with dropping that guard, which is a different mutant."
+    },
+    {
+      "mutant_id": "checked-to-wrapping@examples/escrow-demo/programs/escrow-clean/src/lib.rs:60#0",
+      "reason": "vault.amount accumulates real transferred lamports, and the fixture funds every account with 1e10. Overflowing u64 needs ~1.8e19, so wrapping_add cannot wrap under any sequence this harness can generate. Fixture-relative, not absolute: a fixture with larger balances would make this mutant live."
+    }
+  ]
+}

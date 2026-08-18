@@ -86,19 +86,61 @@ pub fn generate(sources: &[(String, String)]) -> Result<Vec<Mutant>> {
 
 /// Generate mutants using a specific operator set. Exposed so a
 /// campaign can restrict itself to, say, the Critical tier.
-/// Name of the function a byte offset sits inside, if any.
+/// Name of the handler a byte offset belongs to, if any.
 ///
-/// Takes the last `fn NAME` declaration at or before `offset`. It does
-/// not track brace depth, so a mutation between two functions is
-/// attributed to the earlier one; for the reachability join that is
-/// harmless, since operators only match inside function bodies.
+/// Not simply "the last `fn` above the offset". On an Anchor program the
+/// most productive operator — weakening a `Signer<'info>` — matches
+/// inside a `#[derive(Accounts)]` struct, and every one of those structs
+/// sits *below* the last handler in the file. Taking the nearest `fn`
+/// attributed all four signer mutants in escrow-clean to `claim`,
+/// including the one in `Initialize`, and the campaign then counted it
+/// as reached because `claim` had run. The join is only as sound as this
+/// function.
+///
+/// So: find the innermost declaration above the offset, `fn` or
+/// `struct`, whichever comes later. A `fn` is its own answer. A struct
+/// resolves through the handler that takes it as its `Context<..>`,
+/// which is the relationship that actually determines what executes that
+/// code. A struct no handler names resolves to `None` — better to
+/// exclude the mutant from the denominator than to credit it to a
+/// function that never touches it.
 pub fn enclosing_fn(contents: &str, offset: usize) -> Option<String> {
-    let re = Regex::new(
+    let head = &contents[..offset.min(contents.len())];
+
+    let fn_re = Regex::new(
         r"(?m)^\s*(?:pub\s*(?:\([^)]*\)\s*)?)?(?:const\s+)?(?:async\s+)?(?:unsafe\s+)?(?:extern\s+\x22[^\x22]*\x22\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)",
     )
     .ok()?;
-    re.captures_iter(&contents[..offset.min(contents.len())])
-        .last()
+    let struct_re =
+        Regex::new(r"(?m)^\s*(?:pub\s*(?:\([^)]*\)\s*)?)?struct\s+([A-Za-z_][A-Za-z0-9_]*)").ok()?;
+
+    let last_fn = fn_re.captures_iter(head).last();
+    let last_struct = struct_re.captures_iter(head).last();
+
+    match (last_fn, last_struct) {
+        (Some(f), Some(s)) => {
+            if s.get(0)?.start() > f.get(0)?.start() {
+                handler_taking_context(contents, &s[1])
+            } else {
+                Some(f[1].to_string())
+            }
+        }
+        (Some(f), None) => Some(f[1].to_string()),
+        (None, Some(s)) => handler_taking_context(contents, &s[1]),
+        (None, None) => None,
+    }
+}
+
+/// The handler whose signature names `struct_name` as its Anchor
+/// context: `pub fn deposit(ctx: Context<Deposit>, ..)` -> `deposit`.
+fn handler_taking_context(contents: &str, struct_name: &str) -> Option<String> {
+    let pattern = format!(
+        r"fn\s+([A-Za-z_][A-Za-z0-9_]*)\s*\([^)]*Context\s*<\s*{}\s*>",
+        regex::escape(struct_name)
+    );
+    Regex::new(&pattern)
+        .ok()?
+        .captures(contents)
         .map(|c| c[1].to_string())
 }
 
@@ -323,5 +365,58 @@ pub fn withdraw(ctx: Context<Withdraw>, amount: u64) -> Result<()> {
     fn enclosing_fn_is_none_before_any_function() {
         let src = "use std::fmt;\nconst X: u64 = 1;\nfn later() {}\n";
         assert_eq!(enclosing_fn(src, 5), None);
+    }
+
+    // The shape of every Anchor program: handlers first, then the
+    // `#[derive(Accounts)]` structs they take. A site inside one of
+    // those structs is below *every* handler, so the nearest-fn rule
+    // attributes all of them to the last one.
+    const ANCHOR_SHAPE: &str = "\
+pub mod prog {
+    pub fn initialize(ctx: Context<Initialize>) -> Result<()> { Ok(()) }
+    pub fn claim(ctx: Context<Claim>) -> Result<()> { Ok(()) }
+}
+
+#[derive(Accounts)]
+pub struct Initialize<'info> {
+    pub depositor: Signer<'info>,
+}
+
+#[derive(Accounts)]
+pub struct Claim<'info> {
+    pub beneficiary: Signer<'info>,
+}
+";
+
+    #[test]
+    fn a_site_in_an_accounts_struct_resolves_through_its_handler() {
+        let at_init = ANCHOR_SHAPE.find("pub depositor").unwrap();
+        let at_claim = ANCHOR_SHAPE.find("pub beneficiary").unwrap();
+        assert_eq!(
+            enclosing_fn(ANCHOR_SHAPE, at_init).as_deref(),
+            Some("initialize"),
+            "a field of Initialize belongs to the handler taking Context<Initialize>"
+        );
+        assert_eq!(
+            enclosing_fn(ANCHOR_SHAPE, at_claim).as_deref(),
+            Some("claim")
+        );
+    }
+
+    #[test]
+    fn a_struct_no_handler_takes_resolves_to_nothing() {
+        // Excluding it from the denominator is the conservative answer.
+        // Naming some unrelated function would let the campaign call the
+        // mutant reached because that function happened to run.
+        let src = "fn helper() {}\n\npub struct Orphan {\n    pub field: u64,\n}\n";
+        let at = src.find("pub field").unwrap();
+        assert_eq!(enclosing_fn(src, at), None);
+    }
+
+    #[test]
+    fn a_site_inside_a_function_still_wins_over_a_struct_above_it() {
+        let src = "pub struct S { pub a: u64 }\npub fn after() {\n    let x = 1;\n}\n";
+        let at = src.find("let x").unwrap();
+        assert_eq!(enclosing_fn(src, at).as_deref(), Some("after"));
     }
 }

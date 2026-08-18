@@ -148,8 +148,17 @@ struct EscrowCleanFixture {
     depositor_b: Arc<Keypair>, // alternate context, for account-swap
     beneficiary: Arc<Keypair>,
     fee_payer: Arc<Keypair>,
+    // Payer for the `initialize` spec. Deliberately not `fee_payer`:
+    // the fee payer signs the transaction whatever its AccountMeta
+    // says, so clearing its is_signer flag removes nothing and
+    // signer-skip reports a violation on correct code — measured, at
+    // 19998 findings against the unmutated program.
+    initializer: Arc<Keypair>,
     vault_pda: Pubkey,
     vault_b_pda: Pubkey,
+    // Vault for `initialize`, left uncreated by setup so the handler
+    // has somewhere to succeed.
+    vault_init_pda: Pubkey,
     unlock_slot: u64,
 }
 
@@ -165,7 +174,8 @@ impl EscrowCleanFixture {
         let depositor_b = Arc::new(Keypair::new());
         let beneficiary = Arc::new(Keypair::new());
         let fee_payer = Arc::new(Keypair::new());
-        for kp in [&depositor, &depositor_b, &beneficiary, &fee_payer] {
+        let initializer = Arc::new(Keypair::new());
+        for kp in [&depositor, &depositor_b, &beneficiary, &fee_payer, &initializer] {
             ctx.create_account()
                 .pubkey(kp.pubkey())
                 .lamports(INITIAL_BALANCE)
@@ -178,6 +188,8 @@ impl EscrowCleanFixture {
             Pubkey::find_program_address(&[b"vault", depositor.pubkey().as_ref()], &program_id);
         let (vault_b_pda, _) =
             Pubkey::find_program_address(&[b"vault", depositor_b.pubkey().as_ref()], &program_id);
+        let (vault_init_pda, _) =
+            Pubkey::find_program_address(&[b"vault", initializer.pubkey().as_ref()], &program_id);
         let unlock_slot = ctx.slot() + UNLOCK_DELAY;
 
         ctx.raw_call(build_initialize_ix(
@@ -221,8 +233,10 @@ impl EscrowCleanFixture {
             depositor_b,
             beneficiary,
             fee_payer,
+            initializer,
             vault_pda,
             vault_b_pda,
+            vault_init_pda,
             unlock_slot,
         }
     }
@@ -287,22 +301,27 @@ impl EscrowCleanFixture {
         self.note_reached("claim", ok)
     }
 
-    /// Re-initialize the alternate vault. Keeps `initialize` on the
-    /// reachable set: the primary vault is created during setup, so
-    /// without this nothing would drive the handler during fuzzing and
-    /// mutants inside it would be excluded as unreached.
-    pub fn action_initialize_alt(&mut self, #[range(1..1000)] delay: u64) -> bool {
+    /// Create the initializer's vault.
+    ///
+    /// Keeps `initialize` on the reachable set. `setup` creates the
+    /// depositor's and depositor_b's vaults, so an action re-running
+    /// either would fail on an already-initialized account every time
+    /// and the handler would read as unreachable — mutants inside it
+    /// excluded from the denominator for want of anything driving them.
+    /// The initializer's vault is untouched by setup, so the first call
+    /// in each iteration lands.
+    pub fn action_initialize_third(&mut self, #[range(1..1000)] delay: u64) -> bool {
         let unlock = self.ctx.slot() + delay;
         let ok = self
             .ctx
             .raw_call(build_initialize_ix(
                 self.program_id,
-                self.vault_b_pda,
-                self.depositor_b.pubkey(),
+                self.vault_init_pda,
+                self.initializer.pubkey(),
                 self.beneficiary.pubkey(),
                 unlock,
             ))
-            .signers(&[&*self.depositor_b])
+            .signers(&[&*self.initializer])
             .send()
             .map(|o| o.is_success())
             .unwrap_or(false);
@@ -440,7 +459,49 @@ impl HasInstructionSet for EscrowCleanFixture {
             bump_seed_check: None,
         };
 
-        vec![deposit_spec, withdraw_spec, claim_spec]
+        // initialize — declared so the Critical 5 attack it too. Without
+        // this the `Signer<'info>` on its depositor is unprotected by
+        // any declaration, and a mutation weakening it survives for want
+        // of anyone asking, which reads in the report as a detector
+        // blind spot. It creates the vault rather than reading it, hence
+        // `creates_indices` and no owner/discriminator expectation on
+        // account 0.
+        let mut init_data = ix_sighash("initialize").to_vec();
+        init_data.extend_from_slice(self.beneficiary.pubkey().as_ref());
+        init_data.extend_from_slice(&self.unlock_slot.to_le_bytes());
+
+        let initialize_spec = InstructionSpec {
+            program_id: self.program_id,
+            name: "initialize".into(),
+            accounts: vec![
+                AccountMeta::new(self.vault_init_pda, false),
+                AccountMeta::new(self.initializer.pubkey(), true),
+                AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false),
+            ],
+            signer_indices: vec![1],
+            optional_signer_indices: vec![],
+            expected_owners: vec![None, None, None],
+            expected_discriminators: vec![None, None, None],
+            expected_pda_seeds: vec![
+                Some(vec![
+                    b"vault".to_vec(),
+                    self.initializer.pubkey().to_bytes().to_vec(),
+                ]),
+                None,
+                None,
+            ],
+            creates_indices: vec![0],
+            swap_alternates: vec![vec![], vec![], vec![]],
+            data_sample: init_data,
+            signers: vec![Arc::clone(&self.initializer)],
+            state_invariants: vec![],
+            cu_budget: None,
+            cpi_reentrancy: None,
+            realloc_check: None,
+            bump_seed_check: None,
+        };
+
+        vec![initialize_spec, deposit_spec, withdraw_spec, claim_spec]
     }
 }
 

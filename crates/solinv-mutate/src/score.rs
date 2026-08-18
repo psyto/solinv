@@ -37,7 +37,7 @@
 
 use crate::mutant::Mutant;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// What happened to one mutant when the campaign ran it.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -262,6 +262,35 @@ pub struct Campaign {
     pub target: String,
     pub criterion: KillCriterion,
     pub mutants: Vec<Mutant>,
+    /// Mutants ruled equivalent — the mutation compiles and runs but
+    /// cannot produce incorrect behaviour, so no detector could have
+    /// caught it and its survival says nothing about detector power.
+    #[serde(default)]
+    pub equivalent: Vec<EquivalentMutant>,
+}
+
+/// A mutant excluded from the denominator by human triage.
+///
+/// Equivalent mutants are the standing tax on mutation testing: on
+/// escrow-clean, three of nine survivors were mutations that cannot
+/// misbehave — a `checked_sub` whose underflow is unreachable behind an
+/// intact guard, an Anchor `Signer` constraint made redundant by the
+/// system-transfer CPI underneath it. Counted as survivors they push
+/// the score below what the detectors are actually worth.
+///
+/// The exclusion is post-hoc by nature: you cannot know a mutant is
+/// equivalent until you have seen it survive. That is exactly the shape
+/// of reasoning the §9 pre-commit discipline exists to constrain, so
+/// two things are non-negotiable here. The `reason` is required and
+/// must be an argument, not a label. And the report prints the raw
+/// score alongside the adjusted one, with every exclusion and its
+/// reason listed, so a reader can check the arithmetic against the
+/// argument rather than taking the adjusted number on trust.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EquivalentMutant {
+    pub mutant_id: String,
+    /// Why this mutation cannot produce incorrect behaviour.
+    pub reason: String,
 }
 
 /// A completed campaign.
@@ -276,14 +305,48 @@ pub struct CampaignReport {
     pub uncovered_invariants: Vec<String>,
     /// Mutant ids that survived — the list worth reading.
     pub survivors: Vec<String>,
+    /// The score over every result, before equivalent mutants are
+    /// removed. Always rendered next to the adjusted one: an exclusion
+    /// a reader cannot see is an exclusion they cannot check.
+    pub raw_score: Score,
+    /// The exclusions applied, with the argument for each.
+    pub excluded_as_equivalent: Vec<EquivalentMutant>,
 }
 
 impl CampaignReport {
     /// Build a report from a campaign's results.
     pub fn build(campaign: &Campaign, results: &[MutantResult]) -> Self {
-        let score = Score::tally(results);
+        let raw_score = Score::tally(results);
+
+        // Only exclusions naming a mutant that actually survived are
+        // honoured. Declaring a killed mutant equivalent would quietly
+        // shrink the numerator, and declaring an absent one is a stale
+        // plan — neither should silently change a score.
+        let survived_ids: BTreeSet<&str> = results
+            .iter()
+            .filter(|r| matches!(r.outcome, MutantOutcome::Survived))
+            .map(|r| r.mutant_id.as_str())
+            .collect();
+        let excluded_as_equivalent: Vec<EquivalentMutant> = campaign
+            .equivalent
+            .iter()
+            .filter(|e| survived_ids.contains(e.mutant_id.as_str()))
+            .cloned()
+            .collect();
+
+        let excluded_ids: BTreeSet<&str> = excluded_as_equivalent
+            .iter()
+            .map(|e| e.mutant_id.as_str())
+            .collect();
+        let scored: Vec<MutantResult> = results
+            .iter()
+            .filter(|r| !excluded_ids.contains(r.mutant_id.as_str()))
+            .cloned()
+            .collect();
+
+        let score = Score::tally(&scored);
         let gate = campaign.criterion.evaluate(&score);
-        let survivors = results
+        let survivors = scored
             .iter()
             .filter(|r| matches!(r.outcome, MutantOutcome::Survived))
             .map(|r| r.mutant_id.clone())
@@ -292,13 +355,15 @@ impl CampaignReport {
             target: campaign.target.clone(),
             criterion: campaign.criterion.clone(),
             score,
-            per_invariant: per_invariant(results),
+            per_invariant: per_invariant(&scored),
             gate,
             uncovered_invariants: crate::operator::UNCOVERED_INVARIANTS
                 .iter()
                 .map(|s| s.to_string())
                 .collect(),
             survivors,
+            raw_score,
+            excluded_as_equivalent,
         }
     }
 
@@ -355,6 +420,17 @@ impl CampaignReport {
             ));
         }
 
+        if !self.excluded_as_equivalent.is_empty() {
+            let raw = match self.raw_score.score {
+                Some(v) => format!("{:.1}%", v * 100.0),
+                None => "n/a".to_string(),
+            };
+            out.push_str(&format!(
+                "- **Before excluding equivalent mutants**: {} ({} killed / {} reached)\n",
+                raw, self.raw_score.killed, self.raw_score.denominator,
+            ));
+        }
+
         out.push_str("\n## Pre-committed criterion\n\n");
         out.push_str(&format!("> {}\n\n", self.criterion.statement));
         out.push_str(&format!(
@@ -400,6 +476,18 @@ impl CampaignReport {
             );
             for id in &self.survivors {
                 out.push_str(&format!("- `{id}`\n"));
+            }
+        }
+
+        if !self.excluded_as_equivalent.is_empty() {
+            out.push_str("\n## Excluded as equivalent\n\n");
+            out.push_str(
+                "Mutants ruled incapable of producing incorrect behaviour, and so \
+                 removed from the denominator. Each exclusion raises the score, so \
+                 each one is stated with its argument — check them.\n\n",
+            );
+            for e in &self.excluded_as_equivalent {
+                out.push_str(&format!("- `{}`\n  - {}\n", e.mutant_id, e.reason));
             }
         }
         out
@@ -540,7 +628,75 @@ mod tests {
             target: "raydium-amm".into(),
             criterion: criterion(),
             mutants: Vec::new(),
+            equivalent: Vec::new(),
         }
+    }
+
+    fn campaign_excluding(ids_and_reasons: &[(&str, &str)]) -> Campaign {
+        Campaign {
+            equivalent: ids_and_reasons
+                .iter()
+                .map(|(id, reason)| EquivalentMutant {
+                    mutant_id: id.to_string(),
+                    reason: reason.to_string(),
+                })
+                .collect(),
+            ..campaign()
+        }
+    }
+
+    #[test]
+    fn an_equivalent_mutant_leaves_the_denominator() {
+        let results = vec![
+            res("a", "signer-skip", killed("signer-skip")),
+            res("b", "signer-skip", MutantOutcome::Survived),
+        ];
+        let r = CampaignReport::build(
+            &campaign_excluding(&[("b", "underflow unreachable behind an intact guard")]),
+            &results,
+        );
+        assert_eq!(r.score.denominator, 1);
+        assert_eq!(r.score.score, Some(1.0));
+        assert_eq!(r.raw_score.denominator, 2, "the raw score keeps every result");
+        assert_eq!(r.raw_score.score, Some(0.5));
+        assert!(r.survivors.is_empty(), "an excluded mutant is not a survivor");
+    }
+
+    #[test]
+    fn the_report_shows_the_score_the_exclusions_replaced() {
+        let results = vec![
+            res("a", "signer-skip", killed("signer-skip")),
+            res("b", "signer-skip", MutantOutcome::Survived),
+        ];
+        let md = CampaignReport::build(
+            &campaign_excluding(&[("b", "the CPI underneath already requires the signature")]),
+            &results,
+        )
+        .to_markdown();
+        assert!(md.contains("Before excluding equivalent mutants"), "{md}");
+        assert!(md.contains("50.0%"), "the pre-exclusion score must survive: {md}");
+        assert!(md.contains("## Excluded as equivalent"), "{md}");
+        assert!(
+            md.contains("the CPI underneath already requires the signature"),
+            "the argument for an exclusion must be printed with it: {md}"
+        );
+    }
+
+    #[test]
+    fn only_survivors_can_be_excluded() {
+        // Excluding a killed mutant would shrink the numerator, turning
+        // a triage tool into a way to launder a bad score upward.
+        let results = vec![
+            res("a", "signer-skip", killed("signer-skip")),
+            res("b", "signer-skip", MutantOutcome::Survived),
+        ];
+        let r = CampaignReport::build(
+            &campaign_excluding(&[("a", "not a survivor"), ("ghost", "not in the results")]),
+            &results,
+        );
+        assert!(r.excluded_as_equivalent.is_empty());
+        assert_eq!(r.score.denominator, 2);
+        assert_eq!(r.score.killed, 1);
     }
 
     #[test]

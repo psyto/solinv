@@ -62,6 +62,6 @@ pub mod score;
 pub use mutant::{apply, digest, generate, generate_with, Mutant};
 pub use operator::{by_id, catalog, covered_invariants, MutationOperator, Tier, UNCOVERED_INVARIANTS};
 pub use score::{
-    per_invariant, Campaign, CampaignReport, GateOutcome, KillCriterion, MutantOutcome,
-    MutantResult, Score,
+    per_invariant, Campaign, CampaignReport, EquivalentMutant, GateOutcome, KillCriterion,
+    MutantOutcome, MutantResult, Score,
 };

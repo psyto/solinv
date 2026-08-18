@@ -337,31 +337,70 @@ reports `INCONCLUSIVE` rather than FAIL.
 
 Identifying unreached mutants needs evidence, since a silent run and an
 unasked detector look identical. Plans record each mutant's
-`enclosing_fn`; solinv emits `[solinv][reached] ix=<name>` under
-`SOLINV_REACHABILITY=1` when a canonical instruction executes; the
-campaign script joins them. The join is sound in one direction only —
-an instruction that never ran proves the mutation never ran, but an
-instruction that ran does not prove the mutated *branch* did — so every
-ambiguity resolves to `survived`, erring against the detector.
+`enclosing_fn`; the fixture's `action_*` methods emit
+`[solinv][reached] ix=<name>` under `SOLINV_REACHABILITY=1` when a
+canonical instruction lands; the campaign script joins them. The join is
+sound in one direction only — an instruction that never ran proves the
+mutation never ran, but an instruction that ran does not prove the
+mutated *branch* did — so every ambiguity resolves to `survived`,
+erring against the detector.
+
+Three findings shaped the runner, each of them a wrong number it
+produced first:
+
+- **A run with no evidence is `harness_error`, not `survived`.** The
+  first campaign scored 0.0% over 17 reached mutants; `crucible` had
+  in fact exited immediately every time, and an empty log has no
+  violations in it. A baseline build-and-run now gates the campaign.
+- **A kill has to be caused by the mutation.** The next campaign
+  scored 17 of 17, gate PASS — with 0 killed by the predicted
+  invariant. The unmutated program was already producing 7202
+  violations. The runner now measures the baseline's detector set and
+  subtracts it.
+- **The target has to be correct before you mutate it.** Which is why
+  `escrow-clean` exists: escrow with the timelock fixed and every
+  `unsafe_*` handler removed, verified to produce no violations at all
+  before mutation.
 
 ```bash
 solinv mutate operators                    # 9 operators, 6 of 10 invariants
-solinv mutate plan --target escrow-demo \
-  --src examples/escrow-demo/programs/escrow/src/lib.rs \
-  --out plan.json --statement "..." --min-score 0.8 --min-reached 10
+solinv mutate plan --target escrow-clean \
+  --src examples/escrow-demo/programs/escrow-clean/src/lib.rs \
+  --out plan.json --statement "..." --min-score 0.8 --min-reached 8
 ./scripts/run_mutation_campaign.sh plan.json \
-  examples/escrow-demo/programs/escrow/Cargo.toml escrow results.json
+  examples/escrow-demo/programs/escrow-clean/Cargo.toml \
+  escrow_clean examples/escrow-demo results.json
 solinv mutate score --plan plan.json --results results.json
 ```
 
 The kill criterion is committed at `plan` time, before any mutant runs
 — the §9 pre-commit discipline applied to the campaign itself.
 
+**First campaign — escrow-clean:** 18.2% raw (2 killed / 11 reached),
+28.6% after excluding four equivalent mutants (2 / 7), which drops the
+denominator below the committed `min_reached` and lands the gate on
+**INCONCLUSIVE**. Both kills were by the predicted invariant. Exclusions
+carry a mandatory reason and the pre-exclusion score is always printed
+beside the adjusted one.
+
+The nine survivors matter more than the score. Four were equivalent
+mutants — an Anchor `Signer` constraint is redundant on a handler whose
+body invokes a CPI that requires the signature anyway, and the same
+mutation *is* killed on the two handlers that move lamports directly.
+The other five were `require!` guards on timelocks and amount bounds:
+real bugs that no solinv invariant models. Dropping the guard at
+`escrow-clean/src/lib.rs:73` reproduces escrow's flagship planted bug,
+and **solinv does not detect it** — that bug reads as caught in
+escrow-demo because the harness carries a hand-written assertion, not
+because a detector found it. A temporal / ordering invariant is the gap
+this campaign located.
+
 v1 operators reach 6 of the 10 catalog invariants; `cu-dos`,
 `cpi-reentrancy`, `realloc-race` and `account-swap` need structural
 rather than textual mutation and are named in every campaign summary so
-a score is never mistaken for a verdict on all ten. **No real campaign
-has been run yet** — the crate is tooling, not evidence. Design note:
+a score is never mistaken for a verdict on all ten. This campaign
+exercised two of them — a four-handler escrow does not contain the
+shapes the rest detect. Design note:
 [`docs/mutation-testing.md`](docs/mutation-testing.md).
 
 ## Quickstart — escrow-demo (catalog 10/10)
@@ -375,6 +414,12 @@ cargo install --path ~/src/crucible/crates/crucible-fuzz-cli
 # + the Critical-5 acceptance fixture)
 cd examples/escrow-demo
 cargo build-sbf --tools-version v1.52 --manifest-path programs/escrow/Cargo.toml
+
+# And the clean twin, which mutation campaigns target. It must produce
+# NO violations before mutation — that is the property being relied on.
+cargo build-sbf --tools-version v1.52 \
+  --manifest-path programs/escrow-clean/Cargo.toml
+crucible run escrow_clean invariant_all --release --timeout 30
 
 # Run each invariant in isolation
 for inv in signer_skip owner_skip discriminator_skip pda_forge account_swap \
@@ -639,7 +684,7 @@ thing" drift after a negative result.
 
 ```bash
 cargo check --workspace               # verify scaffold (~5s)
-cargo test  --workspace               # all crates (219 tests)
+cargo test  --workspace               # all crates (227 tests)
 cargo test  -p solinv-core            # invariant regression tests
 cargo test  -p solinv-fuzz            # bytepoke + differential oracle + schema
 cargo test  -p solinv-mutate          # operators + mutants + scoring (no Solana deps)

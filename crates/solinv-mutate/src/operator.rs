@@ -141,6 +141,23 @@ pub fn catalog() -> Vec<MutationOperator> {
                         accepts any account the caller passes.",
         },
         MutationOperator {
+            id: "native-guard-neutralize",
+            description: "neutralize the condition of an `if .. { return Err(..) }` guard",
+            expected_killer: "precondition-skip",
+            tier: Tier::High,
+            pattern: r"if ([^\n{]+?)\s*\{\s*\n(\s*)return Err\(",
+            replacement: "if false {\n${2}return Err(",
+            rationale: "`guard-drop` finds Anchor's `require!` and nothing else, which \
+                        meant the catalog could not mutate a native program at all — 0 \
+                        matches across raydium-amm, whose 212 error returns are all \
+                        `if cond { return Err(..) }`. Much of Solana's highest-value code \
+                        is native, so an Anchor-only operator set measures detector power \
+                        only where Anchor is used. Neutralizing the condition rather than \
+                        deleting the block keeps the code compiling, and requiring the \
+                        very next statement to be `return Err(` is what distinguishes a \
+                        guard from ordinary control flow.",
+        },
+        MutationOperator {
             id: "guard-drop",
             description: "delete an Anchor `require!`-family guard",
             expected_killer: "precondition-skip",
@@ -252,6 +269,26 @@ mod tests {
     fn signer_type_weaken_rewrites_the_anchor_type() {
         let out = apply("signer-type-weaken", "pub authority: Signer<'info>,");
         assert_eq!(out, "pub authority: AccountInfo<'info>,");
+    }
+
+    #[test]
+    fn native_guard_neutralize_kills_the_condition_and_keeps_the_body() {
+        let src = "        if amm.status == 0 {\n            return Err(AmmError::Bad.into());\n        }";
+        let out = apply("native-guard-neutralize", src);
+        assert!(out.contains("if false {"), "condition not neutralized: {out}");
+        assert!(
+            out.contains("return Err(AmmError::Bad.into());"),
+            "the guard body must survive so the code still compiles: {out}"
+        );
+    }
+
+    #[test]
+    fn native_guard_neutralize_ignores_control_flow_that_is_not_a_guard() {
+        // An `if` whose body does anything other than return an error is
+        // ordinary logic. Neutralizing it produces a mutant that tests
+        // nothing and still costs a full SBF rebuild.
+        let src = "        if a > b {\n            total += 1;\n        }";
+        assert_eq!(apply("native-guard-neutralize", src), src);
     }
 
     #[test]

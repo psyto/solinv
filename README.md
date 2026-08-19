@@ -412,6 +412,31 @@ real and the mutation removes it, but the detector sends a fixed
 reachability limit, not a blind spot, and the distinction decides what
 work would fix it.
 
+**First campaign on production code — raydium-amm:** 21 mutants inside
+the two swap handlers, baseline silent. **0 killed of 18 reached —
+FAIL, conclusively.** Three causes, and only one of them is a blind
+spot:
+
+- **The operator set was Anchor-only.** raydium-amm has zero
+  `require!` and zero `Signer<'info>`; its 212 error returns are all
+  `if cond { return Err(..) }`. The catalog could not mutate a native
+  program at all, so every score before this one measured Anchor code
+  specifically. `native-guard-neutralize` fixes that — 129 matches in
+  raydium's processor.rs.
+- **Most survivors are guards the invariant cannot express.**
+  `precondition-skip` compares pre-state values; a production AMM
+  guards on *computed intermediates* (`swap_amount_out <
+  minimum_amount_out`), which no pre-state declaration can name. Real
+  limit of the design, invisible on a four-handler escrow.
+- **The campaign was mis-specified.** 15 of 18 mutants predicted
+  `precondition-skip` and the raydium harness declares no guards — the
+  detector was switched off on the target it was being scored against.
+
+One finding replicated: neutralizing raydium's `!is_signer` check opens
+nothing, because that account is the authority of the `token_transfer`
+CPI. Same redundancy as escrow-clean's `deposit`, found independently
+on production code.
+
 v1 operators reach 7 of the 11 catalog invariants; `cu-dos`,
 `cpi-reentrancy`, `realloc-race` and `account-swap` need structural
 rather than textual mutation and are named in every campaign summary so

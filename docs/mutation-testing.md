@@ -376,6 +376,76 @@ immediately and unmistakably. On `escrow`, with thousands of baseline
 findings, that contradiction would have been indistinguishable from
 noise.
 
+### First campaign on production code — raydium-amm
+
+The experiment §1 has been pointing at since this document was written.
+21 mutants inside the two swap handlers the harness drives; the
+baseline reports nothing, as the published Gate 2 result says it
+should.
+
+**0 killed of 18 reached. FAIL, conclusively — the run cleared its
+`min_reached` bar.**
+
+That number needs its causes stated, because "the detectors have a
+blind spot on real code" is only a third of it.
+
+**Getting there at all took a new operator.** `guard-drop` matches
+Anchor's `require!` and nothing else. raydium-amm contains zero
+`require!` and zero `Signer<'info>`; its 212 error returns are all
+`if cond { return Err(..) }`. The catalog could not mutate a native
+program *at all*, which means every mutation score before this one was
+a measurement of Anchor code specifically.
+`native-guard-neutralize` fills that in by neutralizing the condition
+of an `if` whose next statement returns an error — 129 matches in
+raydium's processor.rs.
+
+**Most of the survivors are not blind spots — they are guards this
+invariant cannot express.** Of the 15 `native-guard-neutralize`
+mutants, the conditions read:
+
+| Guard | Expressible as a `GuardCondition`? |
+|---|---|
+| `!user_source_owner.is_signer` | n/a — signer-skip's job, and equivalent (below) |
+| `*user_source_info.key == amm.pc_vault` | no — pubkey identity, not an unsigned scalar |
+| `(clock.unix_timestamp as u64) < amm.state_data.pool_open_time` | **yes in principle** — but the operand set has `Slot`, not `UnixTimestamp` |
+| `swap_amount_out < swap.minimum_amount_out` | no — `swap_amount_out` is computed inside the handler |
+| `swap_amount_out == 0 \|\| swap.amount_in == 0` | no — same, plus a disjunction |
+| `swap_amount_out >= total_pc_without_take_pnl` | no — both sides computed |
+
+`precondition-skip` checks comparisons over *pre-state*. A production
+AMM's guards are mostly over *computed intermediates* — the output
+amount, the post-swap reserve — which no pre-state declaration can
+name. That is a real limit of the design, and it did not show up on
+escrow-clean because a four-handler timelock escrow guards on stored
+fields.
+
+Two concrete gaps follow, in increasing order of difficulty: add a
+`UnixTimestamp` operand (Raydium gates on wall-clock, not slot, and
+that one guard *is* pre-state), and find some way to reference a
+handler's computed values, which pre-state declaration cannot do at
+all.
+
+**Neither was the campaign well-specified.** Fifteen of eighteen
+mutants predicted `precondition-skip`, and the raydium harness declares
+no `guards` at all — the detector was opted out on the target it was
+being scored against. The runner warns when a predicted killer already
+fires at baseline; it has no warning for a predicted killer that is
+switched off, and it should.
+
+**One equivalent-mutant finding replicated on production code.**
+Neutralizing `if !user_source_owner.is_signer` does not open a hole:
+that account is the authority of the `token_transfer` CPI
+(processor.rs:3199), so SPL Token rejects the transfer without its
+signature regardless. This is the same redundancy found on
+escrow-clean's `deposit`, arrived at independently — an explicit signer
+check is dead weight when the handler's own CPI re-imposes it.
+
+So the honest headline is narrower and more useful than the score:
+against native production code, the current operator set can now
+*generate* mutants, and the current invariant set kills none of the
+ones it generates, mostly because the guards real code uses are not the
+guards this catalog can state.
+
 ### What this does not yet establish
 
 No campaign has been run against a real protocol, and this one

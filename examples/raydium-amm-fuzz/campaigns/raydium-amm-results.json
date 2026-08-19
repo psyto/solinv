@@ -1,0 +1,128 @@
+[
+{
+  "mutant_id": "signer-check-drop@/Users/hiroyusai/src/raydium-amm/program/src/processor.rs:3053#6",
+  "expected_killer": "signer-skip",
+  "outcome": "survived"
+}
+,
+{
+  "mutant_id": "signer-check-drop@/Users/hiroyusai/src/raydium-amm/program/src/processor.rs:3297#7",
+  "expected_killer": "signer-skip",
+  "outcome": "survived"
+}
+,
+{
+  "mutant_id": "native-guard-neutralize@/Users/hiroyusai/src/raydium-amm/program/src/processor.rs:3053#57",
+  "expected_killer": "precondition-skip",
+  "outcome": "survived"
+}
+,
+{
+  "mutant_id": "native-guard-neutralize@/Users/hiroyusai/src/raydium-amm/program/src/processor.rs:3081#58",
+  "expected_killer": "precondition-skip",
+  "outcome": "survived"
+}
+,
+{
+  "mutant_id": "native-guard-neutralize@/Users/hiroyusai/src/raydium-amm/program/src/processor.rs:3111#59",
+  "expected_killer": "precondition-skip",
+  "outcome": "survived"
+}
+,
+{
+  "mutant_id": "native-guard-neutralize@/Users/hiroyusai/src/raydium-amm/program/src/processor.rs:3182#60",
+  "expected_killer": "precondition-skip",
+  "outcome": "survived"
+}
+,
+{
+  "mutant_id": "native-guard-neutralize@/Users/hiroyusai/src/raydium-amm/program/src/processor.rs:3185#61",
+  "expected_killer": "precondition-skip",
+  "outcome": "survived"
+}
+,
+{
+  "mutant_id": "native-guard-neutralize@/Users/hiroyusai/src/raydium-amm/program/src/processor.rs:3191#62",
+  "expected_killer": "precondition-skip",
+  "outcome": "survived"
+}
+,
+{
+  "mutant_id": "native-guard-neutralize@/Users/hiroyusai/src/raydium-amm/program/src/processor.rs:3231#63",
+  "expected_killer": "precondition-skip",
+  "outcome": "survived"
+}
+,
+{
+  "mutant_id": "native-guard-neutralize@/Users/hiroyusai/src/raydium-amm/program/src/processor.rs:3297#64",
+  "expected_killer": "precondition-skip",
+  "outcome": "survived"
+}
+,
+{
+  "mutant_id": "native-guard-neutralize@/Users/hiroyusai/src/raydium-amm/program/src/processor.rs:3328#65",
+  "expected_killer": "precondition-skip",
+  "outcome": "survived"
+}
+,
+{
+  "mutant_id": "native-guard-neutralize@/Users/hiroyusai/src/raydium-amm/program/src/processor.rs:3361#66",
+  "expected_killer": "precondition-skip",
+  "outcome": "survived"
+}
+,
+{
+  "mutant_id": "native-guard-neutralize@/Users/hiroyusai/src/raydium-amm/program/src/processor.rs:3430#67",
+  "expected_killer": "precondition-skip",
+  "outcome": "survived"
+}
+,
+{
+  "mutant_id": "native-guard-neutralize@/Users/hiroyusai/src/raydium-amm/program/src/processor.rs:3433#68",
+  "expected_killer": "precondition-skip",
+  "outcome": "survived"
+}
+,
+{
+  "mutant_id": "native-guard-neutralize@/Users/hiroyusai/src/raydium-amm/program/src/processor.rs:3436#69",
+  "expected_killer": "precondition-skip",
+  "outcome": "survived"
+}
+,
+{
+  "mutant_id": "native-guard-neutralize@/Users/hiroyusai/src/raydium-amm/program/src/processor.rs:3442#70",
+  "expected_killer": "precondition-skip",
+  "outcome": "survived"
+}
+,
+{
+  "mutant_id": "native-guard-neutralize@/Users/hiroyusai/src/raydium-amm/program/src/processor.rs:3482#71",
+  "expected_killer": "precondition-skip",
+  "outcome": "survived"
+}
+,
+{
+  "mutant_id": "checked-to-wrapping@/Users/hiroyusai/src/raydium-amm/program/src/processor.rs:3164#19",
+  "expected_killer": "unchecked-math",
+  "outcome": "build_failed",
+  "reason": "te: the following traits define an item `wrapping_sub`, perhaps you need to implement one of them:\n             candidate #1: `WrappingSub`\n             candidate #2: `bv::storage::BlockType`\n\nFor more information about this error, try `rustc --explain E0599`.\nwarning: `raydium_amm` (lib) generated 2 warnings\nerror: could not compile `raydium_amm` (lib) due to 1 previous error; 2 warnings emitted"
+}
+,
+{
+  "mutant_id": "checked-to-wrapping@/Users/hiroyusai/src/raydium-amm/program/src/processor.rs:3411#20",
+  "expected_killer": "unchecked-math",
+  "outcome": "survived"
+}
+,
+{
+  "mutant_id": "checked-to-wrapping@/Users/hiroyusai/src/raydium-amm/program/src/processor.rs:3478#21",
+  "expected_killer": "unchecked-math",
+  "outcome": "survived"
+}
+,
+{
+  "mutant_id": "checked-to-wrapping@/Users/hiroyusai/src/raydium-amm/program/src/processor.rs:3518#22",
+  "expected_killer": "unchecked-math",
+  "outcome": "survived"
+}
+]

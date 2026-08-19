@@ -102,6 +102,18 @@ enum MutateAction {
         /// Minimum reached mutants for the run to be conclusive
         #[arg(long, default_value_t = 10)]
         min_reached: usize,
+        /// Keep only mutants inside these functions. Repeat per name.
+        ///
+        /// The reachability join works at instruction granularity: a
+        /// mutant is credited as reached when the ledger saw its
+        /// enclosing function run as an instruction. Code in a helper
+        /// the handler calls therefore reads as unreached even though
+        /// it executed. Planning a whole native crate produces mostly
+        /// such mutants — 324 across raydium-amm, of which a harness
+        /// driving two instructions can speak to a couple of dozen —
+        /// and each one still costs a full SBF rebuild to exclude.
+        #[arg(long = "only-fn")]
+        only_fns: Vec<String>,
     },
     /// Write the mutated source for one mutant in a plan
     Apply {
@@ -313,6 +325,7 @@ fn run_mutate(action: MutateAction) -> Result<()> {
             statement,
             min_score,
             min_reached,
+            only_fns,
         } => {
             let mut sources = Vec::with_capacity(srcs.len());
             for path in &srcs {
@@ -320,7 +333,25 @@ fn run_mutate(action: MutateAction) -> Result<()> {
                     .with_context(|| format!("failed to read source: {}", path.display()))?;
                 sources.push((path.display().to_string(), contents));
             }
-            let mutants = generate(&sources)?;
+            let mut mutants = generate(&sources)?;
+            if !only_fns.is_empty() {
+                let before = mutants.len();
+                mutants.retain(|m| {
+                    m.enclosing_fn
+                        .as_deref()
+                        .is_some_and(|f| only_fns.iter().any(|w| w == f))
+                });
+                println!(
+                    "--only-fn kept {} of {before} mutants across {} function(s)",
+                    mutants.len(),
+                    only_fns.len()
+                );
+                for f in &only_fns {
+                    if !mutants.iter().any(|m| m.enclosing_fn.as_deref() == Some(f)) {
+                        println!("warning: no mutants in '{f}' — misspelled, or nothing to mutate");
+                    }
+                }
+            }
             let campaign = Campaign {
                 target,
                 criterion: KillCriterion {

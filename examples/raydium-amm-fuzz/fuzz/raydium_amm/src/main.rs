@@ -502,6 +502,21 @@ impl RaydiumAmmFixture {
         }
     }
 
+    /// Record a canonical action's instruction as reached when it lands.
+    ///
+    /// The name must match the *Rust function* in the program, not the
+    /// harness's own `InstructionSpec.name`: `solinv mutate plan`
+    /// records each mutant's enclosing function and the campaign runner
+    /// joins the two by name. `swap_base_in_v2` and
+    /// `process_swap_base_in_v2` are the same instruction to a reader
+    /// and different strings to the join.
+    fn note_reached(&self, ix_name: &str, success: bool) -> bool {
+        if success {
+            solinv_core::invariants::reachability::record_ix_reached(&self.program_id, ix_name);
+        }
+        success
+    }
+
     pub fn action_swap_base_in_v2(
         &mut self,
         #[range(1..1_000_000)] amount_in: u64,
@@ -520,12 +535,14 @@ impl RaydiumAmmFixture {
             amount_in,
             minimum_amount_out,
         );
-        self.ctx
+        let ok = self
+            .ctx
             .raw_call(ix)
             .signers(&[&*self.user])
             .send()
             .map(|o| o.is_success())
-            .unwrap_or(false)
+            .unwrap_or(false);
+        self.note_reached("process_swap_base_in_v2", ok)
     }
 
     pub fn action_swap_base_out_v2(
@@ -546,12 +563,14 @@ impl RaydiumAmmFixture {
             max_amount_in,
             amount_out,
         );
-        self.ctx
+        let ok = self
+            .ctx
             .raw_call(ix)
             .signers(&[&*self.user])
             .send()
             .map(|o| o.is_success())
-            .unwrap_or(false)
+            .unwrap_or(false);
+        self.note_reached("process_swap_base_out_v2", ok)
     }
 }
 
@@ -801,6 +820,27 @@ fn invariant_swap_base_in_v2_only(fixture: &mut RaydiumAmmFixture) {
 // Day 20 — isolated per-invariant variants (Day 12 escrow-demo pattern).
 // Each variant runs ONE invariant; selected via cargo feature flag.
 // Native Raydium AMM = 4 applicable invariants (discriminator-skip N/A).
+
+// Reachability-only run: drives actions, asserts nothing, so a
+// violation cannot cut a sequence short before the swap lands. See
+// docs/mutation-testing.md for why killing and reaching need separate
+// runs.
+#[invariant_test]
+fn invariant_reachability(_fixture: &mut RaydiumAmmFixture) {}
+
+// The mutation campaign's scoring run. On unmutated raydium-amm this is
+// expected to find nothing — that is the published Gate 2 result, and
+// it is also the precondition for any mutation score here to mean
+// anything.
+#[invariant_test]
+fn invariant_all(fixture: &mut RaydiumAmmFixture) {
+    solinv_core::invariants::unchecked_math::check(fixture);
+    solinv_core::invariants::signer_skip::check(fixture);
+    solinv_core::invariants::owner_skip::check(fixture);
+    solinv_core::invariants::pda_forge::check(fixture);
+    solinv_core::invariants::account_swap::check(fixture);
+    solinv_core::invariants::precondition_skip::check(fixture);
+}
 
 #[invariant_test]
 fn invariant_signer_skip_only(fixture: &mut RaydiumAmmFixture) {

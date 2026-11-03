@@ -211,16 +211,17 @@ impl fmt::Display for IdlError {
 impl std::error::Error for IdlError {}
 
 /// Accounts bound by name when the IDL gives no address — IDLs built
-/// without PDA resolution omit even `system_program`'s. Only names with
-/// exactly one possible address: `token_program` may be SPL Token or
-/// Token-2022, so it is never guessed.
+/// without PDA resolution omit even `system_program`'s. A name is a
+/// convention, not a declaration, so the list is the two names a program
+/// is least likely to reuse for an account of its own. Sysvar names
+/// (`clock`, `rent`, `instructions`) are left out: a program-owned
+/// `Account<'info, ClockState>` named `clock` is ordinary. So is
+/// `token_program`, which may be SPL Token or Token-2022. A wrong guess
+/// here would still be visible — Anchor checks a `Program<'info, _>`'s
+/// address, so the canonical send fails — and every binding is listed in
+/// [`IdlSpec::defaulted`].
 pub const WELL_KNOWN: &[(&str, &str)] = &[
     ("system_program", "11111111111111111111111111111111"),
-    ("rent", "SysvarRent111111111111111111111111111111111"),
-    ("clock", "SysvarC1ock11111111111111111111111111111111"),
-    ("instructions", "Sysvar1nstructions1111111111111111111111111"),
-    ("instructions_sysvar", "Sysvar1nstructions1111111111111111111111111"),
-    ("sysvar_instructions", "Sysvar1nstructions1111111111111111111111111"),
     ("associated_token_program", "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"),
 ];
 

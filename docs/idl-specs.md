@@ -58,10 +58,11 @@ unbound `arg` seeds, discriminators that are not 8 bytes long
 patterns that could not be evaluated for a typed slot.
 
 Also listed, as information rather than gaps: `IdlSpec::defaulted()`
-names slots bound by name because the IDL gave no address
-(`system_program`, `rent`, `clock`, the instructions sysvar,
-`associated_token_program` — each has exactly one possible address;
-`token_program` is never guessed). A program id that differs from the
+names slots bound by name because the IDL gave no address —
+`system_program` and `associated_token_program` only. A name is a
+convention, not a declaration: a program-owned account may be called
+`clock`, and `token_program` may be SPL Token or Token-2022, so those are
+never guessed. A program id that differs from the
 IDL's `address` is an `unresolved()` entry, since the `.so` must
 `declare_id!` the id it is loaded at or Anchor rejects every instruction
 with `DeclaredProgramIdMismatch`. Jito's tip-distribution hit both: its
@@ -95,8 +96,15 @@ and typed accounts carry ordinary doc comments too, so `docs` is no
 signal either way. `--src <dir>` reads the declared types from the
 `#[derive(Accounts)]` structs, joined to instructions through the
 handlers' `Context<..>` (composites by dotted path), and marks each slot
-`U` or `T`. It is a line-based reader, not a parser: a slot it cannot
-place is reported as not found, never guessed. The unsigned-writer flag
+`U` or `T`. It is a line-based reader, not a parser. Comments and string
+literals are stripped first; `T` is given only for Anchor's typed
+wrappers (`Account`, `AccountLoader`, `InterfaceAccount`, `Signer`,
+`Program`, `Interface`, `Sysvar`, `SystemAccount`), `U` for
+`UncheckedAccount`, `AccountInfo` and type aliases of them; any other
+type, a struct name defined twice, or a field type split over lines
+leaves the slot unplaced, and the report counts it as not found. When
+nothing under `--src` can be placed, the CLI says so instead of
+printing the IDL-only report silently. The unsigned-writer flag
 does not use it — a missing authority check is as missing on a typed
 account as on an unchecked one (escrow's `unsafe_set_amount_from_source`
 writes a typed `Vault` with no signer).

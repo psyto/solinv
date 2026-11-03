@@ -515,6 +515,13 @@ fn main() -> Result<()> {
                 None => match src {
                     Some(dir) => {
                         let kinds = source::SourceKinds::read(&dir)?;
+                        if kinds.is_empty() {
+                            eprintln!(
+                                "solinv idl: no #[derive(Accounts)] field under {} could be \
+                                 matched to an instruction; the report below is IDL-only",
+                                dir.display()
+                            );
+                        }
                         print!("{}", idl.report_with(|ix, path| kinds.get(ix, path)));
                     }
                     None => print!("{}", idl.report()),

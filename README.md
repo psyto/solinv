@@ -743,11 +743,11 @@ marks slots `U` (unchecked: owner and type checks are hand-written) or
 review a lot: Jito tip-distribution 29 unconstrained slots → 5
 unchecked, tip-payment 34 → 14, Raydium cp-swap 108 → 30.
 
-Building a spec, accounts with exactly one possible address
-(`system_program`, `rent`, `clock`, the instructions sysvar,
-`associated_token_program`) are bound by name when the IDL gives none,
-and listed in `IdlSpec::defaulted()`; `token_program` is never guessed
-(SPL Token or Token-2022). A spec whose program id differs from the
+Building a spec, `system_program` and `associated_token_program` are
+bound by name when the IDL gives no address, and listed in
+`IdlSpec::defaulted()`. Nothing else is guessed: a program's own account
+may be called `clock`, and `token_program` may be SPL Token or
+Token-2022. A spec whose program id differs from the
 IDL's `address` gets an `unresolved()` entry: the loaded `.so` must
 declare that id, or Anchor rejects every instruction with
 `DeclaredProgramIdMismatch` — usually a `.so` built with different
@@ -924,7 +924,7 @@ thing" drift after a negative result.
 
 ```bash
 cargo check --workspace               # verify scaffold (~5s)
-cargo test  --workspace               # all crates (258 tests)
+cargo test  --workspace               # all crates (261 tests)
 cargo test  -p solinv-core            # invariant regression tests
 cargo test  -p solinv-fuzz            # bytepoke + differential oracle + schema + idl
 cargo test  -p solinv-mutate          # operators + mutants + scoring (no Solana deps)

@@ -17,6 +17,8 @@ use std::path::Path;
 
 enum Field {
     Kind(SlotKind),
+    /// A type the reader does not recognise: left unplaced.
+    Unknown,
     /// A nested `#[derive(Accounts)]` struct, by name.
     Composite(String),
 }
@@ -27,6 +29,10 @@ pub struct SourceKinds {
 }
 
 impl SourceKinds {
+    pub fn is_empty(&self) -> bool {
+        self.map.is_empty()
+    }
+
     pub fn get(&self, ix: &str, path: &str) -> Option<SlotKind> {
         self.map.get(&(ix.to_string(), path.to_string())).copied()
     }
@@ -40,8 +46,15 @@ impl SourceKinds {
     }
 
     pub fn parse(src: &str) -> Self {
-        let line_comment = Regex::new(r"(?m)//.*$").unwrap();
-        let src = line_comment.replace_all(src, "");
+        let src = strip_comments_and_strings(src);
+
+        // `type Raw<'info> = AccountInfo<'info>;` hides an unchecked slot.
+        let alias = Regex::new(r"\btype\s+([A-Za-z_]\w*)\s*(?:<[^=]*>)?\s*=\s*([^;]+);").unwrap();
+        let unchecked_aliases: Vec<String> = alias
+            .captures_iter(&src)
+            .filter(|c| is_unchecked(&c[2], &[]))
+            .map(|c| c[1].to_string())
+            .collect();
 
         let derive = Regex::new(
             // `[^{]`, not `[^{;]`: an `#[instruction(.., proof: Vec<[u8; 32]>)]`
@@ -57,13 +70,24 @@ impl SourceKinds {
             }
         }
         let names: Vec<String> = bodies.iter().map(|(n, _)| n.clone()).collect();
+        // A name defined twice (two modules, cfg alternatives) cannot be
+        // told apart by `Context<Name>`: map neither.
+        let dup = |n: &str| names.iter().filter(|m| *m == n).count() > 1;
 
-        let field = Regex::new(r"(?m)^\s*pub\s+([A-Za-z_]\w*)\s*:\s*(.+?),?\s*$").unwrap();
+        // A field's type starts upper-case, which also keeps attribute
+        // lines like `token::mint = x,` from reading as fields.
+        let field = Regex::new(
+            r"(?m)^\s*(?:pub(?:\([^)]*\))?\s+)?([a-z_]\w*)\s*:\s*([A-Z].*?),?\s*$",
+        )
+        .unwrap();
         let mut structs: HashMap<String, Vec<(String, Field)>> = HashMap::new();
         for (name, body) in &bodies {
+            if dup(name) {
+                continue;
+            }
             let fields = field
                 .captures_iter(body)
-                .map(|c| (c[1].to_string(), classify(&c[2], &names)))
+                .map(|c| (c[1].to_string(), classify(&c[2], &names, &unchecked_aliases)))
                 .collect();
             structs.insert(name.clone(), fields);
         }
@@ -101,20 +125,121 @@ fn walk(
                 out.insert((ix.to_string(), path), *k);
             }
             Field::Composite(inner) => walk(structs, inner, ix, &path, out, depth + 1),
+            Field::Unknown => {}
         }
     }
 }
 
-fn classify(ty: &str, accounts_structs: &[String]) -> Field {
-    if ty.contains("UncheckedAccount") || ty.contains("AccountInfo") {
+const TYPED: &[&str] = &[
+    "Account",
+    "AccountLoader",
+    "InterfaceAccount",
+    "Signer",
+    "Program",
+    "Interface",
+    "Sysvar",
+    "SystemAccount",
+];
+
+fn is_unchecked(ty: &str, aliases: &[String]) -> bool {
+    let base = base_ident(ty);
+    base == "UncheckedAccount" || base == "AccountInfo" || aliases.iter().any(|a| *a == base)
+}
+
+/// First identifier under any `Box<` / `Option<` wrappers.
+fn base_ident(ty: &str) -> String {
+    let mut t = ty.trim();
+    loop {
+        let next = t.strip_prefix("Box<").or_else(|| t.strip_prefix("Option<"));
+        match next {
+            Some(rest) => t = rest.trim(),
+            None => break,
+        }
+    }
+    t.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect()
+}
+
+fn classify(ty: &str, accounts_structs: &[String], aliases: &[String]) -> Field {
+    if is_unchecked(ty, aliases) {
         return Field::Kind(SlotKind::Unchecked);
     }
-    let head = ty.trim_start_matches("Box<").trim();
-    let base: String = head.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+    let base = base_ident(ty);
+    if TYPED.contains(&base.as_str()) {
+        return Field::Kind(SlotKind::Typed);
+    }
     if accounts_structs.iter().any(|n| *n == base) {
         return Field::Composite(base);
     }
-    Field::Kind(SlotKind::Typed)
+    Field::Unknown
+}
+
+/// Blank out comments and string literals, keeping line structure, so
+/// text inside them is never read as a struct or a field.
+fn strip_comments_and_strings(src: &str) -> String {
+    let b = src.as_bytes();
+    let mut out = String::with_capacity(src.len());
+    let mut i = 0;
+    let blank = |out: &mut String, s: &str| {
+        for ch in s.chars() {
+            out.push(if ch == '\n' { '\n' } else { ' ' });
+        }
+    };
+    while i < b.len() {
+        let rest = &src[i..];
+        let skip = if rest.starts_with("//") {
+            rest.find('\n').unwrap_or(rest.len())
+        } else if rest.starts_with("/*") {
+            rest.find("*/").map_or(rest.len(), |e| e + 2)
+        } else if let Some(n) = raw_string_len(rest) {
+            n
+        } else if rest.starts_with('"') {
+            let mut j = 1;
+            while j < rest.len() {
+                match rest.as_bytes()[j] {
+                    b'\\' => j += 2,
+                    b'"' => break,
+                    _ => j += 1,
+                }
+            }
+            (j + 1).min(rest.len())
+        } else if let Some(n) = char_literal_len(rest) {
+            n
+        } else {
+            0
+        };
+        if skip > 0 {
+            blank(&mut out, &src[i..i + skip]);
+            i += skip;
+        } else {
+            let ch = rest.chars().next().unwrap();
+            out.push(ch);
+            i += ch.len_utf8();
+        }
+    }
+    out
+}
+
+/// Length of a char literal (`'{'`, `'\n'`, `'\u{7b}'`) at the start of
+/// `s`. A lifetime (`'info`) has no closing quote within reach.
+fn char_literal_len(s: &str) -> Option<usize> {
+    let rest = s.strip_prefix('\'')?;
+    if let Some(esc) = rest.strip_prefix('\\') {
+        let close = esc.find('\'')?;
+        return (close <= 8).then_some(close + 3);
+    }
+    let ch = rest.chars().next()?;
+    rest[ch.len_utf8()..].starts_with('\'').then_some(ch.len_utf8() + 2)
+}
+
+/// Length of a raw string literal (`r"…"`, `r#"…"#`, …) at the start of
+/// `s`, if there is one.
+fn raw_string_len(s: &str) -> Option<usize> {
+    let rest = s.strip_prefix('r').or_else(|| s.strip_prefix("br"))?;
+    let hashes = rest.chars().take_while(|c| *c == '#').count();
+    let body = rest[hashes..].strip_prefix('"')?;
+    let close = format!("\"{}", "#".repeat(hashes));
+    let end = body.find(&close)?;
+    Some(s.len() - body.len() + end + close.len())
 }
 
 /// The text up to the brace that closes one already opened.
@@ -169,6 +294,58 @@ mod tests {
         assert_eq!(k.get("deposit", "vault"), Some(SlotKind::Typed));
         assert_eq!(k.get("claim", "depositor"), Some(SlotKind::Unchecked));
         assert_eq!(k.get("unsafe_set_amount_from_source", "target"), Some(SlotKind::Typed));
+    }
+
+    #[test]
+    fn aliases_unknown_types_duplicates_and_text_in_strings() {
+        let src = r##"
+type Raw<'info> = AccountInfo<'info>;
+pub fn a(ctx: Context<A>) -> Result<()> {}
+pub fn b(ctx: Context<Dup>) -> Result<()> {}
+#[derive(Accounts)]
+pub struct A<'info> {
+    pub vault: Raw<'info>,
+    pub(crate) state: Box<Account<'info, State>>,
+    hidden: UncheckedAccount<'info>,
+    pub custom: Wrapper<'info>,
+    pub maybe: Option<UncheckedAccount<'info>>,
+}
+mod one {
+    #[derive(Accounts)]
+    pub struct Dup<'info> { pub x: AccountInfo<'info>, }
+}
+mod two {
+    #[derive(Accounts)]
+    pub struct Dup<'info> { pub x: Account<'info, X>, }
+}
+/* #[derive(Accounts)]
+pub struct A<'info> { pub state: AccountInfo<'info>, } */
+const DOC: &str = r#"
+#[derive(Accounts)]
+pub struct A<'info> {
+    pub custom: AccountInfo<'info>,
+}
+"#;
+"##;
+        let k = SourceKinds::parse(src);
+        assert_eq!(k.get("a", "vault"), Some(SlotKind::Unchecked));
+        assert_eq!(k.get("a", "state"), Some(SlotKind::Typed));
+        assert_eq!(k.get("a", "hidden"), Some(SlotKind::Unchecked));
+        assert_eq!(k.get("a", "custom"), None);
+        assert_eq!(k.get("a", "maybe"), Some(SlotKind::Unchecked));
+        assert_eq!(k.get("b", "x"), None);
+    }
+
+    #[test]
+    fn brace_char_literals_do_not_end_a_struct() {
+        let src = r#"
+pub fn a(ctx: Context<A>) -> Result<()> { let _ = '}'; let _ = '\''; }
+#[derive(Accounts)]
+pub struct A<'info> {
+    pub vault: AccountInfo<'info>,
+}
+"#;
+        assert_eq!(SourceKinds::parse(src).get("a", "vault"), Some(SlotKind::Unchecked));
     }
 
     #[test]

@@ -292,7 +292,27 @@ impl Idl {
     }
 
     pub fn from_json(json: &str) -> Result<Self, IdlError> {
-        serde_json::from_str(json).map_err(|e| IdlError::Parse(e.to_string()))
+        serde_json::from_str(json).map_err(|e| IdlError::Parse(Self::diagnose(json, e)))
+    }
+
+    /// Name the two formats that most often fail to parse, with the fix.
+    fn diagnose(json: &str, err: serde_json::Error) -> String {
+        let raw: serde_json::Value = match serde_json::from_str(json) {
+            Ok(v) => v,
+            Err(_) => return err.to_string(),
+        };
+        let first_ix = raw.get("instructions").and_then(|ixs| ixs.get(0));
+        if first_ix.is_some_and(|ix| ix.get("discriminant").is_some()) {
+            return "this is a Shank IDL (native program, `discriminant` per instruction); \
+                    solinv reads Anchor IDLs only"
+                .into();
+        }
+        if first_ix.is_some_and(|ix| ix.get("discriminator").is_none()) {
+            return "this is a legacy (pre-0.30) Anchor IDL; convert it first with \
+                    `anchor idl convert <path> -p <program id> -o <out>`"
+                .into();
+        }
+        err.to_string()
     }
 
     pub fn instruction(&self, name: &str) -> Result<&IdlInstruction, IdlError> {
@@ -1090,6 +1110,17 @@ mod tests {
         assert!(b.contains(".signer(\"depositor\""));
         assert!(!b.contains("system_program"));
         assert!(b.contains("borsh: beneficiary: pubkey, unlock_slot: u64"));
+    }
+
+    #[test]
+    fn legacy_and_shank_idls_get_a_next_step() {
+        let legacy = r#"{"version":"0.1.0","name":"p","instructions":[{"name":"go",
+            "accounts":[{"name":"a","isMut":true,"isSigner":false}],"args":[]}]}"#;
+        let shank = r#"{"name":"p","instructions":[{"name":"Go","accounts":[],
+            "discriminant":{"type":"u8","value":0}}]}"#;
+        let msg = |j: &str| Idl::from_json(j).err().unwrap().to_string();
+        assert!(msg(legacy).contains("anchor idl convert <path> -p <program id>"));
+        assert!(msg(shank).contains("Shank IDL"));
     }
 
     #[test]

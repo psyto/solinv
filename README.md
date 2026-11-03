@@ -6,6 +6,10 @@ that ships Solana-specific bug-class detectors as auto-invariants, so
 audit firms and protocol teams don't have to hand-author every
 `fuzz_assert!` themselves.
 
+Have an Anchor program? Start with
+[`solinv idl target/idl/<program>.json`](#start-from-your-idl): no
+fixture, and it names the instructions to point the detectors at first.
+
 Apache-2.0 licensed. Sibling to
 [pinocchio-bench](https://github.com/psyto/pinocchio-bench) — the
 public CU-measurement leaderboard comparing Anchor vs Pinocchio
@@ -65,6 +69,12 @@ declaration as a library:
    carries them. See
    [differential equivalence](#differential-equivalence--do-two-programs-behave-the-same)
    below.
+10. **Specs from an Anchor IDL** — `solinv-fuzz::idl` builds the
+    account-validation half of an `InstructionSpec` from the IDL plus
+    the fixture's post-setup state, and `solinv idl` maps a program's
+    unsigned writers before any fixture exists. Expectations the IDL
+    does not make are kept apart as *candidates*: leads to confirm,
+    not facts. See [start from your IDL](#start-from-your-idl).
 
 Engine performance is **not** the wedge — solinv runs on Crucible and
 inherits its sBPF coverage and libafl scheduling.
@@ -590,6 +600,7 @@ solinv/
 │   ├── solinv-fuzz/       # Crucible re-exports + HasContext/HasInstructionSet traits
 │   │                      #   + bytepoke + differential equivalence oracle
 │   │                      #   + AccountSchema (named fields) + Relation
+│   │                      #   + idl (Anchor IDL → InstructionSpec, candidates)
 │   ├── solinv-mutate/     # Mutation operators, campaign planning, and
 │   │                      #   reachability-aware scoring (serde+regex only,
 │   │                      #   no Crucible/Solana)
@@ -598,9 +609,11 @@ solinv/
 │   ├── solinv-disclose/   # Divergence findings as checkable evidence
 │   │                      #   (serde+sha2 only, no Crucible/Solana);
 │   │                      #   platform formatters pending
-│   └── solinv-cli/        # `solinv` binary — score, init, check, fuzz, corpus, disclose
+│   └── solinv-cli/        # `solinv` binary — idl, mutate, score (+ scaffolds:
+│                          #   init, check, fuzz, corpus, disclose)
 ├── examples/
 │   ├── escrow-demo/             # planted-bug acceptance fixture (7 invariants)
+│   │   └── idl/                 # IDLs of both programs, for `--features idl_specs`
 │   ├── raydium-amm-fuzz/        # Native production AMM (validated clean)
 │   ├── slumlord-fuzz/           # Native flash-loan (validated clean)
 │   ├── klend-fuzz/              # Anchor 0.29 (depth-gated, unblocks after fork)
@@ -610,13 +623,15 @@ solinv/
 ├── docs/
 │   ├── invariants/                  # per-invariant 8-section specs
 │   │   └── field-schema.md          # named fields + relation invariants
+│   ├── idl-specs.md                 # IDL → spec: facts vs candidates, limits
 │   ├── mutation-testing.md          # operator catalog + scoring rationale
 │   ├── differential-equivalence.md  # oracle rationale + report format
 │   ├── disclosure-template-*.md     # Immunefi / Sherlock / generic templates
 │   ├── research-*.md                # research deliverables
 │   ├── harness-pattern-raw-call.md  # reusable Anchor-version-independent harness
 │   └── (implementation logs)        # Day-by-day audit trail of engineering decisions
-├── scripts/                         # bandit allocation + metrics aggregation
+├── scripts/                         # bandit allocation, metrics, mutation campaigns,
+│                                    #   idl-specs-parity.sh (hand vs IDL specs)
 └── logs/                            # per-campaign fuzz logs (gitignored)
 ```
 
@@ -628,8 +643,11 @@ solinv idl target/idl/my_program.json          # where to point the Critical 5
 solinv idl target/idl/my_program.json --rust deposit   # binding stub for one ix
 ```
 
-Reads the Anchor 0.30+ IDL format (legacy IDLs without discriminators
-are rejected). `solinv idl` needs no fixture. It lists every
+Reads the Anchor 0.30+ IDL format. A legacy (pre-0.30) IDL is rejected
+with the fix: convert it with
+`anchor idl convert <path> -p <program id> -o <out>` (`-p` is needed
+when the IDL has no `metadata.address`; klend's does not). Shank IDLs
+from native programs are not supported. `solinv idl` needs no fixture. It lists every
 instruction's slots as the IDL declares them and names the instructions
 with **no signer that write a slot the IDL leaves unconstrained** —
 either deliberately permissionless, or missing an authority check. On
@@ -691,7 +709,11 @@ twin stayed at 0 under `invariant_all`.
 
 ## Integration — adopting solinv on your own program
 
-Implement two traits on a fixture that already works under Crucible:
+Implement two traits on a fixture that already works under Crucible.
+For an Anchor program, build the `InstructionSpec`s from the IDL
+([start from your IDL](#start-from-your-idl)) and hand-write only the
+semantic fields; the full literal below is what that fills in, and is
+still the route for native and Pinocchio programs:
 
 ```rust
 use solinv_fuzz::{HasContext, HasInstructionSet, InstructionSpec};
@@ -803,19 +825,22 @@ thing" drift after a negative result.
 
 ```bash
 cargo check --workspace               # verify scaffold (~5s)
-cargo test  --workspace               # all crates (227 tests)
+cargo test  --workspace               # all crates (252 tests)
 cargo test  -p solinv-core            # invariant regression tests
-cargo test  -p solinv-fuzz            # bytepoke + differential oracle + schema
+cargo test  -p solinv-fuzz            # bytepoke + differential oracle + schema + idl
 cargo test  -p solinv-mutate          # operators + mutants + scoring (no Solana deps)
 cargo test  -p solinv-disclose        # divergence reports (no Solana deps)
 cargo build --release                 # build CLI binary
 ./target/release/solinv --help
+./scripts/idl-specs-parity.sh         # needs crucible + escrow-demo .so files
 ```
 
 CLI surface:
 
 ```
-solinv init                                  # scaffold a solinv harness
+solinv idl <idl.json>                        # account-validation map + unsigned writers
+solinv idl <idl.json> --rust <ix|all>        # SpecBuilder stub to paste into a fixture
+solinv init                                  # scaffold a solinv harness (not yet implemented)
 solinv check <target>                        # run invariant checks
 solinv fuzz <target>                         # run coverage-guided fuzzer
 solinv score --config targets.toml           # rank targets by ROI proxy score

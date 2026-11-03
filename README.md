@@ -1,21 +1,98 @@
-# solinv
+# solinv — Solana bug-class detectors for your fuzz harness
 
-**Solana-aware invariant fuzzing framework.** A library + plugin on
-top of [Crucible](https://github.com/asymmetric-research/crucible)
-that ships Solana-specific bug-class detectors as auto-invariants, so
-audit firms and protocol teams don't have to hand-author every
-`fuzz_assert!` themselves.
+**Point it at an Anchor IDL and it tells you which instructions to check first; add one line per
+detector to a [Crucible](https://github.com/asymmetric-research/crucible) harness and it checks
+signer, owner, discriminator, PDA and context validation for you** — the account checks every
+Solana review looks for, without hand-writing a `fuzz_assert!` for each. Apache-2.0.
 
-Have an Anchor program? Start with
-[`solinv idl target/idl/<program>.json`](#start-from-your-idl): no
-fixture, and it names the instructions to point the detectors at first.
+## Pick a tool
 
-Apache-2.0 licensed. Sibling to
-[pinocchio-bench](https://github.com/psyto/pinocchio-bench) — the
-public CU-measurement leaderboard comparing Anchor vs Pinocchio
-across 13 DeFi hot paths.
+| I want to… | Use |
+|---|---|
+| see which instructions need a hand-checked account, before writing any harness | `solinv idl target/idl/<program>.json` |
+| get a paste-ready spec for one instruction | `solinv idl <idl> --rust <ix>` |
+| fill an `InstructionSpec` from the IDL and fixture state instead of by hand | `solinv_fuzz::Idl` → `.spec()` → `.infer_from_state()` / `.infer_candidates()` |
+| check a signer is really required | `solinv_core::invariants::signer_skip::check` |
+| check an account's owner program / type tag is really checked | `owner_skip::check` / `discriminator_skip::check` |
+| check a PDA can't be forged, or swapped for another user's | `pda_forge::check` / `account_swap::check` / `bump_seed_canonicalization::check` |
+| check a `require!` guard can't be skipped | `precondition_skip::check` + `InstructionSpec.guards` |
+| catch wrapped arithmetic on named fields | `unchecked_math::check` + `AccountSchema` |
+| cap compute units, or catch re-entry / under-funded `realloc` | `cu_dos` / `cpi_reentrancy` / `realloc_race` |
+| measure whether the detectors would catch a bug you plant | `solinv mutate plan` → `apply` → `score` |
+| check two programs behave the same (Anchor → Pinocchio rewrite) | `solinv_fuzz::check_pair_equivalent` |
 
-## What this is
+## Quickstart
+
+One command from a fresh clone; it reads an IDL and needs no Solana toolchain:
+
+```bash
+git clone https://github.com/psyto/solinv && cd solinv
+cargo run -q -p solinv-cli -- idl examples/escrow-demo/idl/escrow.json
+```
+```
+program Esrcw11111111111111111111111111111111111111 — 12 instructions, account types: Vault
+…
+unsafe_withdraw   ! no signer, writes an unconstrained slot
+   0 vault            W   ·
+   1 depositor        W   ·
+
+3 instruction(s) with no signer write an unconstrained slot: unsafe_set_amount_from_source, unsafe_withdraw_with_bump, unsafe_withdraw
+Start there: either they are meant to be permissionless, or an authority check is missing.
+```
+
+Those three are the demo program's three planted account-validation bugs. To fuzz them, see
+[fuzz the planted-bug demo](#quickstart--escrow-demo) (needs the Crucible CLI and `cargo build-sbf`).
+
+## Use it in your own project
+
+The CLI (not on crates.io yet; pin a commit):
+
+```bash
+cargo install --git https://github.com/psyto/solinv --rev a35a29342002 solinv-cli
+```
+
+In your Crucible fuzz harness:
+
+```toml
+[dependencies]
+solinv-fuzz = { git = "https://github.com/psyto/solinv", rev = "a35a2934200278d05207178f591c317e84a72ca9" }
+solinv-core = { git = "https://github.com/psyto/solinv", rev = "a35a2934200278d05207178f591c317e84a72ca9" }
+crucible-test-context = { git = "https://github.com/asymmetric-research/crucible", tag = "v0.1.0" }
+```
+```rust
+let spec = Idl::from_json(include_str!("../idl/my_program.json"))?
+    .spec("deposit", program_id)?
+    .account("vault", vault)
+    .signer("depositor", Arc::clone(&depositor))
+    .args(&50_000u64.to_le_bytes())
+    .build()?
+    .infer_from_state(|pk| ctx.get_account(pk).ok())     // facts
+    .infer_candidates(|pk| ctx.get_account(pk).ok())     // leads, logged
+    .into_spec();
+```
+
+Return the specs from `HasInstructionSet::instructions()` and call the detectors from an
+`#[invariant_test]`, e.g. `solinv_core::invariants::signer_skip::check(fixture)`. Full walk-through:
+[start from your IDL](#start-from-your-idl) and [integration](#integration--adopting-solinv-on-your-own-program).
+Both install lines above were checked from GitHub at that rev, not from a local clone.
+
+## How light it is
+
+- **One dependency in your harness.** solinv runs inside Crucible and inherits its sBPF execution,
+  coverage and scheduling; it adds detectors and spec-building, not an engine. No validator, no RPC.
+- **The IDL writes the account half of the spec.** What you still write is the fixture: the
+  accounts that must exist before an instruction can run, and one action per instruction.
+- **Measured on three production Anchor programs** (2026-11-03, fixture written by someone who
+  knows solinv): Jito tip-payment 6 min and tip-distribution 6 min to a first Crucible result,
+  Raydium cp-swap 11 min (its admin key is hard-coded, so setup writes the config account directly).
+  All three came back clean — the expected answer for audited code; the use is catching a check that a
+  later change drops, in CI.
+
+## How the pieces fit
+
+Sibling to [pinocchio-bench](https://github.com/psyto/pinocchio-bench) — the public CU-measurement
+leaderboard comparing Anchor vs Pinocchio across 13 DeFi hot paths.
+
 
 Existing Solana fuzzers (Crucible, [Trident](https://github.com/Ackee-Blockchain/trident))
 provide coverage-guided execution and snapshot infrastructure. They
@@ -456,6 +533,8 @@ shapes the rest detect. Design note:
 [`docs/mutation-testing.md`](docs/mutation-testing.md).
 
 ## Quickstart — escrow-demo
+
+Fuzz the planted-bug demo end to end.
 
 ```bash
 # Install Crucible CLI (one-time)

@@ -87,6 +87,9 @@ Return the specs from `HasInstructionSet::instructions()` and call the detectors
 [start from your IDL](#start-from-your-idl) and [integration](#integration--adopting-solinv-on-your-own-program).
 Both install lines above were checked from GitHub at that rev, not from a local clone.
 
+Trying it on a program of your own for the first time? [`docs/try-solinv.md`](docs/try-solinv.md) is a
+one-page walk-through, with what to time and what to send back.
+
 ## How light it is
 
 - **One dependency in your harness.** solinv runs inside Crucible and inherits its sBPF execution,

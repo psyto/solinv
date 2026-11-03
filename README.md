@@ -48,15 +48,15 @@ Those three are the demo program's three planted account-validation bugs. To fuz
 The CLI (not on crates.io yet; pin a commit):
 
 ```bash
-cargo install --git https://github.com/psyto/solinv --rev a35a29342002 solinv-cli
+cargo install --git https://github.com/psyto/solinv --rev 9a5aaa4e1f06 solinv-cli
 ```
 
 In your Crucible fuzz harness:
 
 ```toml
 [dependencies]
-solinv-fuzz = { git = "https://github.com/psyto/solinv", rev = "a35a2934200278d05207178f591c317e84a72ca9" }
-solinv-core = { git = "https://github.com/psyto/solinv", rev = "a35a2934200278d05207178f591c317e84a72ca9" }
+solinv-fuzz = { git = "https://github.com/psyto/solinv", rev = "9a5aaa4e1f067ed97fdc1eac4e9a3cda86ab2e59" }
+solinv-core = { git = "https://github.com/psyto/solinv", rev = "9a5aaa4e1f067ed97fdc1eac4e9a3cda86ab2e59" }
 crucible-test-context = { git = "https://github.com/asymmetric-research/crucible", tag = "v0.1.0" }
 ```
 ```rust

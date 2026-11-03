@@ -738,10 +738,14 @@ The IDL cannot tell a typed `Account<'info, T>` from an
 `UncheckedAccount` (Anchor strips the `/// CHECK:` line from `docs`), so
 without source every unconstrained slot counts the same. `--src` reads
 each field's declared type from the `#[derive(Accounts)]` structs and
-marks slots `U` (unchecked: owner and type checks are hand-written) or
-`T` (typed). On the production programs measured that narrows the
-review a lot: Jito tip-distribution 29 unconstrained slots → 5
-unchecked, tip-payment 34 → 14, Raydium cp-swap 108 → 30.
+marks slots `U` (`UncheckedAccount` / `AccountInfo`: owner and type
+checks are hand-written) or `T` (one of Anchor's typed wrappers). It is a
+line reader, not a parser: a slot typed by a type alias, a struct name
+defined twice, or a field type split over lines is left unplaced and
+counted as not found — never guessed. On the production programs
+measured that narrows the review a lot: Jito tip-distribution 29
+unconstrained slots → 5 unchecked, tip-payment 34 → 14, Raydium cp-swap
+108 → 30, with every slot placed.
 
 Building a spec, `system_program` and `associated_token_program` are
 bound by name when the IDL gives no address, and listed in

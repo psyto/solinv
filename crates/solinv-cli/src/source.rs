@@ -48,32 +48,10 @@ impl SourceKinds {
     pub fn parse(src: &str) -> Self {
         let src = strip_comments_and_strings(src);
 
-        // `type Raw<'info> = AccountInfo<'info>;` hides an unchecked slot.
-        let alias = Regex::new(r"\btype\s+([A-Za-z_]\w*)\s*(?:<[^=]*>)?\s*=\s*([^;]+);").unwrap();
-        let all: Vec<(String, String)> =
-            alias.captures_iter(&src).map(|c| (c[1].to_string(), c[2].to_string())).collect();
-        // Module scope is not tracked, so a name aliased twice is not
-        // resolved at all: its slots stay unplaced rather than guessed.
-        let aliases: Vec<(String, String)> = all
-            .iter()
-            .filter(|(n, _)| all.iter().filter(|(m, _)| m == n).count() == 1)
-            .cloned()
-            .collect();
-        // To a fixed point, so `type B = A; type A = AccountInfo` resolves.
-        let mut unchecked_aliases: Vec<String> = Vec::new();
-        loop {
-            let found: Vec<String> = aliases
-                .iter()
-                .filter(|(name, rhs)| {
-                    !unchecked_aliases.contains(name) && is_unchecked(rhs, &unchecked_aliases)
-                })
-                .map(|(name, _)| name.clone())
-                .collect();
-            if found.is_empty() {
-                break;
-            }
-            unchecked_aliases.extend(found);
-        }
+        // Type aliases are not resolved: what an alias names depends on
+        // module scope and imports (`use x::Account as Raw`), which a
+        // line reader cannot follow. A slot typed by an alias is
+        // unplaced, never guessed.
 
         let derive = Regex::new(
             // `[^{]`, not `[^{;]`: an `#[instruction(.., proof: Vec<[u8; 32]>)]`
@@ -106,7 +84,7 @@ impl SourceKinds {
             }
             let fields = field
                 .captures_iter(body)
-                .map(|c| (c[1].to_string(), classify(&c[2], &names, &unchecked_aliases)))
+                .map(|c| (c[1].to_string(), classify(&c[2], &names)))
                 .collect();
             structs.insert(name.clone(), fields);
         }
@@ -160,9 +138,9 @@ const TYPED: &[&str] = &[
     "SystemAccount",
 ];
 
-fn is_unchecked(ty: &str, aliases: &[String]) -> bool {
+fn is_unchecked(ty: &str) -> bool {
     let base = base_ident(ty);
-    base == "UncheckedAccount" || base == "AccountInfo" || aliases.iter().any(|a| *a == base)
+    base == "UncheckedAccount" || base == "AccountInfo"
 }
 
 /// First identifier under any `Box<` / `Option<` wrappers.
@@ -178,8 +156,8 @@ fn base_ident(ty: &str) -> String {
     t.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect()
 }
 
-fn classify(ty: &str, accounts_structs: &[String], aliases: &[String]) -> Field {
-    if is_unchecked(ty, aliases) {
+fn classify(ty: &str, accounts_structs: &[String]) -> Field {
+    if is_unchecked(ty) {
         return Field::Kind(SlotKind::Unchecked);
     }
     let base = base_ident(ty);
@@ -369,7 +347,7 @@ pub struct A<'info> {
 "#;
 "##;
         let k = SourceKinds::parse(src);
-        assert_eq!(k.get("a", "vault"), Some(SlotKind::Unchecked));
+        assert_eq!(k.get("a", "vault"), None); // alias: unplaced
         assert_eq!(k.get("a", "state"), Some(SlotKind::Typed));
         assert_eq!(k.get("a", "hidden"), Some(SlotKind::Unchecked));
         assert_eq!(k.get("a", "custom"), None);
@@ -378,14 +356,14 @@ pub struct A<'info> {
     }
 
     #[test]
-    fn nested_comments_unterminated_raw_strings_and_alias_chains() {
+    fn nested_comments_and_unterminated_raw_strings_hide_their_contents() {
+        // Either leak would define a second X, and a duplicate name is
+        // left unmapped — so Some(Unchecked) proves neither leaked.
         let src = r####"
-type B<'info> = A<'info>;
-type A<'info> = AccountInfo<'info>;
 pub fn a(ctx: Context<X>) -> Result<()> {}
 #[derive(Accounts)]
 pub struct X<'info> {
-    pub vault: B<'info>,
+    pub vault: AccountInfo<'info>,
 }
 /* outer /* inner */
 #[derive(Accounts)]
@@ -399,7 +377,7 @@ pub struct X<'info> { pub vault: Account<'info, V>, }
     }
 
     #[test]
-    fn an_alias_name_defined_twice_is_not_resolved() {
+    fn aliases_are_never_resolved() {
         let src = r#"
 mod a { type Base<'info> = AccountInfo<'info>; }
 mod b {

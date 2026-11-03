@@ -100,9 +100,10 @@ handlers' `Context<..>` (composites by dotted path), and marks each slot
 literals are stripped first; `T` is given only for Anchor's typed
 wrappers (`Account`, `AccountLoader`, `InterfaceAccount`, `Signer`,
 `Program`, `Interface`, `Sysvar`, `SystemAccount`), `U` for
-`UncheckedAccount`, `AccountInfo` and type aliases of them; any other
-type, a struct name defined twice, or a field type split over lines
-leaves the slot unplaced, and the report counts it as not found. When
+`UncheckedAccount` and `AccountInfo`; any other type — type aliases
+included, since what an alias names depends on module scope and
+imports — a struct name defined twice, or a field type split over
+lines leaves the slot unplaced, and the report counts it as not found. When
 nothing under `--src` can be placed, the CLI says so instead of
 printing the IDL-only report silently. The unsigned-writer flag
 does not use it — a missing authority check is as missing on a typed

@@ -93,7 +93,8 @@ Rationale for all four:
 [`docs/differential-equivalence.md`](docs/differential-equivalence.md).
 
 For an Anchor target, build the specs from its IDL rather than by
-hand (`solinv idl`, then `SpecBuilder`); see
+hand (`solinv idl --src <program src>` to see which slots are unchecked,
+then `SpecBuilder`); see
 [`docs/idl-specs.md`](docs/idl-specs.md). Log `candidate_log()` in the
 fixture, and say in the PR which findings sit on candidate slots — those
 are leads until checked against the program's intent.

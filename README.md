@@ -23,24 +23,35 @@ Solana review looks for, without hand-writing a `fuzz_assert!` for each. Apache-
 
 ## Quickstart
 
-One command from a fresh clone; it reads an IDL and needs no Solana toolchain:
+One command from a fresh clone; it reads an IDL and the program's source, and needs no Solana
+toolchain:
 
 ```bash
 git clone https://github.com/psyto/solinv && cd solinv
-cargo run -q -p solinv-cli -- idl examples/escrow-demo/idl/escrow.json
+cargo run -q -p solinv-cli -- idl examples/escrow-demo/idl/escrow.json \
+    --src examples/escrow-demo/programs/escrow/src
 ```
 ```
 program Esrcw11111111111111111111111111111111111111 — 12 instructions, account types: Vault
+
+S signer  W writable  P pda seeds  A fixed address  · nothing declared  U unchecked in source  T typed in source
+…
+unsafe_set_amount_from_source   ! no signer, writes an unconstrained slot
+   0 source               U
+   1 target           W   T
 …
 unsafe_withdraw   ! no signer, writes an unconstrained slot
-   0 vault            W   ·
-   1 depositor        W   ·
+   0 vault            W   U
+   1 depositor        W   U
 
+7 slots are UncheckedAccount / AccountInfo in source: their checks are hand-written, which is where the Critical 5 can find something.
 3 instruction(s) with no signer write an unconstrained slot: unsafe_set_amount_from_source, unsafe_withdraw_with_bump, unsafe_withdraw
 Start there: either they are meant to be permissionless, or an authority check is missing.
 ```
 
-Those three are the demo program's three planted account-validation bugs. To fuzz them, see
+`U` marks an `UncheckedAccount` / `AccountInfo`, whose owner and type checks are hand-written; `T`
+a typed account Anchor checks. Without `--src` the IDL alone cannot tell them apart. The three
+flagged instructions are the demo program's three planted account-validation bugs. To fuzz them, see
 [fuzz the planted-bug demo](#quickstart--escrow-demo) (needs the Crucible CLI and `cargo build-sbf`).
 
 ## Use it in your own project
@@ -80,13 +91,16 @@ Both install lines above were checked from GitHub at that rev, not from a local 
 
 - **One dependency in your harness.** solinv runs inside Crucible and inherits its sBPF execution,
   coverage and scheduling; it adds detectors and spec-building, not an engine. No validator, no RPC.
-- **The IDL writes the account half of the spec.** What you still write is the fixture: the
+- **The IDL writes the account half of the spec, and the source narrows what to read.** On the
+  production programs below, `--src` cut the slots to review from 29 to 5 (tip-distribution),
+  34 to 14 (tip-payment) and 108 to 30 (cp-swap). What you still write is the fixture: the
   accounts that must exist before an instruction can run, and one action per instruction.
 - **Measured on three production Anchor programs** (2026-11-03, fixture written by someone who
   knows solinv): Jito tip-payment 6 min and tip-distribution 6 min to a first Crucible result,
   Raydium cp-swap 11 min (its admin key is hard-coded, so setup writes the config account directly).
   All three came back clean — the expected answer for audited code; the use is catching a check that a
-  later change drops, in CI.
+  later change drops, in CI. What slowed each one down is in
+  [`docs/idl-specs.md`](docs/idl-specs.md#measured-on-production-programs).
 
 ## How the pieces fit
 
@@ -149,9 +163,11 @@ declaration as a library:
 10. **Specs from an Anchor IDL** — `solinv-fuzz::idl` builds the
     account-validation half of an `InstructionSpec` from the IDL plus
     the fixture's post-setup state, and `solinv idl` maps a program's
-    unsigned writers before any fixture exists. Expectations the IDL
-    does not make are kept apart as *candidates*: leads to confirm,
-    not facts. See [start from your IDL](#start-from-your-idl).
+    unsigned writers before any fixture exists — with `--src`, also
+    which slots are `UncheckedAccount` / `AccountInfo` in source.
+    Expectations the IDL does not make are kept apart as
+    *candidates*: leads to confirm, not facts. See
+    [start from your IDL](#start-from-your-idl).
 
 Engine performance is **not** the wedge — solinv runs on Crucible and
 inherits its sBPF coverage and libafl scheduling.
@@ -688,7 +704,8 @@ solinv/
 │   ├── solinv-disclose/   # Divergence findings as checkable evidence
 │   │                      #   (serde+sha2 only, no Crucible/Solana);
 │   │                      #   platform formatters pending
-│   └── solinv-cli/        # `solinv` binary — idl, mutate, score (+ scaffolds:
+│   └── solinv-cli/        # `solinv` binary — idl (+ source.rs: declared account
+│                          #   types for --src), mutate, score (+ scaffolds:
 │                          #   init, check, fuzz, corpus, disclose)
 ├── examples/
 │   ├── escrow-demo/             # planted-bug acceptance fixture (7 invariants)

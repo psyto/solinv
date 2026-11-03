@@ -115,6 +115,43 @@ whirlpool, pump) they are mostly instructions that are permissionless
 by design (`..._permissionless`, `refresh_*`, `accrue_*`): the report
 maps the permissionless surface to review, it does not find bugs.
 
+## Measured on production programs
+
+Timed 2026-11-03 on three open-source production Anchor programs, from
+starting the fixture to a first Crucible result, by someone who knows
+solinv. Build times are `cargo build-sbf`.
+
+| program | build | fixture → first result | findings | candidates |
+|---|---|---|---|---|
+| Jito tip-payment (Anchor 0.31) | 27 s | 6 min | 0 | 20 |
+| Jito tip-distribution (Anchor 0.31) | 4 s | 6 min | 0 | 10 |
+| Raydium cp-swap (Anchor 1.0) | 67 s | 11 min | 0 | 13 |
+
+Every candidate sat on a typed `Account<'info, T>`, which Anchor already
+checks, so 0 is the expected answer; each harness's canonical sends were
+confirmed to land, so the 0 is not a silent harness. Most of the time
+went into setup — the accounts that must exist before an instruction
+can run — which the IDL does not shorten. What got in the way, and what
+changed because of it:
+
+- **Shipped IDLs built without PDA resolution.** Jito's carry no seeds
+  and no `system_program` address, so the facts pass adds nothing and
+  everything rests on candidates. `system_program` and
+  `associated_token_program` are now bound by name (`defaulted()`).
+- **IDL address ≠ the loaded `.so`'s id.** tip-distribution's IDL says
+  mainnet; built without `--features mainnet` the `.so` declares testnet
+  and Anchor rejects every instruction. Specs now get an `unresolved()`
+  entry naming `DeclaredProgramIdMismatch`.
+- **Typed accounts counted as unchecked.** The static report could not
+  tell them apart, hence `--src`.
+- **Admin keys hard-coded to mainnet.** cp-swap's `create_amm_config`
+  cannot be signed in a test, so setup writes the `AmmConfig` account
+  directly and places a token account at the fixed create-pool-fee
+  address. Nothing in solinv can remove that step; it is the kind of
+  setup cost to expect.
+
+The harnesses are not in this repository.
+
 ## Evidence
 
 `scripts/idl-specs-parity.sh` runs escrow-demo's Critical 5 with the

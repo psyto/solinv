@@ -50,11 +50,23 @@ impl SourceKinds {
 
         // `type Raw<'info> = AccountInfo<'info>;` hides an unchecked slot.
         let alias = Regex::new(r"\btype\s+([A-Za-z_]\w*)\s*(?:<[^=]*>)?\s*=\s*([^;]+);").unwrap();
-        let unchecked_aliases: Vec<String> = alias
-            .captures_iter(&src)
-            .filter(|c| is_unchecked(&c[2], &[]))
-            .map(|c| c[1].to_string())
-            .collect();
+        let aliases: Vec<(String, String)> =
+            alias.captures_iter(&src).map(|c| (c[1].to_string(), c[2].to_string())).collect();
+        // To a fixed point, so `type B = A; type A = AccountInfo` resolves.
+        let mut unchecked_aliases: Vec<String> = Vec::new();
+        loop {
+            let found: Vec<String> = aliases
+                .iter()
+                .filter(|(name, rhs)| {
+                    !unchecked_aliases.contains(name) && is_unchecked(rhs, &unchecked_aliases)
+                })
+                .map(|(name, _)| name.clone())
+                .collect();
+            if found.is_empty() {
+                break;
+            }
+            unchecked_aliases.extend(found);
+        }
 
         let derive = Regex::new(
             // `[^{]`, not `[^{;]`: an `#[instruction(.., proof: Vec<[u8; 32]>)]`
@@ -189,7 +201,7 @@ fn strip_comments_and_strings(src: &str) -> String {
         let skip = if rest.starts_with("//") {
             rest.find('\n').unwrap_or(rest.len())
         } else if rest.starts_with("/*") {
-            rest.find("*/").map_or(rest.len(), |e| e + 2)
+            block_comment_len(rest)
         } else if let Some(n) = raw_string_len(rest) {
             n
         } else if rest.starts_with('"') {
@@ -219,6 +231,28 @@ fn strip_comments_and_strings(src: &str) -> String {
     out
 }
 
+/// Length of a block comment at the start of `s`, nesting as Rust's do;
+/// unterminated runs to the end.
+fn block_comment_len(s: &str) -> usize {
+    let b = s.as_bytes();
+    let (mut depth, mut i) = (0usize, 0usize);
+    while i + 1 < b.len() {
+        if b[i] == b'/' && b[i + 1] == b'*' {
+            depth += 1;
+            i += 2;
+        } else if b[i] == b'*' && b[i + 1] == b'/' {
+            depth -= 1;
+            i += 2;
+            if depth == 0 {
+                return i;
+            }
+        } else {
+            i += 1;
+        }
+    }
+    s.len()
+}
+
 /// Length of a char literal (`'{'`, `'\n'`, `'\u{7b}'`) at the start of
 /// `s`. A lifetime (`'info`) has no closing quote within reach.
 fn char_literal_len(s: &str) -> Option<usize> {
@@ -238,8 +272,8 @@ fn raw_string_len(s: &str) -> Option<usize> {
     let hashes = rest.chars().take_while(|c| *c == '#').count();
     let body = rest[hashes..].strip_prefix('"')?;
     let close = format!("\"{}", "#".repeat(hashes));
-    let end = body.find(&close)?;
-    Some(s.len() - body.len() + end + close.len())
+    // Unterminated: blank to the end rather than reading the rest as code.
+    Some(body.find(&close).map_or(s.len(), |end| s.len() - body.len() + end + close.len()))
 }
 
 /// The text up to the brace that closes one already opened.
@@ -334,6 +368,27 @@ pub struct A<'info> {
         assert_eq!(k.get("a", "custom"), None);
         assert_eq!(k.get("a", "maybe"), Some(SlotKind::Unchecked));
         assert_eq!(k.get("b", "x"), None);
+    }
+
+    #[test]
+    fn nested_comments_unterminated_raw_strings_and_alias_chains() {
+        let src = r####"
+type B<'info> = A<'info>;
+type A<'info> = AccountInfo<'info>;
+pub fn a(ctx: Context<X>) -> Result<()> {}
+#[derive(Accounts)]
+pub struct X<'info> {
+    pub vault: B<'info>,
+}
+/* outer /* inner */
+#[derive(Accounts)]
+pub struct X<'info> { pub vault: Account<'info, V>, }
+*/
+const S: &str = r##"never closed "# and then
+#[derive(Accounts)]
+pub struct X<'info> { pub vault: Account<'info, V>, }
+"####;
+        assert_eq!(SourceKinds::parse(src).get("a", "vault"), Some(SlotKind::Unchecked));
     }
 
     #[test]

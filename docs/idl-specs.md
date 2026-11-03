@@ -57,6 +57,17 @@ unbound `arg` seeds, discriminators that are not 8 bytes long
 (discriminator-skip compares 8; the owner is still set), and seed
 patterns that could not be evaluated for a typed slot.
 
+Also listed, as information rather than gaps: `IdlSpec::defaulted()`
+names slots bound by name because the IDL gave no address
+(`system_program`, `rent`, `clock`, the instructions sysvar,
+`associated_token_program` — each has exactly one possible address;
+`token_program` is never guessed). A program id that differs from the
+IDL's `address` is an `unresolved()` entry, since the `.so` must
+`declare_id!` the id it is loaded at or Anchor rejects every instruction
+with `DeclaredProgramIdMismatch`. Jito's tip-distribution hit both: its
+shipped IDL has no `system_program` address, and its `.so` built
+without `--features mainnet` declares the testnet id.
+
 Assumptions accepted as limitations:
 
 - the facts pass takes a seeded slot to hold one type;
@@ -77,6 +88,18 @@ encoded as the program id and signs nothing.
 
 The static report lists every slot's declared constraints and names
 the instructions with no signer that write an unconstrained slot.
+
+The IDL cannot say whether an unconstrained slot is a typed account or
+an `UncheckedAccount`: Anchor drops the `/// CHECK:` line from `docs`,
+and typed accounts carry ordinary doc comments too, so `docs` is no
+signal either way. `--src <dir>` reads the declared types from the
+`#[derive(Accounts)]` structs, joined to instructions through the
+handlers' `Context<..>` (composites by dotted path), and marks each slot
+`U` or `T`. It is a line-based reader, not a parser: a slot it cannot
+place is reported as not found, never guessed. The unsigned-writer flag
+does not use it — a missing authority check is as missing on a typed
+account as on an unchecked one (escrow's `unsafe_set_amount_from_source`
+writes a typed `Vault` with no signer).
 On escrow-demo's planted program those are exactly its three planted
 account-validation bugs. On audited production IDLs (marginfi, klend,
 whirlpool, pump) they are mostly instructions that are permissionless

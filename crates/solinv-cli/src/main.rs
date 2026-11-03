@@ -12,6 +12,8 @@ use clap::{Parser, Subcommand};
 use serde::Deserialize;
 use std::{fs, path::PathBuf};
 
+mod source;
+
 #[derive(Parser)]
 #[command(
     name = "solinv",
@@ -61,6 +63,11 @@ enum Commands {
         /// (`all` for every instruction)
         #[arg(long)]
         rust: Option<String>,
+        /// Program source (file or directory): read each slot's
+        /// declared type, so typed accounts are told apart from
+        /// UncheckedAccount / AccountInfo
+        #[arg(long)]
+        src: Option<PathBuf>,
     },
     /// Score and rank bug bounty targets
     Score {
@@ -500,12 +507,18 @@ fn main() -> Result<()> {
             println!("solinv disclose {bug_id}: not yet implemented");
         }
         Commands::Mutate { action } => run_mutate(action)?,
-        Commands::Idl { path, rust } => {
+        Commands::Idl { path, rust, src } => {
             let raw = fs::read_to_string(&path)
                 .with_context(|| format!("failed to read IDL: {}", path.display()))?;
             let idl = solinv_fuzz::Idl::from_json(&raw)?;
             match rust.as_deref() {
-                None => print!("{}", idl.report()),
+                None => match src {
+                    Some(dir) => {
+                        let kinds = source::SourceKinds::read(&dir)?;
+                        print!("{}", idl.report_with(|ix, path| kinds.get(ix, path)));
+                    }
+                    None => print!("{}", idl.report()),
+                },
                 Some("all") => {
                     for ix in &idl.instructions {
                         println!("{}", ix.rust_bindings());

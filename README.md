@@ -9,7 +9,7 @@ Solana review looks for, without hand-writing a `fuzz_assert!` for each. Apache-
 
 | I want to… | Use |
 |---|---|
-| see which instructions need a hand-checked account, before writing any harness | `solinv idl target/idl/<program>.json` |
+| see which instructions need a hand-checked account, before writing any harness | `solinv idl target/idl/<program>.json --src programs/<program>/src` |
 | get a paste-ready spec for one instruction | `solinv idl <idl> --rust <ix>` |
 | fill an `InstructionSpec` from the IDL and fixture state instead of by hand | `solinv_fuzz::Idl` → `.spec()` → `.infer_from_state()` / `.infer_candidates()` |
 | check a signer is really required | `solinv_core::invariants::signer_skip::check` |
@@ -719,6 +719,7 @@ solinv/
 ```bash
 anchor build                                   # writes target/idl/<program>.json
 solinv idl target/idl/my_program.json          # where to point the Critical 5
+solinv idl target/idl/my_program.json --src programs/my_program/src  # + declared types
 solinv idl target/idl/my_program.json --rust deposit   # binding stub for one ix
 ```
 
@@ -732,6 +733,25 @@ with **no signer that write a slot the IDL leaves unconstrained** —
 either deliberately permissionless, or missing an authority check. On
 escrow-demo's planted program those are exactly its three planted
 account-validation bugs.
+
+The IDL cannot tell a typed `Account<'info, T>` from an
+`UncheckedAccount` (Anchor strips the `/// CHECK:` line from `docs`), so
+without source every unconstrained slot counts the same. `--src` reads
+each field's declared type from the `#[derive(Accounts)]` structs and
+marks slots `U` (unchecked: owner and type checks are hand-written) or
+`T` (typed). On the production programs measured that narrows the
+review a lot: Jito tip-distribution 29 unconstrained slots → 5
+unchecked, tip-payment 34 → 14, Raydium cp-swap 108 → 30.
+
+Building a spec, accounts with exactly one possible address
+(`system_program`, `rent`, `clock`, the instructions sysvar,
+`associated_token_program`) are bound by name when the IDL gives none,
+and listed in `IdlSpec::defaulted()`; `token_program` is never guessed
+(SPL Token or Token-2022). A spec whose program id differs from the
+IDL's `address` gets an `unresolved()` entry: the loaded `.so` must
+declare that id, or Anchor rejects every instruction with
+`DeclaredProgramIdMismatch` — usually a `.so` built with different
+features than the IDL.
 
 In the fixture, the stub becomes the spec:
 
@@ -904,7 +924,7 @@ thing" drift after a negative result.
 
 ```bash
 cargo check --workspace               # verify scaffold (~5s)
-cargo test  --workspace               # all crates (252 tests)
+cargo test  --workspace               # all crates (258 tests)
 cargo test  -p solinv-core            # invariant regression tests
 cargo test  -p solinv-fuzz            # bytepoke + differential oracle + schema + idl
 cargo test  -p solinv-mutate          # operators + mutants + scoring (no Solana deps)
@@ -918,6 +938,7 @@ CLI surface:
 
 ```
 solinv idl <idl.json>                        # account-validation map + unsigned writers
+solinv idl <idl.json> --src <program src>    # + U/T: unchecked vs typed, from source
 solinv idl <idl.json> --rust <ix|all>        # SpecBuilder stub to paste into a fixture
 solinv init                                  # scaffold a solinv harness (not yet implemented)
 solinv check <target>                        # run invariant checks

@@ -210,6 +210,24 @@ impl fmt::Display for IdlError {
 
 impl std::error::Error for IdlError {}
 
+/// Accounts bound by name when the IDL gives no address — IDLs built
+/// without PDA resolution omit even `system_program`'s. Only names with
+/// exactly one possible address: `token_program` may be SPL Token or
+/// Token-2022, so it is never guessed.
+pub const WELL_KNOWN: &[(&str, &str)] = &[
+    ("system_program", "11111111111111111111111111111111"),
+    ("rent", "SysvarRent111111111111111111111111111111111"),
+    ("clock", "SysvarC1ock11111111111111111111111111111111"),
+    ("instructions", "Sysvar1nstructions1111111111111111111111111"),
+    ("instructions_sysvar", "Sysvar1nstructions1111111111111111111111111"),
+    ("sysvar_instructions", "Sysvar1nstructions1111111111111111111111111"),
+    ("associated_token_program", "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"),
+];
+
+fn well_known(name: &str) -> Option<Pubkey> {
+    WELL_KNOWN.iter().find(|(n, _)| *n == name).and_then(|(_, a)| a.parse().ok())
+}
+
 fn compact(ty: &serde_json::Value) -> String {
     match ty {
         serde_json::Value::String(s) => s.clone(),
@@ -220,8 +238,18 @@ fn compact(ty: &serde_json::Value) -> String {
 impl Idl {
     /// The account-validation surface of every instruction, as the IDL
     /// declares it. Static: no fixture needed, so it is the first thing
-    /// to run on a program.
+    /// to run on a program. The IDL cannot tell a typed `Account<'_, T>`
+    /// from an `UncheckedAccount` (Anchor strips the `/// CHECK:` line
+    /// from `docs`), so a slot that declares nothing is only "silent";
+    /// [`Idl::report_with`] takes the declared types from source.
     pub fn report(&self) -> String {
+        self.report_with(|_, _| None)
+    }
+
+    /// [`Idl::report`], with each slot's declared Rust type from `kind`
+    /// (instruction name, dotted slot path), so the slots whose owner and
+    /// type checks are hand-written are counted apart from typed ones.
+    pub fn report_with(&self, kind: impl Fn(&str, &str) -> Option<SlotKind>) -> String {
         let types: Vec<&str> = self
             .accounts
             .iter()
@@ -230,7 +258,7 @@ impl Idl {
         let mut out = format!(
             "program {} — {} instructions, account types: {}\n\n\
              S signer  W writable  P pda seeds  A fixed address  \
-             · nothing declared\n",
+             · nothing declared  U unchecked in source  T typed in source\n",
             if self.address.is_empty() { "(no address)" } else { &self.address },
             self.instructions.len(),
             if types.is_empty() { "none".into() } else { types.join(", ") },
@@ -243,8 +271,15 @@ impl Idl {
             .max()
             .unwrap_or(0);
         let mut unsigned = Vec::new();
-        let mut silent = 0;
+        let (mut silent, mut unchecked, mut known) = (0, 0, false);
         for ix in &self.instructions {
+            let kinds: Vec<Option<SlotKind>> =
+                ix.flat_accounts().iter().map(|f| kind(&ix.name, &f.path())).collect();
+            known |= kinds.iter().any(Option::is_some);
+            // Judged on IDL constraints, not declared types: a missing
+            // authority check is just as missing on a typed account
+            // (escrow's unsafe_set_amount_from_source writes a typed
+            // Vault with no signer at all).
             let flag = if ix.is_unsigned_writer() {
                 unsigned.push(ix.name.as_str());
                 "   ! no signer, writes an unconstrained slot"
@@ -263,20 +298,37 @@ impl Idl {
                 .iter()
                 .map(|&(on, c)| if on { c } else { ' ' })
                 .collect();
-                let quiet = if a.is_silent() {
-                    silent += 1;
-                    " ·"
-                } else {
-                    ""
+                let quiet = match (a.is_silent(), kinds[i]) {
+                    (_, Some(SlotKind::Unchecked)) => {
+                        unchecked += 1;
+                        " U"
+                    }
+                    (true, Some(SlotKind::Typed)) => " T",
+                    (true, None) => {
+                        silent += 1;
+                        " ·"
+                    }
+                    _ => "",
                 };
                 out += &format!("  {i:>2} {:<width$}  {marks}{quiet}\n", flat.path());
             }
         }
-        out += &format!(
-            "\n{silent} slots declare nothing in the IDL. Anchor enforces what the IDL \
-             declares, so these are where the Critical 5 can find something; \
-             `infer_candidates` proposes checks for them from fixture state.\n"
-        );
+        if known {
+            out += &format!(
+                "\n{unchecked} slots are UncheckedAccount / AccountInfo in source: their \
+                 checks are hand-written, which is where the Critical 5 can find something.\n"
+            );
+            if silent > 0 {
+                out += &format!("{silent} slots declare nothing and were not found in source.\n");
+            }
+        } else {
+            out += &format!(
+                "\n{silent} slots declare nothing in the IDL: typed accounts or \
+                 UncheckedAccount, which the IDL cannot tell apart (pass --src to read the \
+                 declared types). `infer_candidates` proposes checks for them from fixture \
+                 state.\n"
+            );
+        }
         if unsigned.is_empty() {
             out += "Every instruction that writes an unconstrained slot has a signer.\n";
         } else {
@@ -339,6 +391,16 @@ impl Idl {
     pub fn account_discriminators(&self) -> Vec<Vec<u8>> {
         self.accounts.iter().map(|a| a.discriminator.clone()).collect()
     }
+}
+
+/// A slot's declared type in the program source.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SlotKind {
+    /// `UncheckedAccount` / `AccountInfo`: checks are hand-written.
+    Unchecked,
+    /// `Account`, `AccountLoader`, `InterfaceAccount`, `Signer`,
+    /// `Program`, `Interface`, `Sysvar`: Anchor checks owner and type.
+    Typed,
 }
 
 impl IdlAccount {
@@ -539,6 +601,7 @@ impl<'a> SpecBuilder<'a> {
 
         let mut pubkeys = Vec::with_capacity(flat.len());
         let mut missing = Vec::new();
+        let mut defaulted = Vec::new();
         for (i, f) in flat.iter().enumerate() {
             if let Some(pk) = self.bound(&self.accounts, f) {
                 pubkeys.push(*pk);
@@ -550,6 +613,9 @@ impl<'a> SpecBuilder<'a> {
                 pubkeys.push(pk);
             } else if omitted[i] {
                 pubkeys.push(self.program_id);
+            } else if let Some(pk) = well_known(&f.account.name) {
+                defaulted.push((paths[i].clone(), pk));
+                pubkeys.push(pk);
             } else {
                 missing.push(paths[i].clone());
                 pubkeys.push(Pubkey::default());
@@ -576,6 +642,20 @@ impl<'a> SpecBuilder<'a> {
             what: "swap_alternates: name a second, legitimate account per context-bound slot"
                 .into(),
         }];
+        if let Ok(idl_id) = self.idl.address.parse::<Pubkey>() {
+            if idl_id != self.program_id {
+                unresolved.push(Unresolved {
+                    account: None,
+                    what: format!(
+                        "the IDL's address is {idl_id} but the spec targets {}: the loaded .so \
+                         must declare_id! the latter, or Anchor rejects every instruction with \
+                         DeclaredProgramIdMismatch (4100) — usually a .so built with different \
+                         features (mainnet/devnet) than the IDL",
+                        self.program_id
+                    ),
+                });
+            }
+        }
         let mut accounts = Vec::with_capacity(flat.len());
         let mut signer_indices = Vec::new();
         let mut signers = Vec::new();
@@ -651,6 +731,7 @@ impl<'a> SpecBuilder<'a> {
                 guards: vec![],
             },
             account_discs: self.idl.account_discriminators(),
+            defaulted,
             names: paths,
             idl_seeded: flat.iter().map(|f| f.account.pda.is_some()).collect(),
             omitted,
@@ -731,6 +812,8 @@ pub struct IdlSpec {
     arg_seeds: HashMap<String, Vec<u8>>,
     unresolved: Vec<Unresolved>,
     candidates: Vec<Candidate>,
+    /// Slots bound from [`WELL_KNOWN`] because the IDL gave no address.
+    defaulted: Vec<(String, Pubkey)>,
 }
 
 /// What a slot's pre-send state says about its type.
@@ -934,6 +1017,11 @@ impl IdlSpec {
             .collect()
     }
 
+    /// Slots bound by name from [`WELL_KNOWN`], with the address used.
+    pub fn defaulted(&self) -> &[(String, Pubkey)] {
+        &self.defaulted
+    }
+
     pub fn unresolved(&self) -> &[Unresolved] {
         &self.unresolved
     }
@@ -1110,6 +1198,69 @@ mod tests {
         assert!(b.contains(".signer(\"depositor\""));
         assert!(!b.contains("system_program"));
         assert!(b.contains("borsh: beneficiary: pubkey, unlock_slot: u64"));
+    }
+
+    /// An IDL built without resolution, like Jito's shipped ones: no
+    /// address on system_program. Bound by name, and said so.
+    #[test]
+    fn unambiguous_well_known_accounts_are_bound_by_name() {
+        let idl = json_idl(
+            r#"[{"name":"state","writable":true},{"name":"system_program"},
+                {"name":"token_program"}]"#,
+            "[]",
+        );
+        let pid = Pubkey::new_unique();
+        let err = idl.spec("ix", pid).unwrap().account("state", Pubkey::new_unique()).build();
+        // token_program could be SPL Token or Token-2022: never guessed.
+        assert!(matches!(err, Err(IdlError::MissingAccounts { names, .. }) if names == ["token_program"]));
+
+        let built = idl
+            .spec("ix", pid)
+            .unwrap()
+            .account("state", Pubkey::new_unique())
+            .account("token_program", Pubkey::new_unique())
+            .build()
+            .unwrap();
+        assert_eq!(built.spec().accounts[1].pubkey, Pubkey::default());
+        assert_eq!(built.defaulted(), &[("system_program".to_string(), Pubkey::default())]);
+    }
+
+    /// Jito's tip-distribution: the IDL says mainnet, the .so built
+    /// without `--features mainnet` declares testnet.
+    #[test]
+    fn idl_address_mismatch_is_reported() {
+        let other = Pubkey::new_unique();
+        let built = idl()
+            .spec("withdraw", other)
+            .unwrap()
+            .account("vault", Pubkey::new_unique())
+            .signer("depositor", Arc::new(Keypair::new()))
+            .build()
+            .unwrap();
+        assert!(built.unresolved().iter().any(|u| u.what.contains("DeclaredProgramIdMismatch")));
+        let same = idl()
+            .spec("withdraw", program_id())
+            .unwrap()
+            .account("vault", Pubkey::new_unique())
+            .signer("depositor", Arc::new(Keypair::new()))
+            .build()
+            .unwrap();
+        assert!(!same.unresolved().iter().any(|u| u.what.contains("DeclaredProgramIdMismatch")));
+    }
+
+    #[test]
+    fn report_with_source_kinds_marks_and_counts_unchecked_slots() {
+        let idl = Idl::from_json(include_str!("../../../examples/escrow-demo/idl/escrow.json"))
+            .unwrap();
+        let r = idl.report_with(|ix, path| match (ix, path) {
+            ("unsafe_set_amount_from_source", "source") => Some(SlotKind::Unchecked),
+            (_, _) => Some(SlotKind::Typed),
+        });
+        assert!(r.contains("1 slots are UncheckedAccount / AccountInfo in source"));
+        assert!(r.contains("   0 source               U"));
+        // The unsigned-writer flag does not depend on declared types.
+        assert!(r.contains("3 instruction(s) with no signer write an unconstrained slot"));
+        assert!(idl.report().contains("which the IDL cannot tell apart"));
     }
 
     #[test]

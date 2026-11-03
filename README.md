@@ -669,16 +669,22 @@ pubkey that state stores (signer) — and lists each in
 passed, not what the instruction must require: a correct permissionless
 crank that pays a stored `beneficiary` matches the signer rule. Confirm
 a finding on a candidate slot against the program's intent before
-reporting it. Anything neither pass can fill (account-data seeds, seeds
-under another program, non-8-byte discriminators) is listed in
-`IdlSpec::unresolved()` rather than dropped.
+reporting it. Findings do not carry that provenance themselves, so log
+`IdlSpec::candidate_log()` when building the spec (the escrow-demo
+harnesses do): a finding whose instruction and account index match a
+`[SOLINV_CANDIDATES]` line is a lead. Account-data seeds, seeds under
+another program, non-8-byte discriminators, and seed patterns that
+could not be evaluated for a typed slot are listed in
+`IdlSpec::unresolved()`.
 
 Still hand-written: `swap_alternates`, state invariants and guards —
 semantic, not in any IDL. Composite accounts are named by dotted path
 (`"group_a.authority"`), or by leaf name when it is unique.
 
 `scripts/idl-specs-parity.sh` runs escrow-demo's detectors with the
-hand-written specs and with `--features idl_specs`. Last run (seed 1,
+hand-written specs and with `--features idl_specs`, and exits non-zero
+unless every planted row matches across modes and the clean twin
+reports nothing. Last run (seed 1,
 20 s per planted run, 60 s clean): the same detector fired on the same
 instruction in both modes for all five of the Critical 5, and the clean
 twin stayed at 0 under `invariant_all`.

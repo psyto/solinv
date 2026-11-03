@@ -19,7 +19,9 @@
 //! The last three are not in the instruction's IDL entry (it names
 //! accounts, not their types), so [`IdlSpec::infer_from_state`] reads
 //! them off the fixture after `setup()`. A seeded slot pins one address,
-//! so the account found there is the account the instruction expects.
+//! so the account found there is taken to be the type the instruction
+//! expects — an assumption that fails only for a seeded slot meant to
+//! hold different types at different times.
 //!
 //! ## Candidates: where the bugs are
 //!
@@ -600,9 +602,10 @@ impl<'a> SpecBuilder<'a> {
             .instructions
             .iter()
             .flat_map(|ix| ix.flat_accounts())
-            .filter_map(|f| f.account.pda.as_ref())
-            .filter(|pda| pda.program.is_none())
-            .map(|pda| pda.seeds.clone())
+            .filter_map(|f| {
+                let pda = f.account.pda.as_ref().filter(|p| p.program.is_none())?;
+                Some((f.prefix().to_string(), pda.seeds.clone()))
+            })
             .collect();
 
         let n = accounts.len();
@@ -702,8 +705,9 @@ pub struct IdlSpec {
     omitted: Vec<bool>,
     /// Keypairs bound to slots the IDL does not mark as signers.
     keypairs: Vec<Option<Arc<Keypair>>>,
-    /// Every program-local seed pattern declared anywhere in the IDL.
-    pda_patterns: Vec<Vec<IdlSeed>>,
+    /// Every program-local seed pattern declared anywhere in the IDL,
+    /// with the composite path it was declared in.
+    pda_patterns: Vec<(String, Vec<IdlSeed>)>,
     arg_seeds: HashMap<String, Vec<u8>>,
     unresolved: Vec<Unresolved>,
     candidates: Vec<Candidate>,
@@ -859,12 +863,13 @@ impl IdlSpec {
     fn rederive_pda(&self, i: usize) -> Result<Vec<Vec<u8>>, usize> {
         let target = self.spec.accounts[i].pubkey;
         let mut skipped = 0;
-        for pattern in &self.pda_patterns {
+        for (source_prefix, pattern) in &self.pda_patterns {
             let seeds: Option<Vec<Vec<u8>>> = pattern
                 .iter()
                 .map(|seed| match seed {
                     IdlSeed::Const { value } => Some(value.clone()),
-                    IdlSeed::Account { path, .. } => slot_of(&self.names, path)
+                    IdlSeed::Account { path, .. } => seed_slot(&self.names, source_prefix, path)
+                        .ok()
                         .map(|j| self.spec.accounts[j].pubkey.to_bytes().to_vec()),
                     IdlSeed::Arg { path } => self.arg_seeds.get(path).cloned(),
                 })
@@ -887,6 +892,26 @@ impl IdlSpec {
 
     pub fn candidates(&self) -> &[Candidate] {
         &self.candidates
+    }
+
+    /// One `[SOLINV_CANDIDATES]` line per candidate, for a harness to log
+    /// once when it builds the spec. Detector findings name the
+    /// instruction and account index but cannot know an expectation was
+    /// a candidate (the `InstructionSpec` carries no provenance, and its
+    /// `name` keys the reachability ledger), so the log is where a
+    /// finding on a candidate is told apart from one on a fact.
+    pub fn candidate_log(&self) -> Vec<String> {
+        self.candidates
+            .iter()
+            .map(|c| {
+                let idx = self.names.iter().position(|n| *n == c.account).unwrap_or(usize::MAX);
+                format!(
+                    "[SOLINV_CANDIDATES] ix={} account={} path={} kind={:?} \
+                     (lead: confirm against the program's intent)",
+                    self.spec.name, idx, c.account, c.what
+                )
+            })
+            .collect()
     }
 
     pub fn unresolved(&self) -> &[Unresolved] {
@@ -1206,6 +1231,39 @@ mod tests {
         assert_eq!(s.expected_pda_seeds[1], Some(vec![a.pubkey().to_bytes().to_vec()]));
         let stub = idl.instruction("ix").unwrap().rust_bindings();
         assert!(stub.contains(".signer(\"group_b.authority\""));
+    }
+
+    #[test]
+    fn rederive_keeps_the_source_composite() {
+        let idl = Idl::from_json(
+            r#"{"instructions":[
+              {"name":"open","discriminator":[1,1,1,1,1,1,1,1],"accounts":[{"name":"group_a","accounts":[
+                {"name":"authority","signer":true},
+                {"name":"pool","writable":true,"pda":{"seeds":[{"kind":"account","path":"authority"}]}}]}]},
+              {"name":"use","discriminator":[2,2,2,2,2,2,2,2],"accounts":[
+                {"name":"group_a","accounts":[{"name":"authority"}]},
+                {"name":"group_b","accounts":[{"name":"authority"}]},
+                {"name":"pool","writable":true}]}],
+             "accounts":[{"name":"Pool","discriminator":[3,3,3,3,3,3,3,3]}]}"#,
+        )
+        .unwrap();
+        let pid = Pubkey::new_unique();
+        let (a, b) = (Pubkey::new_unique(), Pubkey::new_unique());
+        let (pool, _) = Pubkey::find_program_address(&[a.as_ref()], &pid);
+        let acct = Account { lamports: 1, data: vec![3; 8], owner: pid, executable: false, rent_epoch: 0 };
+        let built = idl
+            .spec("use", pid)
+            .unwrap()
+            .account("group_a.authority", a)
+            .account("group_b.authority", b)
+            .account("pool", pool)
+            .build()
+            .unwrap()
+            .infer_candidates(|pk| (*pk == pool).then(|| acct.clone()));
+        assert_eq!(built.spec().expected_pda_seeds[2], Some(vec![a.to_bytes().to_vec()]));
+        assert!(built.candidate_log().iter().any(|l| l.starts_with(
+            "[SOLINV_CANDIDATES] ix=use account=2 path=pool kind=PdaSeeds"
+        )));
     }
 
     #[test]

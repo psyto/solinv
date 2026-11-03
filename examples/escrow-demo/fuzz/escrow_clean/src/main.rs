@@ -188,6 +188,11 @@ struct EscrowCleanFixture {
     // has somewhere to succeed.
     vault_init_pda: Pubkey,
     unlock_slot: u64,
+    // IDL-built specs, inferred once against the post-setup state and
+    // shared by clones of this fixture. Re-inferring on every call would
+    // read state a detector is midway through tampering with.
+    #[cfg(feature = "idl_specs")]
+    idl_cache: Arc<std::sync::Mutex<std::collections::HashMap<String, InstructionSpec>>>,
 }
 
 #[fuzz_fixture]
@@ -254,7 +259,7 @@ impl EscrowCleanFixture {
         .send()
         .unwrap();
 
-        Self {
+        let fixture = Self {
             ctx,
             program_id,
             depositor,
@@ -266,7 +271,12 @@ impl EscrowCleanFixture {
             vault_b_pda,
             vault_init_pda,
             unlock_slot,
-        }
+            #[cfg(feature = "idl_specs")]
+            idl_cache: Default::default(),
+        };
+        #[cfg(feature = "idl_specs")]
+        let _ = fixture.instructions();
+        fixture
     }
 
     /// Record a canonical action's instruction as reached when it lands.
@@ -573,7 +583,84 @@ impl HasInstructionSet for EscrowCleanFixture {
             guards: vec![],
         };
 
+        // `idl_specs`: the account-validation fields come from
+        // idl/escrow_clean.json plus the fixture's state instead; the
+        // semantic fields (alternates, state invariants, guards) stay
+        // hand-written. On this clean program it must still find nothing.
+        #[cfg(feature = "idl_specs")]
+        let [initialize_spec, deposit_spec, withdraw_spec, claim_spec] = {
+            let hand = |idl: InstructionSpec, h: InstructionSpec| InstructionSpec {
+                swap_alternates: h.swap_alternates,
+                state_invariants: h.state_invariants,
+                guards: h.guards,
+                ..idl
+            };
+            let mut init_args = self.beneficiary.pubkey().to_bytes().to_vec();
+            init_args.extend_from_slice(&self.unlock_slot.to_le_bytes());
+            let amount = |spec: &InstructionSpec| spec.data_sample[8..].to_vec();
+            [
+                hand(
+                    self.idl_spec("initialize", |b| {
+                        b.account("vault", self.vault_init_pda)
+                            .signer("depositor", Arc::clone(&self.initializer))
+                            .args(&init_args)
+                    }),
+                    initialize_spec,
+                ),
+                hand(
+                    self.idl_spec("deposit", |b| {
+                        b.account("vault", self.vault_pda)
+                            .signer("depositor", Arc::clone(&self.depositor))
+                            .args(&amount(&deposit_spec))
+                    }),
+                    deposit_spec,
+                ),
+                hand(
+                    self.idl_spec("withdraw", |b| {
+                        b.account("vault", self.vault_pda)
+                            .signer("depositor", Arc::clone(&self.depositor))
+                            .args(&amount(&withdraw_spec))
+                    }),
+                    withdraw_spec,
+                ),
+                hand(
+                    self.idl_spec("claim", |b| {
+                        b.account("vault", self.vault_pda)
+                            .account("depositor", self.depositor.pubkey())
+                            .signer("beneficiary", Arc::clone(&self.beneficiary))
+                    }),
+                    claim_spec,
+                ),
+            ]
+        };
+
         vec![initialize_spec, deposit_spec, withdraw_spec, claim_spec]
+    }
+}
+
+#[cfg(feature = "idl_specs")]
+const ESCROW_CLEAN_IDL: &str = include_str!("../../../idl/escrow_clean.json");
+
+#[cfg(feature = "idl_specs")]
+impl EscrowCleanFixture {
+    fn idl_spec(
+        &self,
+        ix: &str,
+        bind: impl FnOnce(solinv_fuzz::SpecBuilder<'_>) -> solinv_fuzz::SpecBuilder<'_>,
+    ) -> InstructionSpec {
+        let mut cache = self.idl_cache.lock().unwrap();
+        if let Some(spec) = cache.get(ix) {
+            return spec.clone();
+        }
+        static IDL: std::sync::OnceLock<solinv_fuzz::Idl> = std::sync::OnceLock::new();
+        let idl = IDL.get_or_init(|| solinv_fuzz::Idl::from_json(ESCROW_CLEAN_IDL).unwrap());
+        let spec = bind(idl.spec(ix, self.program_id).unwrap())
+            .build()
+            .unwrap()
+            .infer_from_state(|pk| self.ctx.get_account(pk).ok())
+            .into_spec();
+        cache.insert(ix.to_string(), spec.clone());
+        spec
     }
 }
 

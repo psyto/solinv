@@ -4808,11 +4808,14 @@ dependencies = [
  "anyhow",
  "crucible-fuzzer",
  "crucible-test-context",
+ "serde",
+ "serde_json",
  "sha2 0.10.9",
  "solana-account",
  "solana-instruction",
  "solana-keypair",
  "solana-pubkey 3.0.0",
+ "solana-signer",
  "solinv-disclose",
 ]
 

@@ -620,6 +620,53 @@ solinv/
 └── logs/                            # per-campaign fuzz logs (gitignored)
 ```
 
+## Start from your IDL
+
+```bash
+anchor build                                   # writes target/idl/<program>.json
+solinv idl target/idl/my_program.json          # where to point the Critical 5
+solinv idl target/idl/my_program.json --rust deposit   # binding stub for one ix
+```
+
+`solinv idl` needs no fixture. It lists every instruction's slots as the
+IDL declares them and names the instructions with **no signer that
+write a slot the IDL leaves unconstrained** — on escrow-demo's planted
+program that is exactly the three planted account-validation bugs.
+
+In the fixture, the stub becomes the spec:
+
+```rust
+let spec = idl.spec("deposit", program_id)?
+    .account("vault", vault_pda)
+    .signer("depositor", Arc::clone(&depositor))
+    .args(&50_000u64.to_le_bytes())
+    .build()?
+    .infer_from_state(|pk| ctx.get_account(pk).ok())   // after setup()
+    .into_spec();
+```
+
+The IDL supplies the account list, signers, PDA seeds and instruction
+data. The state pass supplies owners, discriminators and created
+accounts — and, more usefully, **expectations the IDL does not make**:
+
+What the IDL declares, Anchor already enforces (`signer: true` is a
+`Signer<'info>`, `pda.seeds` is a `seeds = [...]` constraint), so a spec
+built from the IDL alone asks the program to honour checks its own
+macros generated, and on Anchor finds nothing. Bugs live where the IDL
+is silent. For those slots the state pass adds a check only on evidence:
+a program-owned account carrying an IDL discriminator (owner +
+discriminator); a seed pattern from another instruction that re-derives
+the slot's exact address (pda seeds); and, on an instruction with no
+signer that writes program state, a slot whose pubkey that state stores
+(signer). `IdlSpec::inferred()` lists each one.
+
+Measured on escrow-demo (`--features idl_specs` on both harnesses,
+seed 1): the IDL-built specs fire the same Critical-5 detector on the
+same instruction as the hand-written ones for all five, and the clean
+twin stays at 0 violations under `invariant_all` (60 s, ~62 exec/s vs
+~64 hand-written). Still hand-written: `swap_alternates`, state
+invariants and guards — semantic, not in any IDL.
+
 ## Integration — adopting solinv on your own program
 
 Implement two traits on a fixture that already works under Crucible:

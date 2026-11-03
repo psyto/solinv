@@ -39,6 +39,8 @@ name = "invariant_test"
 path = "src/main.rs"
 
 [features]
+# Build the Critical-5 specs from idl/escrow.json instead of by hand.
+idl_specs = []
 invariant_escrow = []
 invariant_solinv_acceptance = []
 # Every detector in one run — the variant the mutation campaign scores

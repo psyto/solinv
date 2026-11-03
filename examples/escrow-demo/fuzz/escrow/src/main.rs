@@ -242,6 +242,11 @@ struct EscrowFixture {
     vault_b_pda: Pubkey,            // Day 12 — alternate-context vault (depositor_b's)
     unlock_slot: u64,
     successful_withdraw_slots: Vec<u64>,
+    // IDL-built specs, inferred once against the post-setup state and
+    // shared by clones of this fixture. Re-inferring on every call would
+    // read state a detector is midway through tampering with.
+    #[cfg(feature = "idl_specs")]
+    idl_cache: Arc<std::sync::Mutex<std::collections::HashMap<String, InstructionSpec>>>,
 }
 
 #[fuzz_fixture]
@@ -309,7 +314,7 @@ impl EscrowFixture {
         .send()
         .unwrap();
 
-        Self {
+        let fixture = Self {
             ctx,
             program_id,
             depositor,
@@ -320,7 +325,12 @@ impl EscrowFixture {
             vault_b_pda,
             unlock_slot,
             successful_withdraw_slots: Vec::new(),
-        }
+            #[cfg(feature = "idl_specs")]
+            idl_cache: Default::default(),
+        };
+        #[cfg(feature = "idl_specs")]
+        let _ = fixture.instructions();
+        fixture
     }
 
     /// Record a canonical action's instruction as reached when it lands.
@@ -877,6 +887,25 @@ impl HasInstructionSet for EscrowFixture {
             guards: vec![],
         };
 
+        // `idl_specs`: replace the two Critical-5 surfaces with specs built
+        // from the program's IDL plus the fixture's state, keeping only
+        // `swap_alternates` from the hand-written versions (the one field
+        // the IDL cannot know). Detections must not change.
+        #[cfg(feature = "idl_specs")]
+        let (unsafe_withdraw_spec, read_admin_spec) = (
+            InstructionSpec {
+                swap_alternates: unsafe_withdraw_spec.swap_alternates,
+                ..self.idl_spec("unsafe_withdraw", |b| {
+                    b.account("vault", self.vault_pda)
+                        .signer("depositor", Arc::clone(&self.depositor))
+                        .args(&100_000u64.to_le_bytes())
+                })
+            },
+            self.idl_spec("unsafe_set_amount_from_source", |b| {
+                b.account("source", self.vault_b_pda).account("target", self.vault_pda)
+            }),
+        );
+
         vec![
             unsafe_withdraw_spec,
             read_admin_spec,
@@ -886,6 +915,32 @@ impl HasInstructionSet for EscrowFixture {
             realloc_grow_spec,
             withdraw_with_bump_spec,
         ]
+    }
+}
+
+#[cfg(feature = "idl_specs")]
+const ESCROW_IDL: &str = include_str!("../../../idl/escrow.json");
+
+#[cfg(feature = "idl_specs")]
+impl EscrowFixture {
+    fn idl_spec(
+        &self,
+        ix: &str,
+        bind: impl FnOnce(solinv_fuzz::SpecBuilder<'_>) -> solinv_fuzz::SpecBuilder<'_>,
+    ) -> InstructionSpec {
+        let mut cache = self.idl_cache.lock().unwrap();
+        if let Some(spec) = cache.get(ix) {
+            return spec.clone();
+        }
+        static IDL: std::sync::OnceLock<solinv_fuzz::Idl> = std::sync::OnceLock::new();
+        let idl = IDL.get_or_init(|| solinv_fuzz::Idl::from_json(ESCROW_IDL).unwrap());
+        let spec = bind(idl.spec(ix, self.program_id).unwrap())
+            .build()
+            .unwrap()
+            .infer_from_state(|pk| self.ctx.get_account(pk).ok())
+            .into_spec();
+        cache.insert(ix.to_string(), spec.clone());
+        spec
     }
 }
 

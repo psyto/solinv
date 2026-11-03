@@ -52,6 +52,16 @@ enum Commands {
         #[command(subcommand)]
         action: MutateAction,
     },
+    /// Show an Anchor IDL's account-validation surface, and which
+    /// instructions to point the Critical 5 at first
+    Idl {
+        /// Anchor IDL JSON, e.g. target/idl/my_program.json
+        path: PathBuf,
+        /// Print a `SpecBuilder` binding stub for this instruction
+        /// (`all` for every instruction)
+        #[arg(long)]
+        rust: Option<String>,
+    },
     /// Score and rank bug bounty targets
     Score {
         /// Path to target scoring config (.json or .toml)
@@ -490,6 +500,20 @@ fn main() -> Result<()> {
             println!("solinv disclose {bug_id}: not yet implemented");
         }
         Commands::Mutate { action } => run_mutate(action)?,
+        Commands::Idl { path, rust } => {
+            let raw = fs::read_to_string(&path)
+                .with_context(|| format!("failed to read IDL: {}", path.display()))?;
+            let idl = solinv_fuzz::Idl::from_json(&raw)?;
+            match rust.as_deref() {
+                None => print!("{}", idl.report()),
+                Some("all") => {
+                    for ix in &idl.instructions {
+                        println!("{}", ix.rust_bindings());
+                    }
+                }
+                Some(name) => print!("{}", idl.instruction(name)?.rust_bindings()),
+            }
+        }
         Commands::Score {
             config,
             top,

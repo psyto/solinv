@@ -30,6 +30,8 @@ name = "invariant_test"
 path = "src/main.rs"
 
 [features]
+# Build the account-validation specs from idl/escrow_clean.json.
+idl_specs = []
 # Every detector in one run — the campaign's scoring pass. On a clean
 # target this is expected to find nothing until a mutant breaks something.
 invariant_all = []

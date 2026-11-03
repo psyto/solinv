@@ -924,7 +924,7 @@ thing" drift after a negative result.
 
 ```bash
 cargo check --workspace               # verify scaffold (~5s)
-cargo test  --workspace               # all crates (261 tests)
+cargo test  --workspace               # all crates (262 tests)
 cargo test  -p solinv-core            # invariant regression tests
 cargo test  -p solinv-fuzz            # bytepoke + differential oracle + schema + idl
 cargo test  -p solinv-mutate          # operators + mutants + scoring (no Solana deps)

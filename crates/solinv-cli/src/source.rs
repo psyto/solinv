@@ -50,8 +50,15 @@ impl SourceKinds {
 
         // `type Raw<'info> = AccountInfo<'info>;` hides an unchecked slot.
         let alias = Regex::new(r"\btype\s+([A-Za-z_]\w*)\s*(?:<[^=]*>)?\s*=\s*([^;]+);").unwrap();
-        let aliases: Vec<(String, String)> =
+        let all: Vec<(String, String)> =
             alias.captures_iter(&src).map(|c| (c[1].to_string(), c[2].to_string())).collect();
+        // Module scope is not tracked, so a name aliased twice is not
+        // resolved at all: its slots stay unplaced rather than guessed.
+        let aliases: Vec<(String, String)> = all
+            .iter()
+            .filter(|(n, _)| all.iter().filter(|(m, _)| m == n).count() == 1)
+            .cloned()
+            .collect();
         // To a fixed point, so `type B = A; type A = AccountInfo` resolves.
         let mut unchecked_aliases: Vec<String> = Vec::new();
         loop {
@@ -389,6 +396,23 @@ const S: &str = r##"never closed "# and then
 pub struct X<'info> { pub vault: Account<'info, V>, }
 "####;
         assert_eq!(SourceKinds::parse(src).get("a", "vault"), Some(SlotKind::Unchecked));
+    }
+
+    #[test]
+    fn an_alias_name_defined_twice_is_not_resolved() {
+        let src = r#"
+mod a { type Base<'info> = AccountInfo<'info>; }
+mod b {
+    type Base<'info> = Account<'info, State>;
+    type Local<'info> = Base<'info>;
+}
+pub fn f(ctx: Context<F>) -> Result<()> {}
+#[derive(Accounts)]
+pub struct F<'info> {
+    pub state: Local<'info>,
+}
+"#;
+        assert_eq!(SourceKinds::parse(src).get("f", "state"), None);
     }
 
     #[test]

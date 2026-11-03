@@ -1,0 +1,21 @@
+[package]
+name = "escrow-clean"
+version = "0.1.0"
+description = "Timelock escrow with no planted bugs — solinv's mutation-testing target"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "escrow_clean"
+
+[features]
+default = []
+cpi = ["no-entrypoint"]
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+idl-build = ["anchor-lang/idl-build"]
+test-sbf = []
+
+[dependencies]
+anchor-lang = "1.0.1"

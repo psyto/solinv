@@ -47,6 +47,10 @@ mainnet_snapshot_fixture = []
 # One per #[invariant_test] function in main.rs.
 # Combined variant + 4 isolated (Day 20, per Day 12 escrow-demo pattern).
 invariant_swap_base_in_v2_only = []
+# Mutation-campaign pair: every detector in one run, plus an
+# assertion-free run that supplies reachability.
+invariant_all = []
+invariant_reachability = []
 invariant_signer_skip_only = []
 invariant_owner_skip_only = []
 invariant_pda_forge_only = []

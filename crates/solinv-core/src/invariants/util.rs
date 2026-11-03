@@ -113,6 +113,50 @@ pub(crate) fn cleanup_temp_account(ctx: &mut TestContext, pubkey: &Pubkey) {
     );
 }
 
+static DECLARATION_WARNINGS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
+/// Emit a declaration diagnostic to stderr at most once per process
+/// per `key`.
+///
+/// This exists because the alternative — returning early when a
+/// declared field cannot be read — is the single most dangerous
+/// failure mode solinv has. A mistyped offset, a schema that has
+/// drifted from the program, or an account shorter than declared all
+/// produce the same observable result as a clean campaign: no
+/// violations. The invariant never fires because it never reads
+/// anything, and the run is reported as evidence of correctness.
+///
+/// De-duplicating on `key` keeps a fuzz loop from emitting the same
+/// line millions of times while still making the condition impossible
+/// to miss on the first occurrence. Unlike the transition-coverage
+/// metrics this is deliberately **not** env-gated: a harness that is
+/// silently checking nothing must say so by default.
+pub(crate) fn warn_declaration_once(key: String, message: &str) {
+    let guard = DECLARATION_WARNINGS
+        .get_or_init(|| Mutex::new(HashSet::new()))
+        .lock();
+    let mut set = match guard {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if set.insert(key) {
+        eprintln!("[solinv][declaration] {message}");
+    }
+}
+
+/// Clear recorded declaration warnings. Test-support hook — a fresh
+/// process starts empty, so production paths never need this.
+pub fn reset_declaration_warnings() {
+    let guard = DECLARATION_WARNINGS
+        .get_or_init(|| Mutex::new(HashSet::new()))
+        .lock();
+    let mut set = match guard {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    set.clear();
+}
+
 static TRANSITION_FINGERPRINTS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 static LAST_REPORTED_COUNT: AtomicUsize = AtomicUsize::new(0);
 

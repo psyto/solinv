@@ -1,0 +1,72 @@
+[
+{
+  "mutant_id": "signer-type-weaken@examples/escrow-demo/programs/escrow-clean/src/lib.rs:121#0",
+  "expected_killer": "signer-skip",
+  "outcome": "survived"
+}
+,
+{
+  "mutant_id": "signer-type-weaken@examples/escrow-demo/programs/escrow-clean/src/lib.rs:135#1",
+  "expected_killer": "signer-skip",
+  "outcome": "survived"
+}
+,
+{
+  "mutant_id": "signer-type-weaken@examples/escrow-demo/programs/escrow-clean/src/lib.rs:149#2",
+  "expected_killer": "signer-skip",
+  "outcome": "killed",
+  "by": "signer-skip"
+}
+,
+{
+  "mutant_id": "signer-type-weaken@examples/escrow-demo/programs/escrow-clean/src/lib.rs:165#3",
+  "expected_killer": "signer-skip",
+  "outcome": "killed",
+  "by": "signer-skip"
+}
+,
+{
+  "mutant_id": "guard-drop@examples/escrow-demo/programs/escrow-clean/src/lib.rs:44#0",
+  "expected_killer": "precondition-skip",
+  "outcome": "survived"
+}
+,
+{
+  "mutant_id": "guard-drop@examples/escrow-demo/programs/escrow-clean/src/lib.rs:73#1",
+  "expected_killer": "precondition-skip",
+  "outcome": "killed",
+  "by": "precondition-skip"
+}
+,
+{
+  "mutant_id": "guard-drop@examples/escrow-demo/programs/escrow-clean/src/lib.rs:74#2",
+  "expected_killer": "precondition-skip",
+  "outcome": "survived"
+}
+,
+{
+  "mutant_id": "guard-drop@examples/escrow-demo/programs/escrow-clean/src/lib.rs:95#3",
+  "expected_killer": "precondition-skip",
+  "outcome": "killed",
+  "by": "precondition-skip"
+}
+,
+{
+  "mutant_id": "guard-drop@examples/escrow-demo/programs/escrow-clean/src/lib.rs:97#4",
+  "expected_killer": "precondition-skip",
+  "outcome": "killed",
+  "by": "precondition-skip"
+}
+,
+{
+  "mutant_id": "checked-to-wrapping@examples/escrow-demo/programs/escrow-clean/src/lib.rs:60#0",
+  "expected_killer": "unchecked-math",
+  "outcome": "survived"
+}
+,
+{
+  "mutant_id": "checked-to-wrapping@examples/escrow-demo/programs/escrow-clean/src/lib.rs:87#1",
+  "expected_killer": "unchecked-math",
+  "outcome": "survived"
+}
+]

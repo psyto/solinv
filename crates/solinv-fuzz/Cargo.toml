@@ -9,6 +9,11 @@ publish = false
 [dependencies]
 anyhow.workspace = true
 
+# idl module: read Anchor IDL JSON into InstructionSpec
+serde.workspace = true
+serde_json.workspace = true
+solana-signer.workspace = true
+
 # Crucible — engine layer
 crucible-fuzzer.workspace = true
 crucible-test-context.workspace = true

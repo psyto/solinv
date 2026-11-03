@@ -37,6 +37,7 @@ use solana_transaction_error::TransactionError;
 use solinv_fuzz::{HasContext, HasInstructionSet, InstructionSpec};
 
 use super::util::{restore_accounts, save_accounts};
+use super::reachability::record_ix_reached;
 
 /// Rent-exempt lamport minimum for an account holding `bytes` of data.
 /// Mirrors `solana_rent::Rent::default().minimum_balance(bytes)`
@@ -103,6 +104,15 @@ where
         .fee_payer(&*fee_payer)
         .signers(&signer_refs)
         .send();
+
+    // Canonical ix accepted — the program's happy path ran. A tx
+    // rejected for rent (the condition this detector looks for) is
+    // deliberately not recorded: the state mutation rolls back, so it
+    // is not evidence that the mutated code's effects executed. See
+    // `reachability`.
+    if matches!(result, Ok(TxOutcome::Success { .. })) {
+        record_ix_reached(&spec.program_id, &spec.name);
+    }
 
     // Solana defense-in-depth: when a program grows an account's data
     // buffer past the rent-exempt threshold without depositing

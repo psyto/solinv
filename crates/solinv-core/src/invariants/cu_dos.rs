@@ -26,6 +26,7 @@ use solinv_fuzz::{
 use super::util::{
     record_transition_fingerprint, restore_accounts, save_accounts,
 };
+use super::reachability::record_ix_reached;
 
 /// Check the fixture's instruction set for cu-dos violations.
 ///
@@ -69,6 +70,9 @@ where
         .send();
 
     if let Ok(TxOutcome::Success { compute_units, .. }) = result {
+        // Canonical ix accepted — the program's happy path ran. See
+        // `reachability` for why only untampered sends are recorded.
+        record_ix_reached(&spec.program_id, &spec.name);
         let fp = fingerprint_key(
             spec,
             TransitionObservation {

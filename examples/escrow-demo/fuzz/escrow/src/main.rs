@@ -242,6 +242,11 @@ struct EscrowFixture {
     vault_b_pda: Pubkey,            // Day 12 — alternate-context vault (depositor_b's)
     unlock_slot: u64,
     successful_withdraw_slots: Vec<u64>,
+    // IDL-built specs, inferred once against the post-setup state and
+    // shared by clones of this fixture. Re-inferring on every call would
+    // read state a detector is midway through tampering with.
+    #[cfg(feature = "idl_specs")]
+    idl_cache: Arc<std::sync::Mutex<std::collections::HashMap<String, InstructionSpec>>>,
 }
 
 #[fuzz_fixture]
@@ -309,7 +314,7 @@ impl EscrowFixture {
         .send()
         .unwrap();
 
-        Self {
+        let fixture = Self {
             ctx,
             program_id,
             depositor,
@@ -320,11 +325,47 @@ impl EscrowFixture {
             vault_b_pda,
             unlock_slot,
             successful_withdraw_slots: Vec::new(),
+            #[cfg(feature = "idl_specs")]
+            idl_cache: Default::default(),
+        };
+        #[cfg(feature = "idl_specs")]
+        let _ = fixture.instructions();
+        fixture
+    }
+
+    /// Record a canonical action's instruction as reached when it lands.
+    ///
+    /// Reachability is a property of the campaign, not of any one
+    /// detector, and hanging it off the detectors was a mistake worth
+    /// naming. The four canonical-send detectors were the only things
+    /// recording, so the ledger could only ever vouch for the three
+    /// instructions that carry the declarations those four need. A
+    /// mutation campaign then scored every mutant outside that set as
+    /// `not_reached` — an empty denominator, for reasons having nothing
+    /// to do with the mutants.
+    ///
+    /// The actions are the honest place for this. They already send
+    /// these instructions canonically and already know whether they
+    /// landed, so recording here adds no traffic and perturbs no
+    /// detector's view of the state. It also makes the ledger
+    /// independent of which invariant test is running, and of the order
+    /// detectors run in — both of which were silently deciding what
+    /// counted as reached.
+    ///
+    /// The `ix_name` passed here must match the program's `pub fn`
+    /// identifier: `solinv mutate plan` records the enclosing function
+    /// of each mutation site, and the campaign runner joins the two by
+    /// name.
+    fn note_reached(&self, ix_name: &str, success: bool) -> bool {
+        if success {
+            solinv_core::invariants::reachability::record_ix_reached(&self.program_id, ix_name);
         }
+        success
     }
 
     pub fn action_deposit(&mut self, #[range(1..1_000_000)] amount: u64) -> bool {
-        self.ctx
+        let ok = self
+            .ctx
             .raw_call(build_deposit_ix(
                 self.program_id,
                 self.vault_pda,
@@ -334,7 +375,8 @@ impl EscrowFixture {
             .signers(&[&*self.depositor])
             .send()
             .map(|o| o.is_success())
-            .unwrap_or(false)
+            .unwrap_or(false);
+        self.note_reached("deposit", ok)
     }
 
     pub fn action_withdraw(&mut self, #[range(1..1_000_000)] amount: u64) -> bool {
@@ -354,11 +396,12 @@ impl EscrowFixture {
         if success {
             self.successful_withdraw_slots.push(pre_slot);
         }
-        success
+        self.note_reached("withdraw", success)
     }
 
     pub fn action_claim(&mut self) -> bool {
-        self.ctx
+        let ok = self
+            .ctx
             .raw_call(build_claim_ix(
                 self.program_id,
                 self.vault_pda,
@@ -368,7 +411,8 @@ impl EscrowFixture {
             .signers(&[&*self.beneficiary])
             .send()
             .map(|o| o.is_success())
-            .unwrap_or(false)
+            .unwrap_or(false);
+        self.note_reached("claim", ok)
     }
 
     pub fn action_advance_slots(&mut self, #[range(0..15)] slots: u64) -> bool {
@@ -387,7 +431,8 @@ impl EscrowFixture {
         &mut self,
         #[range(0..50_000)] iterations: u32,
     ) -> bool {
-        self.ctx
+        let ok = self
+            .ctx
             .raw_call(build_unsafe_compute_dos_ix(
                 self.program_id,
                 self.depositor.pubkey(),
@@ -396,7 +441,8 @@ impl EscrowFixture {
             .signers(&[&*self.depositor])
             .send()
             .map(|o| o.is_success())
-            .unwrap_or(false)
+            .unwrap_or(false);
+        self.note_reached("unsafe_compute_dos", ok)
     }
 
     // Day 60 — planted bump-seed-canonicalization action. Calls the
@@ -412,7 +458,8 @@ impl EscrowFixture {
             &[b"vault", self.depositor.pubkey().as_ref()],
             &self.program_id,
         );
-        self.ctx
+        let ok = self
+            .ctx
             .raw_call(build_unsafe_withdraw_with_bump_ix(
                 self.program_id,
                 self.vault_pda,
@@ -423,7 +470,8 @@ impl EscrowFixture {
             .signers(&[&*self.depositor])
             .send()
             .map(|o| o.is_success())
-            .unwrap_or(false)
+            .unwrap_or(false);
+        self.note_reached("unsafe_withdraw_with_bump", ok)
     }
 
     // Day 59 — planted realloc-race action. `delta` ranges across a
@@ -436,7 +484,8 @@ impl EscrowFixture {
         &mut self,
         #[range(1..5_000)] delta: u32,
     ) -> bool {
-        self.ctx
+        let ok = self
+            .ctx
             .raw_call(build_unsafe_realloc_grow_ix(
                 self.program_id,
                 self.vault_pda,
@@ -446,7 +495,8 @@ impl EscrowFixture {
             .signers(&[&*self.depositor])
             .send()
             .map(|o| o.is_success())
-            .unwrap_or(false)
+            .unwrap_or(false);
+        self.note_reached("unsafe_realloc_grow", ok)
     }
 
     // Day 58 — planted cpi-reentrancy action. No fuzz-derived arg; the
@@ -455,7 +505,8 @@ impl EscrowFixture {
     // address variation through signer/PDA paths) but the action body
     // is single-shape.
     pub fn action_unsafe_self_reentry(&mut self) -> bool {
-        self.ctx
+        let ok = self
+            .ctx
             .raw_call(build_unsafe_self_reentry_ix(
                 self.program_id,
                 self.vault_pda,
@@ -464,7 +515,8 @@ impl EscrowFixture {
             .signers(&[&*self.depositor])
             .send()
             .map(|o| o.is_success())
-            .unwrap_or(false)
+            .unwrap_or(false);
+        self.note_reached("unsafe_self_reentry", ok)
     }
 
     // Day 33 — planted unchecked-math action. `rate_bps` is fuzzed across
@@ -473,7 +525,8 @@ impl EscrowFixture {
         &mut self,
         #[range(0..u64::MAX)] rate_bps: u64,
     ) -> bool {
-        self.ctx
+        let ok = self
+            .ctx
             .raw_call(build_unsafe_accumulate_yield_ix(
                 self.program_id,
                 self.vault_pda,
@@ -483,7 +536,43 @@ impl EscrowFixture {
             .signers(&[&*self.depositor])
             .send()
             .map(|o| o.is_success())
-            .unwrap_or(false)
+            .unwrap_or(false);
+        self.note_reached("unsafe_accumulate_yield", ok)
+    }
+
+    // Step 2 — canonical driver for `unsafe_withdraw`.
+    //
+    // Nine of the seventeen mutants in the escrow campaign sit in this
+    // handler, and until now nothing drove it canonically: signer_skip
+    // reaches it only by *tampering* with the signer flag, which proves
+    // the attack path runs, not the happy path. So the ledger could
+    // never vouch for the majority of the campaign's mutants.
+    //
+    // This sends it the way a legitimate caller would — depositor
+    // signing for real — which the handler accepts. Note what that
+    // means for the fuzzer's input distribution: successful
+    // `unsafe_withdraw` calls now appear in the corpus, draining the
+    // vault on a path that previously only ever ran tampered. Other
+    // detectors see that state. The planted-bug detections are the
+    // thing to re-check after this, not assume.
+    pub fn action_unsafe_withdraw(&mut self, #[range(1..100)] amount: u64) -> bool {
+        let mut data = unsafe_withdraw_sighash().to_vec();
+        data.extend_from_slice(&amount.to_le_bytes());
+        let ok = self
+            .ctx
+            .raw_call(Instruction {
+                program_id: self.program_id,
+                accounts: vec![
+                    AccountMeta::new(self.vault_pda, false),
+                    AccountMeta::new(self.depositor.pubkey(), true),
+                ],
+                data,
+            })
+            .signers(&[&*self.depositor])
+            .send()
+            .map(|o| o.is_success())
+            .unwrap_or(false);
+        self.note_reached("unsafe_withdraw", ok)
     }
 }
 
@@ -558,6 +647,7 @@ impl HasInstructionSet for EscrowFixture {
             cpi_reentrancy: None,       // cpi-reentrancy planted-bug surface is unsafe_callback_dispatch (Day 58)
             realloc_check: None,        // realloc-race planted-bug surface is unsafe_realloc_grow (Day 59)
             bump_seed_check: None,      // bump-seed-canonicalization planted-bug surface is unsafe_withdraw_with_bump (Day 60)
+            guards: vec![],
         };
 
         // Day 13 — additional ix for owner-skip unmask. unsafe_set_amount_from_source
@@ -593,7 +683,9 @@ impl HasInstructionSet for EscrowFixture {
             cu_budget: None,
             cpi_reentrancy: None,
             realloc_check: None,
-            bump_seed_check: None,            };
+            bump_seed_check: None,
+            guards: vec![],
+        };
 
         // Day 33 — accumulate_yield ix for unchecked-math detection.
         // data_sample carries rate_bps = u64::MAX so solinv's re-execution
@@ -643,6 +735,7 @@ impl HasInstructionSet for EscrowFixture {
             cpi_reentrancy: None,
             realloc_check: None,
             bump_seed_check: None,
+            guards: vec![],
             };
 
         // Day 37 — compute_dos ix for cu-dos detection. data_sample
@@ -669,7 +762,9 @@ impl HasInstructionSet for EscrowFixture {
             cu_budget: Some(5_000),
             cpi_reentrancy: None,
             realloc_check: None,
-            bump_seed_check: None,            };
+            bump_seed_check: None,
+            guards: vec![],
+        };
 
         // Day 58 — self_reentry ix for cpi-reentrancy detection. No
         // data args (the bug is structural). InstructionSpec exposes
@@ -703,7 +798,9 @@ impl HasInstructionSet for EscrowFixture {
             cu_budget: None,
             cpi_reentrancy: Some(CpiReentrancyConfig::default()),
             realloc_check: None,
-            bump_seed_check: None,        };
+            bump_seed_check: None,
+            guards: vec![],
+        };
 
         // Day 59 — realloc_grow ix for realloc-race detection.
         // data_sample pins delta = 200 so solinv's re-execution
@@ -738,7 +835,9 @@ impl HasInstructionSet for EscrowFixture {
             cu_budget: None,
             cpi_reentrancy: None,
             realloc_check: Some(ReallocCheckConfig::default()),
-            bump_seed_check: None,        };
+            bump_seed_check: None,
+            guards: vec![],
+        };
 
         // Day 60 — withdraw_with_bump spec for bump-seed-canonicalization
         // detection. data_sample carries amount=1 + the CANONICAL bump
@@ -785,7 +884,27 @@ impl HasInstructionSet for EscrowFixture {
             bump_seed_check: Some(BumpSeedCheckConfig {
                 bump_data_offset: Some(16),
             }),
+            guards: vec![],
         };
+
+        // `idl_specs`: replace the two Critical-5 surfaces with specs built
+        // from the program's IDL plus the fixture's state, keeping only
+        // `swap_alternates` from the hand-written versions (the one field
+        // the IDL cannot know). Detections must not change.
+        #[cfg(feature = "idl_specs")]
+        let (unsafe_withdraw_spec, read_admin_spec) = (
+            InstructionSpec {
+                swap_alternates: unsafe_withdraw_spec.swap_alternates,
+                ..self.idl_spec("unsafe_withdraw", |b| {
+                    b.account("vault", self.vault_pda)
+                        .signer("depositor", Arc::clone(&self.depositor))
+                        .args(&100_000u64.to_le_bytes())
+                })
+            },
+            self.idl_spec("unsafe_set_amount_from_source", |b| {
+                b.account("source", self.vault_b_pda).account("target", self.vault_pda)
+            }),
+        );
 
         vec![
             unsafe_withdraw_spec,
@@ -796,6 +915,37 @@ impl HasInstructionSet for EscrowFixture {
             realloc_grow_spec,
             withdraw_with_bump_spec,
         ]
+    }
+}
+
+#[cfg(feature = "idl_specs")]
+const ESCROW_IDL: &str = include_str!("../../../idl/escrow.json");
+
+#[cfg(feature = "idl_specs")]
+impl EscrowFixture {
+    fn idl_spec(
+        &self,
+        ix: &str,
+        bind: impl FnOnce(solinv_fuzz::SpecBuilder<'_>) -> solinv_fuzz::SpecBuilder<'_>,
+    ) -> InstructionSpec {
+        let mut cache = self.idl_cache.lock().unwrap();
+        if let Some(spec) = cache.get(ix) {
+            return spec.clone();
+        }
+        static IDL: std::sync::OnceLock<solinv_fuzz::Idl> = std::sync::OnceLock::new();
+        let idl = IDL.get_or_init(|| solinv_fuzz::Idl::from_json(ESCROW_IDL).unwrap());
+        let spec = bind(idl.spec(ix, self.program_id).unwrap())
+            .build()
+            .unwrap()
+            .infer_from_state(|pk| self.ctx.get_account(pk).ok())
+            .infer_candidates(|pk| self.ctx.get_account(pk).ok());
+        // Once per fixture: findings on these slots are leads.
+        for line in spec.candidate_log() {
+            eprintln!("{line}");
+        }
+        let spec = spec.into_spec();
+        cache.insert(ix.to_string(), spec.clone());
+        spec
     }
 }
 
@@ -911,6 +1061,71 @@ fn invariant_realloc_race_only(fixture: &mut EscrowFixture) {
     solinv_core::invariants::run_with_transition_metrics("realloc-race", || {
         solinv_core::invariants::realloc_race::check(fixture);
     });
+}
+
+// Mutation-campaign variant: every detector in one test.
+//
+// `scripts/run_mutation_campaign.sh` needs a single run that can both
+// kill a mutant and say what it reached, and no existing variant does
+// both. `invariant_solinv_acceptance` runs the Critical 5, which are
+// exactly the detectors that send *tampered* instructions and so record
+// no reachability; the `_only` variants each record but see one bug
+// class. Scoring a campaign against either alone measures the harness's
+// shape, not the detectors'.
+//
+// Two consequences worth stating, because they are visible in the
+// report and would otherwise look like defects:
+//
+//   - first-violation-wins masking applies across all ten here, and it
+//     is severe, not incidental. Measured on the unmutated program:
+//     with the Critical 5 first, only signer-skip and owner-skip ever
+//     report; with the four canonical-send detectors first, only
+//     unchecked-math and cu-dos do. Whichever detector is listed first
+//     is the one that speaks. A single run therefore cannot score all
+//     ten — a campaign that needs a per-detector verdict has to use the
+//     `_only` variants, one run per detector.
+//   - reachability still comes only from the four canonical-send
+//     detectors. A mutant in an instruction that only the Critical 5
+//     drive reads as `not_reached`, which is the honest answer: nothing
+//     here proves its line ran.
+// Reachability-only run: drives actions, asserts nothing.
+//
+// It asserts nothing on purpose. The fuzzer stops an iteration at its
+// first violation, and on a target this thoroughly planted with bugs
+// that is the *first action*, every time — measured: 1653 of the
+// iterations in a 30s `invariant_all` run executed exactly one action
+// before halting. Nothing ever gets deposited before something tries to
+// withdraw, so `withdraw`, `claim` and `unsafe_withdraw` are sent
+// hundreds of times, fail against an empty vault every time, and never
+// record as reached. The ledger then reports them unreachable, which is
+// false: they are unreachable *while a detector is watching*, which is
+// not a property of the program.
+//
+// With no assertion to trip, sequences run to full length and the
+// state-dependent instructions succeed. A campaign takes the union of
+// this run's ledger and the scoring run's.
+#[invariant_test]
+fn invariant_reachability(_fixture: &mut EscrowFixture) {}
+
+// The four canonical-send detectors run FIRST, ahead of the Critical 5.
+// Order is load-bearing here, not stylistic: the fuzzer stops an
+// iteration at the first violation, and the Critical 5 fire almost
+// immediately on this target. Running them first aborts the iteration
+// before the recording detectors ever send, so the reachability ledger
+// comes back nearly empty and mutants get scored `not_reached` for a
+// reason that has nothing to do with their code.
+#[invariant_test]
+fn invariant_all(fixture: &mut EscrowFixture) {
+    solinv_core::invariants::unchecked_math::check(fixture);
+    solinv_core::invariants::cu_dos::check(fixture);
+    solinv_core::invariants::cpi_reentrancy::check(fixture);
+    solinv_core::invariants::realloc_race::check(fixture);
+    solinv_core::invariants::signer_skip::check(fixture);
+    solinv_core::invariants::owner_skip::check(fixture);
+    solinv_core::invariants::discriminator_skip::check(fixture);
+    solinv_core::invariants::pda_forge::check(fixture);
+    solinv_core::invariants::account_swap::check(fixture);
+    solinv_core::invariants::bump_seed_canonicalization::check(fixture);
 }
 
 // Day 60 — bump-seed-canonicalization Gate 1 variant. Per

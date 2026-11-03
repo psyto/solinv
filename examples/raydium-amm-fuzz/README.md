@@ -20,6 +20,43 @@ See [`docs/phase2-day20-raydium-triage.md`](../../docs/phase2-day20-raydium-tria
 and [`docs/phase2-day21-raydium-extension.md`](../../docs/phase2-day21-raydium-extension.md)
 for the full triage logs.
 
+## Mutation campaign
+
+`campaigns/` holds the first mutation campaign run against production
+code: 21 mutants inside `process_swap_base_in_v2` /
+`process_swap_base_out_v2`, **0 killed of 18 reached**.
+
+Read the causes before the number — see
+[`docs/mutation-testing.md`](../../docs/mutation-testing.md). In short:
+the operator catalog was Anchor-only until this run (raydium has no
+`require!` and no `Signer<'info>`), most of raydium's swap guards
+compare *computed* values that a pre-state declaration cannot name, and
+the harness declares no `guards`, so `precondition-skip` was opted out
+on the target it was scored against.
+
+Running it needs the external clone and the `.so` path:
+
+```bash
+export RAYDIUM_AMM_SO=~/src/raydium-amm/target/deploy/raydium_amm.so
+solinv mutate plan --target raydium-amm \
+  --src ~/src/raydium-amm/program/src/processor.rs \
+  --only-fn process_swap_base_in_v2 --only-fn process_swap_base_out_v2 \
+  --out plan.json --statement "..." --min-score 0.8 --min-reached 10
+./scripts/run_mutation_campaign.sh plan.json \
+  ~/src/raydium-amm/program/Cargo.toml raydium_amm \
+  examples/raydium-amm-fuzz results.json
+```
+
+`--only-fn` is not optional here. Planning the whole crate yields 324
+mutants across 52 functions, and the reachability join works at
+instruction granularity — a mutant in a helper the handler calls reads
+as unreached even though it ran. Without the filter the campaign spends
+about eight hours rebuilding code it cannot score.
+
+**The campaign rewrites files in your raydium-amm clone** and restores
+them after each mutant. If it is killed mid-run, `git -C
+~/src/raydium-amm checkout .` puts it back.
+
 ## External program dependency
 
 Raydium AMM source is Apache-2.0 but kept external to avoid bundling.

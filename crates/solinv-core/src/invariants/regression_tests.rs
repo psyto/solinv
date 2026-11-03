@@ -98,6 +98,7 @@ fn base_transfer_spec(to: Pubkey, signers: Vec<Arc<Keypair>>) -> InstructionSpec
         cpi_reentrancy: None,
         realloc_check: None,
         bump_seed_check: None,
+        guards: vec![],
     }
 }
 

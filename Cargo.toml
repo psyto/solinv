@@ -6,6 +6,7 @@ members = [
     "crates/solinv-cheat",
     "crates/solinv-corpus",
     "crates/solinv-disclose",
+    "crates/solinv-mutate",
     "crates/solinv-cli",
 ]
 

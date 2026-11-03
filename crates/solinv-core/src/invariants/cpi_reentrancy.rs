@@ -14,13 +14,14 @@
 //! 2.5 OSS catalog-completion framing that legitimately reopens
 //! this work post-Day-38.
 
-use crucible_test_context::fuzz_assert;
+use crucible_test_context::{fuzz_assert, TxOutcome};
 use solana_keypair::Keypair;
 use solana_pubkey::Pubkey;
 use solana_signer::Signer;
 use solinv_fuzz::{HasContext, HasInstructionSet, InstructionSpec};
 
 use super::util::{restore_accounts, save_accounts};
+use super::reachability::record_ix_reached;
 
 /// Check the fixture's instruction set for cpi-reentrancy violations.
 ///
@@ -71,6 +72,13 @@ where
         .send();
 
     if let Ok(outcome) = result {
+        // Canonical ix accepted — the program's happy path ran. Gated
+        // on Success specifically: this detector inspects logs from
+        // rejected txs too, but a rejection is not evidence the
+        // mutated code executed. See `reachability`.
+        if matches!(outcome, TxOutcome::Success { .. }) {
+            record_ix_reached(&spec.program_id, &spec.name);
+        }
         let logs = outcome.logs();
         let events = parse_cpi_events(logs);
         let allowlist = spec

@@ -67,6 +67,20 @@ account-validation invariant family.
 | 14 | **account-reload-after-cpi** | ⬜ pending | `&mut` borrow を CPI 跨ぎで保持 → stale data/lamports 読み | **Helius 2026-05** |
 | 15 | **pda-sharing** | ⬜ pending | 同 PDA が複数 role の authority、構造 bug | **Helius 2026-05** |
 | 15b | (arbitrary-cpi) | bonus | CPI 先 program-ID 未検証 → 任意 program 呼出可 | Helius; owner-skip と同系で cheap addition |
+| 16 | [precondition-skip](precondition-skip.md) | ✓ spec + impl + Gate 1 PASS | Entry guard (timelock, bound, lifecycle flag) missing → ix runs when the protocol's own rules forbid it | **Mutation campaign on escrow-clean**, not a blog post |
+
+> **The status column in these two tables has drifted.** It is a
+> roadmap kept from the Day 13 planning docs, and several rows marked
+> pending (cpi-reentrancy, realloc-race, bump-seed-canonicalization)
+> have since shipped. The authoritative list of what is implemented is
+> the [catalog table in the top-level README](../../README.md#invariant-catalog-11-invariants).
+
+Row 16 is the only entry here whose source is not a published
+write-up. It came out of running solinv's own mutation testing against
+a clean target: five mutants survived that no invariant modelled, and
+the invariant was built from them. Worth noting because it is the
+first evidence that the mutation harness can do more than grade the
+catalog — it can extend it.
 
 **Source**: Helius "A Hitchhiker's Guide to Solana Program Security"
 (https://www.helius.dev/blog/a-hitchhikers-guide-to-solana-program-security)

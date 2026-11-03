@@ -39,8 +39,16 @@ name = "invariant_test"
 path = "src/main.rs"
 
 [features]
+# Build the Critical-5 specs from idl/escrow.json instead of by hand.
+idl_specs = []
 invariant_escrow = []
 invariant_solinv_acceptance = []
+# Every detector in one run — the variant the mutation campaign scores
+# against. See the note on `invariant_all` in src/main.rs.
+invariant_all = []
+# Drives actions with no assertions, so sequences are not cut short by a
+# violation. Supplies the reachability half of a campaign.
+invariant_reachability = []
 invariant_signer_skip_only = []
 invariant_owner_skip_only = []
 invariant_discriminator_skip_only = []

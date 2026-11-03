@@ -187,6 +187,19 @@ pub struct InstructionSpec {
     /// `docs/invariants/bump-seed-canonicalization.md` for design +
     /// §9 / §10.
     pub bump_seed_check: Option<BumpSeedCheckConfig>,
+
+    /// Preconditions the instruction must satisfy to be *allowed* to
+    /// succeed. Empty = opt out.
+    ///
+    /// Every other capability here describes what an instruction may
+    /// not do to state. These describe when it may run at all — the
+    /// `require!` at the top of a handler, restated where a detector
+    /// can check it. A mutation campaign on escrow-clean located the
+    /// gap: five of its nine survivors were dropped `require!` guards
+    /// on timelocks and amount bounds, and no invariant in the catalog
+    /// modelled that shape, including the timelock race that
+    /// escrow-demo plants as its flagship bug.
+    pub guards: Vec<GuardCondition>,
 }
 
 /// Per-ix configuration for the cpi-reentrancy detector. Carried
@@ -212,6 +225,90 @@ pub struct ReallocCheckConfig {
 }
 
 /// Per-ix configuration for the bump-seed-canonicalization detector.
+/// A precondition that must hold whenever the instruction succeeds.
+///
+/// Read it as: "`withdraw` may only succeed while `slot <
+/// vault.unlock_slot`". The detector evaluates the comparison against
+/// the *pre*-state and fires when the instruction was accepted anyway.
+/// Restating the guard rather than inferring it is deliberate — a
+/// handler's `require!` is a claim about intent, and intent is the one
+/// thing a detector cannot read off the binary.
+///
+/// A guard that is merely *hard* to satisfy is not a violation. Only a
+/// success while the condition was false is, which is why the pre-state
+/// is captured before the send: evaluating afterwards would compare
+/// against state the instruction itself moved.
+#[derive(Clone, Debug)]
+pub struct GuardCondition {
+    /// Name surfaced in the violation message. Say what the rule is —
+    /// "withdraw only before unlock" reads better in a report than
+    /// "guard_1".
+    pub name: String,
+    pub lhs: GuardOperand,
+    pub op: GuardOp,
+    pub rhs: GuardOperand,
+}
+
+/// One side of a [`GuardCondition`].
+#[derive(Clone, Debug)]
+pub enum GuardOperand {
+    /// Unsigned little-endian field in an account's data. `account_index`
+    /// indexes `InstructionSpec.accounts`; widths follow the same 8/16
+    /// rule as `StateInvariant`.
+    Field {
+        account_index: usize,
+        field_offset: usize,
+        field_size: usize,
+    },
+    /// The cluster clock's slot at the moment of the send. The operand
+    /// that makes timelocks expressible.
+    Slot,
+    /// Unsigned little-endian value read out of the instruction data,
+    /// for guards on an argument — `amount <= vault.amount`. Offsets
+    /// are from the start of the data, so an Anchor argument starts at
+    /// 8, after the sighash.
+    IxData { offset: usize, size: usize },
+    Const(u128),
+}
+
+/// Comparison operator for a [`GuardCondition`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GuardOp {
+    Lt,
+    Le,
+    Gt,
+    Ge,
+    Eq,
+    Ne,
+}
+
+impl GuardOp {
+    /// Apply the operator. Kept next to the enum so a new variant
+    /// cannot be added without an arm here.
+    pub fn holds(self, lhs: u128, rhs: u128) -> bool {
+        match self {
+            GuardOp::Lt => lhs < rhs,
+            GuardOp::Le => lhs <= rhs,
+            GuardOp::Gt => lhs > rhs,
+            GuardOp::Ge => lhs >= rhs,
+            GuardOp::Eq => lhs == rhs,
+            GuardOp::Ne => lhs != rhs,
+        }
+    }
+
+    /// Rendering for violation messages.
+    pub fn symbol(self) -> &'static str {
+        match self {
+            GuardOp::Lt => "<",
+            GuardOp::Le => "<=",
+            GuardOp::Gt => ">",
+            GuardOp::Ge => ">=",
+            GuardOp::Eq => "==",
+            GuardOp::Ne => "!=",
+        }
+    }
+}
+
 /// Carried inside `InstructionSpec.bump_seed_check` as `Some(cfg)`
 /// to opt in. See `docs/invariants/bump-seed-canonicalization.md` §3.
 #[derive(Clone, Debug, Default)]
@@ -245,10 +342,22 @@ pub struct StateInvariant {
 
 /// Kinds of state invariant the unchecked-math detector understands.
 ///
-/// All three read a fixed-size field (u64 or u128) from each declared
-/// account's `data` at `field_offset`. v1 supports 8- and 16-byte
-/// widths; lamports / sysvar / signed-int reads are out of scope and
-/// can be added in a v2 extension.
+/// The first three read a fixed-size field (u64 or u128) from each
+/// declared account's `data` at `field_offset`. v1 supports 8- and
+/// 16-byte widths; lamports / sysvar / signed-int reads are out of
+/// scope and can be added in a v2 extension.
+///
+/// `Relation` is the one kind that does NOT use the parent
+/// `StateInvariant.accounts` list — it carries its own per-term
+/// account indices, because a relation spans accounts that each
+/// contribute a *different* field.
+///
+/// This enum is deliberately a **closed grammar**. Every variant is a
+/// small struct of integers plus an operator, so a candidate invariant
+/// can be validated before it is ever executed. Adding a general
+/// expression language would buy expressiveness at the cost of the one
+/// property that makes generated invariants checkable — see
+/// `docs/invariants/field-schema.md` §2.
 #[derive(Clone, Debug)]
 pub enum StateInvariantKind {
     /// The unsigned sum of `field` across `accounts` is unchanged by
@@ -277,6 +386,95 @@ pub enum StateInvariantKind {
         min: u128,
         max: u128,
     },
+    /// An arithmetic relation between two sides, each the unsigned sum
+    /// of its terms: `sum(lhs) <op> sum(rhs)`.
+    ///
+    /// This is the shape most protocol-specific invariants actually
+    /// take — `reserve.liquidity + reserve.borrowed == reserve.total`,
+    /// `sum(user.deposits) <= vault.balance` — and it is the one the
+    /// other three kinds cannot express, because they read a *single*
+    /// field geometry across a *uniform* account list.
+    ///
+    /// Semantics are pre-gated: the detector fires only when the
+    /// relation **held before the ix and failed after it**. A relation
+    /// that was already false pre-ix indicts the declaration or the
+    /// fixture, not the instruction, so firing on it would be a false
+    /// positive attributed to the wrong cause. That case is reported
+    /// separately as a declaration diagnostic rather than silently
+    /// dropped — see `docs/invariants/field-schema.md` §4.
+    ///
+    /// `tolerance` applies to `RelOp::Eq` only (fee dust / rounding),
+    /// matching `SumConservation`; it is ignored by the ordering
+    /// operators, where a slack allowance would silently widen the
+    /// property being asserted.
+    Relation {
+        lhs: Vec<RelTerm>,
+        op: RelOp,
+        rhs: Vec<RelTerm>,
+        tolerance: u64,
+    },
+}
+
+/// One addend on either side of a [`StateInvariantKind::Relation`].
+///
+/// Terms are summed, never multiplied — see the closed-grammar note on
+/// [`StateInvariantKind`]. A ratio property (`fee <= total / 100`) is
+/// deliberately not expressible in v1.
+#[derive(Clone, Debug)]
+pub enum RelTerm {
+    /// Read a field from one account named by index into the parent
+    /// `InstructionSpec.accounts` list.
+    Field {
+        account: usize,
+        field_offset: usize,
+        field_size: usize,
+    },
+    /// A literal constant, for relations with a fixed bound that also
+    /// carry field terms (a constant-only bound belongs in `Bounded`).
+    Const(u128),
+}
+
+/// Comparison operator for [`StateInvariantKind::Relation`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RelOp {
+    /// `sum(lhs) == sum(rhs)`, modulo the relation's `tolerance`.
+    Eq,
+    /// `sum(lhs) <= sum(rhs)`.
+    Le,
+    /// `sum(lhs) < sum(rhs)`.
+    Lt,
+    /// `sum(lhs) >= sum(rhs)`.
+    Ge,
+    /// `sum(lhs) > sum(rhs)`.
+    Gt,
+}
+
+impl RelOp {
+    /// Evaluate the operator over two already-summed sides.
+    ///
+    /// `tolerance` is honored by `Eq` only; the ordering operators
+    /// ignore it so that a tolerance set for an equality relation
+    /// cannot silently loosen an inequality one.
+    pub fn holds(&self, lhs: u128, rhs: u128, tolerance: u64) -> bool {
+        match self {
+            RelOp::Eq => lhs.abs_diff(rhs) <= tolerance as u128,
+            RelOp::Le => lhs <= rhs,
+            RelOp::Lt => lhs < rhs,
+            RelOp::Ge => lhs >= rhs,
+            RelOp::Gt => lhs > rhs,
+        }
+    }
+
+    /// Infix symbol for violation messages.
+    pub fn symbol(&self) -> &'static str {
+        match self {
+            RelOp::Eq => "==",
+            RelOp::Le => "<=",
+            RelOp::Lt => "<",
+            RelOp::Ge => ">=",
+            RelOp::Gt => ">",
+        }
+    }
 }
 
 /// Direction for a `Monotonic` invariant.

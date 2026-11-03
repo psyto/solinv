@@ -17,13 +17,15 @@ use crucible_test_context::{fuzz_assert, TxOutcome};
 use solana_keypair::Keypair;
 use solana_signer::Signer;
 use solinv_fuzz::{
-    fingerprint_key, HasContext, HasInstructionSet, InstructionSpec,
-    MonotonicDir, StateInvariant, StateInvariantKind, TransitionObservation,
+    fingerprint_key, HasContext, HasInstructionSet, InstructionSpec, MonotonicDir, RelOp, RelTerm,
+    StateInvariant, StateInvariantKind, TransitionObservation,
 };
 
 use super::util::{
     read_field_widened, record_transition_fingerprint, restore_accounts, save_accounts,
+    warn_declaration_once,
 };
+use super::reachability::record_ix_reached;
 
 /// Check the fixture's instruction set for unchecked-math violations.
 ///
@@ -51,6 +53,7 @@ where
     let saves = save_accounts(fixture.ctx(), &pubkeys);
 
     let Some(pre) = read_image(fixture, spec, inv) else {
+        warn_unreadable(spec, inv, "pre-state");
         restore_accounts(fixture.ctx_mut(), saves);
         return;
     };
@@ -70,32 +73,92 @@ where
         .signers(&signer_refs)
         .send();
 
+    // A relation that was already false before the ix ran indicts the
+    // declaration or the fixture, not the instruction. Firing on it
+    // would attribute a pre-existing condition to whatever ix happened
+    // to execute next, so the detector stays silent — but says so,
+    // because a relation that never holds also never fires, and a
+    // permanently-silent invariant looks exactly like a passing one.
+    if relation_held_pre(&inv.kind, &pre) == Some(false) {
+        warn_declaration_once(
+            format!("relation-pre:{}:{}:{}", spec.program_id, spec.name, inv.name),
+            &format!(
+                "ix {} invariant '{}': relation does not hold in the pre-state \
+                 (lhs {}, rhs {}) — it cannot fire until the declaration or the \
+                 fixture's initial state is corrected",
+                spec.name,
+                inv.name,
+                pre.first().copied().unwrap_or_default(),
+                pre.get(1).copied().unwrap_or_default(),
+            ),
+        );
+    }
+
     let succeeded = matches!(result, Ok(TxOutcome::Success { .. }));
     if succeeded {
+        // Canonical ix accepted — the program's happy path ran. See
+        // `reachability` for why only untampered sends are recorded.
+        record_ix_reached(&spec.program_id, &spec.name);
         let fp = fingerprint_key(spec, TransitionObservation::default());
         let _is_new = record_transition_fingerprint(fp);
-        if let Some(post) = read_image(fixture, spec, inv) {
-            if let Some(detail) = check_kind(&inv.kind, &pre, &post) {
-                fuzz_assert!(
-                    false,
-                    "[unchecked-math:{}] ix {} violated state invariant '{}': {}",
-                    spec.program_id,
-                    spec.name,
-                    inv.name,
-                    detail,
-                );
+        match read_image(fixture, spec, inv) {
+            Some(post) => {
+                if let Some(detail) = check_kind(&inv.kind, &pre, &post) {
+                    fuzz_assert!(
+                        false,
+                        "[unchecked-math:{}] ix {} violated state invariant '{}': {}",
+                        spec.program_id,
+                        spec.name,
+                        inv.name,
+                        detail,
+                    );
+                }
             }
+            None => warn_unreadable(spec, inv, "post-state"),
         }
     }
 
     restore_accounts(fixture.ctx_mut(), saves);
 }
 
+/// Report a declared field the detector could not read.
+///
+/// Reaching this means the invariant contributed nothing to the
+/// campaign. See `warn_declaration_once` for why that must be loud.
+fn warn_unreadable(spec: &InstructionSpec, inv: &StateInvariant, phase: &str) {
+    warn_declaration_once(
+        format!(
+            "unreadable:{}:{}:{}:{}",
+            spec.program_id, spec.name, inv.name, phase
+        ),
+        &format!(
+            "ix {} invariant '{}': declared field(s) unreadable in {phase} — offset past \
+             the end of account data, an unsupported width, or a missing account. This \
+             invariant is checking nothing; a clean run is not evidence. Declaring the \
+             layout via solinv_fuzz::AccountSchema and calling validate_len() against \
+             real account data catches this at fixture-build time.",
+            spec.name, inv.name,
+        ),
+    );
+}
+
+/// Read the fields an invariant declares, as a flat value vector.
+///
+/// The three uniform kinds produce one value per declared account. A
+/// `Relation` instead produces exactly two — the summed left side and
+/// the summed right side — so the pre/post comparison flow above works
+/// unchanged for every kind.
 fn read_image<F>(fixture: &F, spec: &InstructionSpec, inv: &StateInvariant) -> Option<Vec<u128>>
 where
     F: HasContext,
 {
-    let (offset, size) = field_geom(&inv.kind);
+    if let StateInvariantKind::Relation { lhs, rhs, .. } = &inv.kind {
+        let l = sum_terms(fixture, spec, lhs)?;
+        let r = sum_terms(fixture, spec, rhs)?;
+        return Some(vec![l, r]);
+    }
+
+    let (offset, size) = field_geom(&inv.kind)?;
     let mut values = Vec::with_capacity(inv.accounts.len());
     for &acct_idx in &inv.accounts {
         let pk = spec.accounts.get(acct_idx)?.pubkey;
@@ -106,7 +169,38 @@ where
     Some(values)
 }
 
-fn field_geom(kind: &StateInvariantKind) -> (usize, usize) {
+/// Sum one side of a relation.
+///
+/// Returns `None` if any term is unreadable, or if the sum would
+/// exceed `u128` — a wrapped total would compare as a plausible value
+/// and defeat the relation it is supposed to establish.
+fn sum_terms<F>(fixture: &F, spec: &InstructionSpec, terms: &[RelTerm]) -> Option<u128>
+where
+    F: HasContext,
+{
+    let mut acc: u128 = 0;
+    for term in terms {
+        let v = match *term {
+            RelTerm::Const(c) => c,
+            RelTerm::Field {
+                account,
+                field_offset,
+                field_size,
+            } => {
+                let pk = spec.accounts.get(account)?.pubkey;
+                let acct = fixture.ctx().get_account(&pk).ok()?;
+                read_field_widened(&acct.data, field_offset, field_size)?
+            }
+        };
+        acc = acc.checked_add(v)?;
+    }
+    Some(acc)
+}
+
+/// Uniform `(offset, size)` for the three single-geometry kinds.
+/// `Relation` has no single geometry — its terms each carry their own
+/// — so it yields `None` and is read by [`sum_terms`] instead.
+fn field_geom(kind: &StateInvariantKind) -> Option<(usize, usize)> {
     match *kind {
         StateInvariantKind::SumConservation {
             field_offset,
@@ -122,7 +216,24 @@ fn field_geom(kind: &StateInvariantKind) -> (usize, usize) {
             field_offset,
             field_size,
             ..
-        } => (field_offset, field_size),
+        } => Some((field_offset, field_size)),
+        StateInvariantKind::Relation { .. } => None,
+    }
+}
+
+/// Whether a `Relation` held in the pre-state.
+///
+/// `None` for every other kind — they have no pre-condition gate.
+fn relation_held_pre(kind: &StateInvariantKind, pre: &[u128]) -> Option<bool> {
+    match kind {
+        StateInvariantKind::Relation {
+            op, tolerance, ..
+        } => {
+            let lhs = *pre.first()?;
+            let rhs = *pre.get(1)?;
+            Some(op.holds(lhs, rhs, *tolerance))
+        }
+        _ => None,
     }
 }
 
@@ -160,6 +271,40 @@ fn check_kind(kind: &StateInvariantKind, pre: &[u128], post: &[u128]) -> Option<
                 }
             }
             None
+        }
+        StateInvariantKind::Relation {
+            lhs,
+            op,
+            rhs,
+            tolerance,
+        } => {
+            // `pre`/`post` are [lhs_sum, rhs_sum] per `read_image`.
+            let (lp, rp) = (*pre.first()?, *pre.get(1)?);
+            let (lq, rq) = (*post.first()?, *post.get(1)?);
+
+            // Pre-gate: only an ix that *broke* the relation is a
+            // finding. See the caller for the diagnostic emitted when
+            // the relation was already false.
+            if !op.holds(lp, rp, *tolerance) {
+                return None;
+            }
+            if op.holds(lq, rq, *tolerance) {
+                return None;
+            }
+            let tol = if *op == RelOp::Eq && *tolerance != 0 {
+                format!(" (tolerance {tolerance})")
+            } else {
+                String::new()
+            };
+            Some(format!(
+                "relation broken: sum(lhs, {} terms) {} sum(rhs, {} terms){} held pre \
+                 ({lp} {} {rp}) but failed post ({lq} vs {rq})",
+                lhs.len(),
+                op.symbol(),
+                rhs.len(),
+                tol,
+                op.symbol(),
+            ))
         }
     }
 }
@@ -254,6 +399,85 @@ mod tests {
     fn bounded_fires_below_min() {
         let msg = check_kind(&bounded_kind(10, 1000), &[], &[5]).unwrap();
         assert!(msg.contains("out of bounds"));
+    }
+
+    fn rel_kind(op: RelOp, tolerance: u64) -> StateInvariantKind {
+        // Term geometry is irrelevant to `check_kind` — it consumes the
+        // already-summed [lhs, rhs] pair from `read_image`. Two terms
+        // on the left, one on the right, so the message reports a
+        // realistic shape.
+        StateInvariantKind::Relation {
+            lhs: vec![
+                RelTerm::Field {
+                    account: 0,
+                    field_offset: 0,
+                    field_size: 8,
+                },
+                RelTerm::Field {
+                    account: 1,
+                    field_offset: 0,
+                    field_size: 8,
+                },
+            ],
+            op,
+            rhs: vec![RelTerm::Field {
+                account: 2,
+                field_offset: 0,
+                field_size: 8,
+            }],
+            tolerance,
+        }
+    }
+
+    #[test]
+    fn relation_fires_when_an_ix_breaks_a_relation_that_held() {
+        // liquidity + borrowed == total, then the ix loses 10 units.
+        let msg = check_kind(&rel_kind(RelOp::Eq, 0), &[100, 100], &[90, 100]).unwrap();
+        assert!(msg.contains("relation broken"), "{msg}");
+        assert!(msg.contains("held pre"), "{msg}");
+    }
+
+    #[test]
+    fn relation_passes_when_it_still_holds() {
+        assert!(check_kind(&rel_kind(RelOp::Eq, 0), &[100, 100], &[150, 150]).is_none());
+    }
+
+    #[test]
+    fn relation_stays_silent_when_it_did_not_hold_pre() {
+        // Already broken before the ix: not this instruction's doing,
+        // so no violation. The caller emits a declaration diagnostic
+        // instead — see `relation_held_pre`.
+        assert!(check_kind(&rel_kind(RelOp::Eq, 0), &[90, 100], &[80, 100]).is_none());
+    }
+
+    #[test]
+    fn relation_honors_tolerance_on_eq_only() {
+        // Drift of 2 inside a tolerance of 2 is not a violation.
+        assert!(check_kind(&rel_kind(RelOp::Eq, 2), &[100, 100], &[98, 100]).is_none());
+        // Same drift with an ordering operator ignores tolerance.
+        let msg = check_kind(&rel_kind(RelOp::Ge, 0), &[100, 100], &[98, 100]).unwrap();
+        assert!(msg.contains("relation broken"), "{msg}");
+    }
+
+    #[test]
+    fn relation_catches_an_inequality_crossing() {
+        // sum(user deposits) <= vault balance, until it doesn't.
+        assert!(check_kind(&rel_kind(RelOp::Le, 0), &[50, 100], &[80, 100]).is_none());
+        let msg = check_kind(&rel_kind(RelOp::Le, 0), &[50, 100], &[101, 100]).unwrap();
+        assert!(msg.contains("<="), "{msg}");
+    }
+
+    #[test]
+    fn relation_held_pre_reports_only_for_relations() {
+        assert_eq!(relation_held_pre(&rel_kind(RelOp::Eq, 0), &[10, 10]), Some(true));
+        assert_eq!(relation_held_pre(&rel_kind(RelOp::Eq, 0), &[10, 20]), Some(false));
+        assert_eq!(relation_held_pre(&bounded_kind(0, 10), &[5]), None);
+    }
+
+    #[test]
+    fn field_geom_is_none_for_relation() {
+        assert_eq!(field_geom(&bounded_kind(0, 10)), Some((0, 8)));
+        assert!(field_geom(&rel_kind(RelOp::Eq, 0)).is_none());
     }
 
     #[test]

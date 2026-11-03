@@ -6,6 +6,10 @@ that ships Solana-specific bug-class detectors as auto-invariants, so
 audit firms and protocol teams don't have to hand-author every
 `fuzz_assert!` themselves.
 
+Have an Anchor program? Start with
+[`solinv idl target/idl/<program>.json`](#start-from-your-idl): no
+fixture, and it names the instructions to point the detectors at first.
+
 Apache-2.0 licensed. Sibling to
 [pinocchio-bench](https://github.com/psyto/pinocchio-bench) — the
 public CU-measurement leaderboard comparing Anchor vs Pinocchio
@@ -18,11 +22,12 @@ provide coverage-guided execution and snapshot infrastructure. They
 ask the user to declare what counts as a bug. Solinv ships that
 declaration as a library:
 
-1. **Pre-built Solana invariants — catalog 10/10** end-to-end against
-   planted bugs and clean against hardened production code:
-   **Critical 5** (signer-skip, owner-skip, discriminator-skip,
-   pda-forge, account-swap) + **High 5** (unchecked-math, cu-dos,
-   cpi-reentrancy, realloc-race, bump-seed-canonicalization). Each
+1. **Pre-built Solana invariants — 11 in the catalog**, each tested
+   end-to-end against planted bugs and clean against hardened
+   production code: **Critical 5** (signer-skip, owner-skip,
+   discriminator-skip, pda-forge, account-swap) + **High 6**
+   (unchecked-math, cu-dos, cpi-reentrancy, realloc-race,
+   bump-seed-canonicalization, precondition-skip). Each
    ships with a 10-section spec doc, Gate 1 planted-bug acceptance,
    and Gate 2 production-target calibration evidence.
 2. **Honest calibration data** — production code is mostly clean.
@@ -48,13 +53,28 @@ declaration as a library:
 6. **Disclosure templates** — Immunefi / Sherlock / direct-to-protocol
    markdown templates with field-by-field guidance + a worked example
    from solinv's own planted-bug detection.
-7. **Differential equivalence + checkable findings** — a three-surface
+7. **Field schemas + relation invariants** — state invariants name
+   `pool.total_deposits` instead of byte offset 40, and can assert
+   relations across accounts (`liquidity + borrowed == total`). A wrong
+   offset used to fail *silently*; it now fails at declaration time.
+   See [field schemas](#field-schemas--naming-fields-instead-of-counting-bytes).
+8. **Mutation testing** — `solinv-mutate` plants known Solana bug
+   classes in a program's source and measures which detectors kill
+   them, with a denominator that excludes mutants nothing ever reached.
+   See [mutation testing](#mutation-testing--measuring-detector-power-on-a-real-target).
+9. **Differential equivalence + checkable findings** — a three-surface
    oracle for "do these two programs behave the same?" (written state,
    accept/reject *and reason*, compute units), and a finding format that
    identifies every input by digest and states plainly whether it
    carries them. See
    [differential equivalence](#differential-equivalence--do-two-programs-behave-the-same)
    below.
+10. **Specs from an Anchor IDL** — `solinv-fuzz::idl` builds the
+    account-validation half of an `InstructionSpec` from the IDL plus
+    the fixture's post-setup state, and `solinv idl` maps a program's
+    unsigned writers before any fixture exists. Expectations the IDL
+    does not make are kept apart as *candidates*: leads to confirm,
+    not facts. See [start from your IDL](#start-from-your-idl).
 
 Engine performance is **not** the wedge — solinv runs on Crucible and
 inherits its sBPF coverage and libafl scheduling.
@@ -73,6 +93,7 @@ inherits its sBPF coverage and libafl scheduling.
 | discriminator-skip | none | total |
 | pda-forge | none at read-time (runtime checks `invoke_signed` only) | total |
 | account-swap | none | total |
+| precondition-skip | none | total (the runtime has no notion of a protocol's entry conditions) |
 
 The scale anchors solinv's value-add: detectors target precisely the
 layer Solana's runtime doesn't own, where the protocol's
@@ -240,7 +261,201 @@ divergence, and `SOLINV_REPORT_INLINE=1` carries the program bytes and
 account pre-state rather than only naming them. The other five
 harnesses still leave a finding as a log line.
 
-## Quickstart — escrow-demo (catalog 10/10)
+## Field schemas — naming fields instead of counting bytes
+
+A state invariant reads a little-endian integer at a byte offset.
+Declaring that offset by hand is the most error-prone part of adopting
+solinv, and it fails in the worst possible way: **silently**. The
+detector reads eight bytes belonging to some other field, they move
+plausibly, nothing fires, and the campaign reports a clean run. A
+harness checking the wrong bytes is indistinguishable from one that
+found no bug — which matters more here than elsewhere, because solinv's
+headline result *is* a null result.
+
+`AccountSchema` moves the layout into a single checkable declaration:
+
+```rust
+let pool = AccountSchema::anchor("Pool")   // cursor starts past the 8-byte disc
+    .field("authority", 32)                // declared for its offset only
+    .field("total_deposits", 8)
+    .field("total_borrows", 8);
+
+pool.validate_len(account.data.len())?;    // check the claim against reality
+
+let inv = pool.monotonic(
+    "deposits grow", vec![0], "total_deposits", MonotonicDir::NonDecreasing,
+)?;
+```
+
+| Mistake | Before | After |
+|---|---|---|
+| Offset off by one field | silent wrong read | `UnknownField`, listing the real names |
+| Asserting on a 32-byte pubkey | silent truncation | `UnreadableWidth` |
+| Layout drifted from the program | silent wrong read | `ShortAccount` from `validate_len` |
+
+`StateInvariantKind::Relation` adds the shape the other three kinds
+cannot express — two sides, each a sum of terms, compared with `==`,
+`<=`, `<`, `>=` or `>`:
+
+```rust
+relation(
+    "liquidity + borrowed == total",
+    vec![reserve.term(0, "liquidity")?, reserve.term(0, "borrowed")?],
+    RelOp::Eq,
+    vec![reserve.term(0, "total")?],
+    0,
+)?
+```
+
+A relation fires only when it **held before the ix and failed after**:
+one that was already false indicts the declaration, not the
+instruction. Because a relation that never holds also never fires, that
+case is *reported* rather than dropped — as are unreadable fields, once
+per site, un-gated by any env var. A harness that is silently checking
+nothing has to say so by default.
+
+The grammar stays deliberately closed (integers plus an operator), so a
+candidate invariant can be validated before it ever executes. Ratios
+are not expressible in v1; that is a stated limit, not an oversight.
+Design rationale: [`docs/invariants/field-schema.md`](docs/invariants/field-schema.md).
+
+## Mutation testing — measuring detector power on a real target
+
+`solinv-mutate` plants a known bug class in a program's source, runs
+the catalog against it, and records whether the detector that was
+supposed to catch it did. **It does not find bugs** — every bug in a
+campaign is one the tool planted, and nothing it produces is
+submittable anywhere.
+
+What it produces is the missing half of the calibration argument. The
+sensitivity claim behind "0 violations on production code" currently
+rests on `examples/escrow-demo`, and escrow-demo is not Raydium. A
+silent run is evidence only if the same harness on that same program
+demonstrably kills planted bugs.
+
+The denominator is the design:
+
+```
+score = killed / (killed + survived)      # reached mutants only
+```
+
+`not_reached` and `build_failed` are excluded and reported next to the
+headline, never folded in. solinv already measured why this matters
+from the other direction — `bump-seed-canonicalization` detects its
+planted bug at ~2% because reachability, not sensitivity, sets the
+rate. Two consequences: a campaign that reached nothing has **no**
+score rather than 0%, and a run below its committed `min_reached`
+reports `INCONCLUSIVE` rather than FAIL.
+
+Identifying unreached mutants needs evidence, since a silent run and an
+unasked detector look identical. Plans record each mutant's
+`enclosing_fn`; the fixture's `action_*` methods emit
+`[solinv][reached] ix=<name>` under `SOLINV_REACHABILITY=1` when a
+canonical instruction lands; the campaign script joins them. The join is
+sound in one direction only — an instruction that never ran proves the
+mutation never ran, but an instruction that ran does not prove the
+mutated *branch* did — so every ambiguity resolves to `survived`,
+erring against the detector.
+
+Three findings shaped the runner, each of them a wrong number it
+produced first:
+
+- **A run with no evidence is `harness_error`, not `survived`.** The
+  first campaign scored 0.0% over 17 reached mutants; `crucible` had
+  in fact exited immediately every time, and an empty log has no
+  violations in it. A baseline build-and-run now gates the campaign.
+- **A kill has to be caused by the mutation.** The next campaign
+  scored 17 of 17, gate PASS — with 0 killed by the predicted
+  invariant. The unmutated program was already producing 7202
+  violations. The runner now measures the baseline's detector set and
+  subtracts it.
+- **The target has to be correct before you mutate it.** Which is why
+  `escrow-clean` exists: escrow with the timelock fixed and every
+  `unsafe_*` handler removed, verified to produce no violations at all
+  before mutation.
+
+```bash
+solinv mutate operators                    # 9 operators, 6 of 10 invariants
+solinv mutate plan --target escrow-clean \
+  --src examples/escrow-demo/programs/escrow-clean/src/lib.rs \
+  --out plan.json --statement "..." --min-score 0.8 --min-reached 8
+./scripts/run_mutation_campaign.sh plan.json \
+  examples/escrow-demo/programs/escrow-clean/Cargo.toml \
+  escrow_clean examples/escrow-demo results.json
+solinv mutate score --plan plan.json --results results.json
+```
+
+The kill criterion is committed at `plan` time, before any mutant runs
+— the §9 pre-commit discipline applied to the campaign itself.
+
+**Campaigns on escrow-clean**, before and after the invariant the
+first one located:
+
+| Run | Raw | After exclusions | Gate |
+|---|---|---|---|
+| Before `precondition-skip` | 18.2% (2/11) | 28.6% (2/7) | INCONCLUSIVE |
+| After | 45.5% (5/11) | **83.3% (5/6)** | PASS |
+
+Every kill in both runs was by the invariant its operator predicted.
+Read the PASS sceptically: it rests on six mutants, and `min_reached`
+was set to 6 after the first run had shown how many exclusions to
+expect — choosing the bar with that knowledge is what §9 pre-commitment
+exists to prevent. This is calibration of the instrument, not a
+detector clearing a gate.
+
+The first run's nine survivors are what made it worth running. Four
+were equivalent mutants — an Anchor `Signer` constraint is redundant on
+a handler whose body invokes a CPI that requires the signature anyway,
+and the same mutation *is* killed on the two handlers that move
+lamports directly. The other five were `require!` guards on timelocks
+and amount bounds, which **no invariant in the catalog modelled**. That
+bucket became [`precondition-skip`](docs/invariants/precondition-skip.md),
+the eleventh invariant — the first solinv located with its own tooling
+rather than taking from a write-up. Three of the five now die,
+including the timelock race `escrow-demo` plants as its flagship bug,
+which until now read as detected only because that harness carries a
+hand-written assertion.
+
+One honest survivor remains: `deposit`'s `amount > 0`. The guard is
+real and the mutation removes it, but the detector sends a fixed
+`data_sample` and never varies the argument to zero. That is a
+reachability limit, not a blind spot, and the distinction decides what
+work would fix it.
+
+**First campaign on production code — raydium-amm:** 21 mutants inside
+the two swap handlers, baseline silent. **0 killed of 18 reached —
+FAIL, conclusively.** Three causes, and only one of them is a blind
+spot:
+
+- **The operator set was Anchor-only.** raydium-amm has zero
+  `require!` and zero `Signer<'info>`; its 212 error returns are all
+  `if cond { return Err(..) }`. The catalog could not mutate a native
+  program at all, so every score before this one measured Anchor code
+  specifically. `native-guard-neutralize` fixes that — 129 matches in
+  raydium's processor.rs.
+- **Most survivors are guards the invariant cannot express.**
+  `precondition-skip` compares pre-state values; a production AMM
+  guards on *computed intermediates* (`swap_amount_out <
+  minimum_amount_out`), which no pre-state declaration can name. Real
+  limit of the design, invisible on a four-handler escrow.
+- **The campaign was mis-specified.** 15 of 18 mutants predicted
+  `precondition-skip` and the raydium harness declares no guards — the
+  detector was switched off on the target it was being scored against.
+
+One finding replicated: neutralizing raydium's `!is_signer` check opens
+nothing, because that account is the authority of the `token_transfer`
+CPI. Same redundancy as escrow-clean's `deposit`, found independently
+on production code.
+
+v1 operators reach 7 of the 11 catalog invariants; `cu-dos`,
+`cpi-reentrancy`, `realloc-race` and `account-swap` need structural
+rather than textual mutation and are named in every campaign summary so
+a score is never mistaken for a verdict on all ten. This campaign
+exercised two of them — a four-handler escrow does not contain the
+shapes the rest detect. Design note:
+[`docs/mutation-testing.md`](docs/mutation-testing.md).
+
+## Quickstart — escrow-demo
 
 ```bash
 # Install Crucible CLI (one-time)
@@ -251,6 +466,12 @@ cargo install --path ~/src/crucible/crates/crucible-fuzz-cli
 # + the Critical-5 acceptance fixture)
 cd examples/escrow-demo
 cargo build-sbf --tools-version v1.52 --manifest-path programs/escrow/Cargo.toml
+
+# And the clean twin, which mutation campaigns target. It must produce
+# NO violations before mutation — that is the property being relied on.
+cargo build-sbf --tools-version v1.52 \
+  --manifest-path programs/escrow-clean/Cargo.toml
+crucible run escrow_clean invariant_all --release --timeout 30
 
 # Run each invariant in isolation
 for inv in signer_skip owner_skip discriminator_skip pda_forge account_swap \
@@ -289,7 +510,7 @@ the empirical backbone of solinv's "honest tested-and-found-nothing"
 framing. Full per-Gate methodology in
 [`docs/phase5-day60-bump-seed-canonicalization-gates.md`](docs/phase5-day60-bump-seed-canonicalization-gates.md).
 
-## Invariant catalog (10/10 complete)
+## Invariant catalog (11 invariants)
 
 The catalog targets Solana's distinctive account model and
 runtime-specific bug surfaces.
@@ -306,6 +527,14 @@ runtime-specific bug surfaces.
 | 8 | High | cpi-reentrancy | CPI cycle through caller program → state-coherence break (Mango v3 class) | [`docs/invariants/cpi-reentrancy.md`](docs/invariants/cpi-reentrancy.md) |
 | 9 | High | realloc-race | data buffer grown past rent-exempt threshold without lamport top-up | [`docs/invariants/realloc-race.md`](docs/invariants/realloc-race.md) |
 | 10 | High | bump-seed-canonicalization | non-canonical PDA bump accepted; alt-PDA substitution attack | [`docs/invariants/bump-seed-canonicalization.md`](docs/invariants/bump-seed-canonicalization.md) |
+| 11 | High | precondition-skip | ix succeeds while a declared entry guard was false — dropped timelock or bound | [`docs/invariants/precondition-skip.md`](docs/invariants/precondition-skip.md) |
+
+Invariant 11 was located by a mutation campaign rather than proposed:
+five survivors on `escrow-clean` were dropped `require!` guards that
+nothing in the catalog modelled, one of which reproduces the timelock
+race `escrow-demo` plants as its flagship bug — a bug that read as
+"detected" only because that harness carries a hand-written assertion.
+See [mutation testing](#mutation-testing--measuring-detector-power-on-a-real-target).
 
 Medium tier (roadmap, not yet specced): close-reopen,
 sysvar-manipulation, permissionless-misuse, rent-exemption,
@@ -370,14 +599,21 @@ solinv/
 │   ├── solinv-core/       # 7 implemented invariants + regression tests
 │   ├── solinv-fuzz/       # Crucible re-exports + HasContext/HasInstructionSet traits
 │   │                      #   + bytepoke + differential equivalence oracle
+│   │                      #   + AccountSchema (named fields) + Relation
+│   │                      #   + idl (Anchor IDL → InstructionSpec, candidates)
+│   ├── solinv-mutate/     # Mutation operators, campaign planning, and
+│   │                      #   reachability-aware scoring (serde+regex only,
+│   │                      #   no Crucible/Solana)
 │   ├── solinv-cheat/      # LiteSVM cheatcode wrappers
 │   ├── solinv-corpus/     # Yellowstone gRPC seeder (scaffold)
 │   ├── solinv-disclose/   # Divergence findings as checkable evidence
 │   │                      #   (serde+sha2 only, no Crucible/Solana);
 │   │                      #   platform formatters pending
-│   └── solinv-cli/        # `solinv` binary — score, init, check, fuzz, corpus, disclose
+│   └── solinv-cli/        # `solinv` binary — idl, mutate, score (+ scaffolds:
+│                          #   init, check, fuzz, corpus, disclose)
 ├── examples/
 │   ├── escrow-demo/             # planted-bug acceptance fixture (7 invariants)
+│   │   └── idl/                 # IDLs of both programs, for `--features idl_specs`
 │   ├── raydium-amm-fuzz/        # Native production AMM (validated clean)
 │   ├── slumlord-fuzz/           # Native flash-loan (validated clean)
 │   ├── klend-fuzz/              # Anchor 0.29 (depth-gated, unblocks after fork)
@@ -386,18 +622,98 @@ solinv/
 │   └── target-scoring.example.toml  # config schema reference
 ├── docs/
 │   ├── invariants/                  # per-invariant 8-section specs
+│   │   └── field-schema.md          # named fields + relation invariants
+│   ├── idl-specs.md                 # IDL → spec: facts vs candidates, limits
+│   ├── mutation-testing.md          # operator catalog + scoring rationale
 │   ├── differential-equivalence.md  # oracle rationale + report format
 │   ├── disclosure-template-*.md     # Immunefi / Sherlock / generic templates
 │   ├── research-*.md                # research deliverables
 │   ├── harness-pattern-raw-call.md  # reusable Anchor-version-independent harness
 │   └── (implementation logs)        # Day-by-day audit trail of engineering decisions
-├── scripts/                         # bandit allocation + metrics aggregation
+├── scripts/                         # bandit allocation, metrics, mutation campaigns,
+│                                    #   idl-specs-parity.sh (hand vs IDL specs)
 └── logs/                            # per-campaign fuzz logs (gitignored)
 ```
 
+## Start from your IDL
+
+```bash
+anchor build                                   # writes target/idl/<program>.json
+solinv idl target/idl/my_program.json          # where to point the Critical 5
+solinv idl target/idl/my_program.json --rust deposit   # binding stub for one ix
+```
+
+Reads the Anchor 0.30+ IDL format. A legacy (pre-0.30) IDL is rejected
+with the fix: convert it with
+`anchor idl convert <path> -p <program id> -o <out>` (`-p` is needed
+when the IDL has no `metadata.address`; klend's does not). Shank IDLs
+from native programs are not supported. `solinv idl` needs no fixture. It lists every
+instruction's slots as the IDL declares them and names the instructions
+with **no signer that write a slot the IDL leaves unconstrained** —
+either deliberately permissionless, or missing an authority check. On
+escrow-demo's planted program those are exactly its three planted
+account-validation bugs.
+
+In the fixture, the stub becomes the spec:
+
+```rust
+let spec = idl.spec("deposit", program_id)?
+    .account("vault", vault_pda)
+    .signer("depositor", Arc::clone(&depositor))
+    .args(&50_000u64.to_le_bytes())
+    .build()?
+    .infer_from_state(|pk| ctx.get_account(pk).ok())   // after setup()
+    .infer_candidates(|pk| ctx.get_account(pk).ok())
+    .into_spec();
+```
+
+The IDL supplies the account list, signers, PDA seeds and instruction
+data. `infer_from_state` adds facts: owner and discriminator of each
+seeded slot, and which seeded accounts the instruction creates.
+
+That alone finds nothing on Anchor. What the IDL declares, Anchor
+already enforces (`signer: true` is a `Signer<'info>`, `pda.seeds` is a
+`seeds = [...]` constraint), so the spec only asks the program to
+honour checks its own macros generated. Bugs live where the IDL is
+silent. `infer_candidates` proposes checks for those slots from what
+the fixture put there — a program-owned account with an IDL
+discriminator (owner + discriminator); a seed pattern from elsewhere in
+the IDL that re-derives the slot's address (pda seeds); on an
+instruction with no signer that writes program state, a slot whose
+pubkey that state stores (signer) — and lists each in
+`IdlSpec::candidates()`.
+
+**Candidates are leads, not facts.** They describe what the fixture
+passed, not what the instruction must require: a correct permissionless
+crank that pays a stored `beneficiary` matches the signer rule. Confirm
+a finding on a candidate slot against the program's intent before
+reporting it. Findings do not carry that provenance themselves, so log
+`IdlSpec::candidate_log()` when building the spec (the escrow-demo
+harnesses do): a finding whose instruction and account index match a
+`[SOLINV_CANDIDATES]` line is a lead. Account-data seeds, seeds under
+another program, non-8-byte discriminators, and seed patterns that
+could not be evaluated for a typed slot are listed in
+`IdlSpec::unresolved()`.
+
+Still hand-written: `swap_alternates`, state invariants and guards —
+semantic, not in any IDL. Composite accounts are named by dotted path
+(`"group_a.authority"`), or by leaf name when it is unique.
+
+`scripts/idl-specs-parity.sh` runs escrow-demo's detectors with the
+hand-written specs and with `--features idl_specs`, and exits non-zero
+unless every planted row matches across modes and the clean twin
+reports nothing. Last run (seed 1,
+20 s per planted run, 60 s clean): the same detector fired on the same
+instruction in both modes for all five of the Critical 5, and the clean
+twin stayed at 0 under `invariant_all`.
+
 ## Integration — adopting solinv on your own program
 
-Implement two traits on a fixture that already works under Crucible:
+Implement two traits on a fixture that already works under Crucible.
+For an Anchor program, build the `InstructionSpec`s from the IDL
+([start from your IDL](#start-from-your-idl)) and hand-write only the
+semantic fields; the full literal below is what that fills in, and is
+still the route for native and Pinocchio programs:
 
 ```rust
 use solinv_fuzz::{HasContext, HasInstructionSet, InstructionSpec};
@@ -509,23 +825,31 @@ thing" drift after a negative result.
 
 ```bash
 cargo check --workspace               # verify scaffold (~5s)
-cargo test  --workspace               # all crates (155 tests)
+cargo test  --workspace               # all crates (252 tests)
 cargo test  -p solinv-core            # invariant regression tests
-cargo test  -p solinv-fuzz            # bytepoke + differential oracle
+cargo test  -p solinv-fuzz            # bytepoke + differential oracle + schema + idl
+cargo test  -p solinv-mutate          # operators + mutants + scoring (no Solana deps)
 cargo test  -p solinv-disclose        # divergence reports (no Solana deps)
 cargo build --release                 # build CLI binary
 ./target/release/solinv --help
+./scripts/idl-specs-parity.sh         # needs crucible + escrow-demo .so files
 ```
 
 CLI surface:
 
 ```
-solinv init                                  # scaffold a solinv harness
+solinv idl <idl.json>                        # account-validation map + unsigned writers
+solinv idl <idl.json> --rust <ix|all>        # SpecBuilder stub to paste into a fixture
+solinv init                                  # scaffold a solinv harness (not yet implemented)
 solinv check <target>                        # run invariant checks
 solinv fuzz <target>                         # run coverage-guided fuzzer
 solinv score --config targets.toml           # rank targets by ROI proxy score
 solinv corpus fetch --rpc URL --program-id   # ingest mainnet corpus (scaffold)
 solinv disclose <bug-id>                     # generate disclosure report (scaffold)
+solinv mutate operators                      # list the mutation operator catalog
+solinv mutate plan --target T --src F ...    # plan a campaign + commit its kill criterion
+solinv mutate apply --plan P --mutant ID     # write one mutant's patched source
+solinv mutate score --plan P --results R     # score a completed campaign
 ```
 
 ## Contributing

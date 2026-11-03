@@ -658,6 +658,7 @@ impl EscrowCleanFixture {
             .build()
             .unwrap()
             .infer_from_state(|pk| self.ctx.get_account(pk).ok())
+            .infer_candidates(|pk| self.ctx.get_account(pk).ok())
             .into_spec();
         cache.insert(ix.to_string(), spec.clone());
         spec

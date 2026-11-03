@@ -3,7 +3,8 @@
 //! Hand-filling an `InstructionSpec` is the slowest step of adopting
 //! solinv: fourteen fields per instruction, most of which the program
 //! has already declared once in its `#[derive(Accounts)]` structs. The
-//! Anchor IDL (0.30+ format, with PDA resolution on) carries most of it:
+//! Anchor IDL (0.30+ format, with PDA resolution on; legacy IDLs without
+//! discriminators are rejected) carries most of it:
 //!
 //! | spec field                | source                                   |
 //! |---------------------------|------------------------------------------|
@@ -11,41 +12,45 @@
 //! | `signer_indices`          | IDL `signer`                             |
 //! | `expected_pda_seeds`      | IDL `pda.seeds` (const / account / arg)  |
 //! | `data_sample`             | IDL discriminator + caller's arg bytes   |
-//! | `expected_owners`         | runtime: owner == program, known disc    |
-//! | `expected_discriminators` | runtime: data starts with an IDL disc    |
-//! | `creates_indices`         | runtime: account absent before the send  |
+//! | `expected_owners`         | state, on slots with IDL seeds           |
+//! | `expected_discriminators` | state, on slots with IDL seeds           |
+//! | `creates_indices`         | state: seeded account absent pre-send    |
 //!
 //! The last three are not in the instruction's IDL entry (it names
-//! accounts, not their types), so they are read off the fixture's state
-//! after `setup()` with [`IdlSpec::infer_from_state`]. An account owned
-//! by the program whose data starts with a discriminator the IDL
-//! declares is a typed `Account<'info, T>` in every Anchor program; that
-//! is what the owner and discriminator detectors attack.
+//! accounts, not their types), so [`IdlSpec::infer_from_state`] reads
+//! them off the fixture after `setup()`. A seeded slot pins one address,
+//! so the account found there is the account the instruction expects.
 //!
-//! ## Why the state pass matters more than the IDL pass
+//! ## Candidates: where the bugs are
 //!
 //! What the IDL declares, Anchor enforces: `signer: true` comes from a
 //! `Signer<'info>`, `pda.seeds` from a `seeds = [...]` constraint. A spec
 //! built from the IDL alone asks the program to honour checks its own
 //! macros already generated, and on Anchor it finds nothing. The bugs
-//! live where the IDL is *silent* — an `UncheckedAccount` slot. So the
-//! state pass also adds expectations the IDL does not make, each one
-//! backed by evidence, and lists them in [`IdlSpec::inferred`]:
+//! live where the IDL is *silent* — typically an `UncheckedAccount`.
+//!
+//! [`IdlSpec::infer_candidates`] adds expectations for those slots from
+//! what the fixture put there, and lists each in [`IdlSpec::candidates`]:
 //!
 //! - **owner / discriminator** — the slot holds a program-owned account
-//!   carrying an IDL discriminator, whatever the IDL calls the slot.
-//! - **pda seeds** — a seed pattern the IDL declares on another
-//!   instruction re-derives this slot's exact address. Matching a
-//!   32-byte address is proof, not a guess.
-//! - **signer** — the instruction has no signer at all, writes a
-//!   program-owned account, and that account's data stores this slot's
-//!   pubkey: the stored key is the only candidate authority. Needs the
-//!   slot's keypair bound with [`SpecBuilder::signer`].
+//!   carrying an IDL discriminator.
+//! - **pda seeds** — a seed pattern the IDL declares elsewhere re-derives
+//!   the slot's exact address.
+//! - **signer** — the instruction has no signer, writes a program-owned
+//!   account, and that account's data contains the slot's pubkey.
 //!
-//! What the IDL cannot supply stays empty and is listed in
+//! These are hypotheses about intent, not facts. The evidence shows what
+//! the fixture passed, not what the instruction must require: a
+//! permissionless crank that pays a stored `beneficiary` matches the
+//! signer rule and is correct. A finding on a candidate slot is a lead
+//! to confirm against the program's intent, which is why the two passes
+//! are separate and the candidates are listed.
+//!
+//! What neither pass can supply stays empty and is listed in
 //! [`IdlSpec::unresolved`]: `swap_alternates` (a semantic relation, see
 //! the `HasInstructionSet` docs), seeds that read another account's
-//! data, and seeds derived under a different program.
+//! data, seeds derived under a different program, discriminators that
+//! are not 8 bytes long.
 //!
 //! ```ignore
 //! let idl = Idl::from_json(include_str!("../idl/escrow.json"))?;
@@ -56,6 +61,7 @@
 //!     .args(&50_000u64.to_le_bytes())
 //!     .build()?
 //!     .infer_from_state(|pk| ctx.get_account(pk).ok())
+//!     .infer_candidates(|pk| ctx.get_account(pk).ok())
 //!     .into_spec();
 //! ```
 
@@ -101,6 +107,7 @@ pub struct IdlArg {
 #[derive(Clone, Debug, Deserialize)]
 pub struct IdlAccountType {
     pub name: String,
+    /// 8 bytes by default; any length since Anchor 0.31.
     pub discriminator: Vec<u8>,
 }
 
@@ -143,9 +150,28 @@ pub struct IdlPda {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum IdlSeed {
-    Const { value: Vec<u8> },
-    Account { path: String },
-    Arg { path: String },
+    Const {
+        value: Vec<u8>,
+    },
+    /// `path` names an account (`"authority"`), or a field of one
+    /// (`"vault.authority"`, with `account` naming its type).
+    Account {
+        path: String,
+        #[serde(default)]
+        account: Option<String>,
+    },
+    Arg {
+        path: String,
+    },
+}
+
+/// One slot of a flattened account list. `path` is dotted for accounts
+/// inside a composite (`"group_a.authority"`).
+#[derive(Clone, Debug)]
+pub struct FlatAccount<'a> {
+    pub account: &'a IdlAccount,
+    /// Path of the enclosing composite, `""` at top level.
+    prefix: String,
 }
 
 #[derive(Debug)]
@@ -162,7 +188,10 @@ pub enum IdlError {
 impl fmt::Display for IdlError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            IdlError::Parse(e) => write!(f, "IDL does not parse: {e}"),
+            IdlError::Parse(e) => write!(
+                f,
+                "IDL does not parse (solinv reads the Anchor 0.30+ format): {e}"
+            ),
             IdlError::UnknownInstruction(n) => write!(f, "IDL has no instruction `{n}`"),
             IdlError::MissingAccounts { ix, names } => {
                 write!(f, "`{ix}`: bind these accounts with .account(): {}", names.join(", "))
@@ -199,7 +228,7 @@ impl Idl {
         let mut out = format!(
             "program {} — {} instructions, account types: {}\n\n\
              S signer  W writable  P pda seeds  A fixed address  \
-             · nothing declared (state pass decides)\n",
+             · nothing declared\n",
             if self.address.is_empty() { "(no address)" } else { &self.address },
             self.instructions.len(),
             if types.is_empty() { "none".into() } else { types.join(", ") },
@@ -208,7 +237,7 @@ impl Idl {
             .instructions
             .iter()
             .flat_map(|ix| ix.flat_accounts())
-            .map(|a| a.name.len())
+            .map(|a| a.path().len())
             .max()
             .unwrap_or(0);
         let mut unsigned = Vec::new();
@@ -221,7 +250,8 @@ impl Idl {
                 ""
             };
             out += &format!("\n{}{}\n", ix.name, flag);
-            for (i, a) in ix.flat_accounts().iter().enumerate() {
+            for (i, flat) in ix.flat_accounts().iter().enumerate() {
+                let a = flat.account;
                 let marks: String = [
                     (a.signer, 'S'),
                     (a.writable, 'W'),
@@ -237,19 +267,21 @@ impl Idl {
                 } else {
                     ""
                 };
-                out += &format!("  {i:>2} {:<width$}  {marks}{quiet}\n", a.name);
+                out += &format!("  {i:>2} {:<width$}  {marks}{quiet}\n", flat.path());
             }
         }
         out += &format!(
-            "\n{silent} slots declare nothing in the IDL; owner, discriminator and \
-             seeds for them come from state (`infer_from_state`).\n"
+            "\n{silent} slots declare nothing in the IDL. Anchor enforces what the IDL \
+             declares, so these are where the Critical 5 can find something; \
+             `infer_candidates` proposes checks for them from fixture state.\n"
         );
         if unsigned.is_empty() {
             out += "Every instruction that writes an unconstrained slot has a signer.\n";
         } else {
             out += &format!(
                 "{} instruction(s) with no signer write an unconstrained slot: {}\n\
-                 Start there — signer-skip needs the stored authority's keypair bound.\n",
+                 Start there: either they are meant to be permissionless, or an \
+                 authority check is missing.\n",
                 unsigned.len(),
                 unsigned.join(", ")
             );
@@ -282,29 +314,43 @@ impl Idl {
     }
 
     /// Discriminators of every account type the IDL declares.
-    pub fn account_discriminators(&self) -> Vec<[u8; 8]> {
-        self.accounts
-            .iter()
-            .filter_map(|a| a.discriminator.as_slice().try_into().ok())
-            .collect()
+    pub fn account_discriminators(&self) -> Vec<Vec<u8>> {
+        self.accounts.iter().map(|a| a.discriminator.clone()).collect()
     }
 }
 
 impl IdlAccount {
     /// Nothing in the IDL constrains this slot: not a signer, no seeds,
     /// no fixed address. Either an `UncheckedAccount` or a typed account
-    /// without seeds — the IDL cannot tell which, the state pass can.
+    /// without seeds; the IDL cannot tell which.
     pub fn is_silent(&self) -> bool {
         !self.signer && self.pda.is_none() && self.address.is_none()
     }
 }
 
+impl FlatAccount<'_> {
+    /// Dotted path from the instruction's account struct.
+    pub fn path(&self) -> String {
+        if self.prefix.is_empty() {
+            self.account.name.clone()
+        } else {
+            format!("{}.{}", self.prefix, self.account.name)
+        }
+    }
+
+    fn prefix(&self) -> &str {
+        &self.prefix
+    }
+}
+
 impl IdlInstruction {
     /// No signer at all, and at least one writable slot the IDL leaves
-    /// unconstrained. The shape of a missing authority check.
+    /// unconstrained. The shape of a missing authority check — or of a
+    /// deliberately permissionless instruction.
     pub fn is_unsigned_writer(&self) -> bool {
         let flat = self.flat_accounts();
-        !flat.iter().any(|a| a.signer) && flat.iter().any(|a| a.writable && a.is_silent())
+        !flat.iter().any(|a| a.account.signer)
+            && flat.iter().any(|a| a.account.writable && a.account.is_silent())
     }
 
     /// A `SpecBuilder` call chain for this instruction with every binding
@@ -312,21 +358,24 @@ impl IdlInstruction {
     pub fn rust_bindings(&self) -> String {
         let mut out = format!("idl.spec(\"{}\", program_id)?\n", self.name);
         let unsigned = self.is_unsigned_writer();
-        for a in self.flat_accounts() {
+        for flat in self.flat_accounts() {
+            let (a, path) = (flat.account, flat.path());
             if a.address.is_some() {
                 continue;
             }
+            let optional = if a.optional { " (optional: omit to leave it out)" } else { "" };
             if a.signer {
-                out += &format!("    .signer(\"{0}\", todo!(\"{0}: Arc<Keypair>\"))\n", a.name);
+                out += &format!(
+                    "    .signer(\"{path}\", todo!(\"{path}: Arc<Keypair>{optional}\"))\n"
+                );
             } else if unsigned && a.is_silent() {
                 out += &format!(
-                    "    // no signer on this ix: binding {0}'s keypair with .signer() lets\n    \
-                     // the state pass test it as the authority\n    \
-                     .account(\"{0}\", todo!(\"{0}: Pubkey\"))\n",
-                    a.name
+                    "    // no signer on this ix: binding {path}'s keypair with .signer()\n    \
+                     // lets infer_candidates test it as the authority\n    \
+                     .account(\"{path}\", todo!(\"{path}: Pubkey{optional}\"))\n"
                 );
             } else {
-                out += &format!("    .account(\"{0}\", todo!(\"{0}: Pubkey\"))\n", a.name);
+                out += &format!("    .account(\"{path}\", todo!(\"{path}: Pubkey{optional}\"))\n");
             }
         }
         if !self.args.is_empty() {
@@ -334,29 +383,72 @@ impl IdlInstruction {
                 self.args.iter().map(|a| format!("{}: {}", a.name, compact(&a.ty))).collect();
             out += &format!("    .args(&todo!(\"borsh: {}\"))\n", args.join(", "));
         }
-        out += "    .build()?\n    .infer_from_state(|pk| ctx.get_account(pk).ok())\n";
+        out += "    .build()?\n    \
+                .infer_from_state(|pk| ctx.get_account(pk).ok())\n    \
+                // leads, not facts: confirm each finding on a listed candidate\n    \
+                .infer_candidates(|pk| ctx.get_account(pk).ok())\n";
         out
     }
 
     /// The instruction's accounts in wire order, composites flattened.
-    pub fn flat_accounts(&self) -> Vec<&IdlAccount> {
-        fn walk<'a>(items: &'a [IdlAccountItem], out: &mut Vec<&'a IdlAccount>) {
+    pub fn flat_accounts(&self) -> Vec<FlatAccount<'_>> {
+        fn walk<'a>(
+            items: &'a [IdlAccountItem],
+            prefix: &mut Vec<&'a str>,
+            out: &mut Vec<(Vec<&'a str>, &'a IdlAccount)>,
+        ) {
             for item in items {
                 match item {
-                    IdlAccountItem::Single(a) => out.push(a),
-                    IdlAccountItem::Composite { accounts, .. } => walk(accounts, out),
+                    IdlAccountItem::Single(a) => out.push((prefix.clone(), a)),
+                    IdlAccountItem::Composite { name, accounts } => {
+                        prefix.push(name);
+                        walk(accounts, prefix, out);
+                        prefix.pop();
+                    }
                 }
             }
         }
-        let mut out = Vec::new();
-        walk(&self.accounts, &mut out);
-        out
+        let mut raw = Vec::new();
+        walk(&self.accounts, &mut Vec::new(), &mut raw);
+        raw.into_iter()
+            .map(|(prefix, account)| FlatAccount { account, prefix: prefix.join(".") })
+            .collect()
     }
 }
 
+/// Find the slot a name refers to: the exact dotted path, else a leaf
+/// name that is unique in the instruction.
+fn slot_of(paths: &[String], name: &str) -> Option<usize> {
+    if let Some(i) = paths.iter().position(|p| p == name) {
+        return Some(i);
+    }
+    let mut leaf = paths
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| p.rsplit('.').next() == Some(name));
+    match (leaf.next(), leaf.next()) {
+        (Some((i, _)), None) => Some(i),
+        _ => None,
+    }
+}
+
+/// Resolve an `account` seed path relative to the composite a slot sits
+/// in. `Err` names why: account-data seeds (`vault.authority` where
+/// `vault` is an account) need the account's layout, which the IDL's
+/// type section has and solinv does not decode.
+fn seed_slot(paths: &[String], prefix: &str, path: &str) -> Result<usize, String> {
+    if !prefix.is_empty() {
+        if let Some(i) = slot_of(paths, &format!("{prefix}.{path}")) {
+            return Ok(i);
+        }
+    }
+    slot_of(paths, path).ok_or_else(|| format!("seed reads account data `{path}`"))
+}
+
 /// Binds the fixture's concrete pubkeys and keypairs to IDL account
-/// names. Accounts with a fixed IDL `address` (system program, sysvars)
-/// need no binding.
+/// names. Name a slot by its dotted path (`"group_a.authority"`) or, when
+/// unambiguous, by its leaf name. Accounts with a fixed IDL `address`
+/// (system program, sysvars) need no binding.
 pub struct SpecBuilder<'a> {
     idl: &'a Idl,
     ix: &'a IdlInstruction,
@@ -375,8 +467,7 @@ impl<'a> SpecBuilder<'a> {
 
     /// Bind an account by keypair; its pubkey comes from the keypair.
     /// Required for IDL signers. On a slot the IDL does not mark as a
-    /// signer, the keypair lets the state pass test it as one when the
-    /// evidence says it should have been.
+    /// signer, the keypair lets `infer_candidates` test it as one.
     pub fn signer(mut self, name: &str, keypair: Arc<Keypair>) -> Self {
         use solana_signer::Signer;
         self.accounts.insert(name.to_string(), keypair.pubkey());
@@ -397,27 +488,48 @@ impl<'a> SpecBuilder<'a> {
         self
     }
 
+    /// The binding for a slot, by full path or leaf name.
+    fn bound<'m, T>(&self, map: &'m HashMap<String, T>, flat: &FlatAccount) -> Option<&'m T> {
+        map.get(&flat.path()).or_else(|| {
+            let leaf = &flat.account.name;
+            let unique = self
+                .ix
+                .flat_accounts()
+                .iter()
+                .filter(|f| &f.account.name == leaf)
+                .count()
+                == 1;
+            if unique { map.get(leaf) } else { None }
+        })
+    }
+
     pub fn build(self) -> Result<IdlSpec, IdlError> {
         let flat = self.ix.flat_accounts();
+        let paths: Vec<String> = flat.iter().map(|f| f.path()).collect();
         let ix_name = self.ix.name.clone();
+
+        // An optional slot left unbound is omitted: Anchor encodes that
+        // as the program id in the slot, and it signs nothing.
+        let omitted: Vec<bool> = flat
+            .iter()
+            .map(|f| f.account.optional && self.bound(&self.accounts, f).is_none())
+            .collect();
 
         let mut pubkeys = Vec::with_capacity(flat.len());
         let mut missing = Vec::new();
-        for acc in &flat {
-            if let Some(pk) = self.accounts.get(&acc.name) {
+        for (i, f) in flat.iter().enumerate() {
+            if let Some(pk) = self.bound(&self.accounts, f) {
                 pubkeys.push(*pk);
-            } else if let Some(addr) = &acc.address {
+            } else if let Some(addr) = &f.account.address {
                 let pk = addr.parse::<Pubkey>().map_err(|_| IdlError::BadAddress {
-                    account: acc.name.clone(),
+                    account: paths[i].clone(),
                     address: addr.clone(),
                 })?;
                 pubkeys.push(pk);
-            } else if acc.optional {
-                // Anchor encodes an omitted optional account as the
-                // program id in that slot.
+            } else if omitted[i] {
                 pubkeys.push(self.program_id);
             } else {
-                missing.push(acc.name.clone());
+                missing.push(paths[i].clone());
                 pubkeys.push(Pubkey::default());
             }
         }
@@ -425,20 +537,17 @@ impl<'a> SpecBuilder<'a> {
             return Err(IdlError::MissingAccounts { ix: ix_name, names: missing });
         }
 
+        let signs: Vec<bool> =
+            flat.iter().zip(&omitted).map(|(f, &o)| f.account.signer && !o).collect();
         let missing_signers: Vec<String> = flat
             .iter()
-            .filter(|a| a.signer && !self.signers.contains_key(&a.name))
-            .map(|a| a.name.clone())
+            .enumerate()
+            .filter(|&(i, f)| signs[i] && self.bound(&self.signers, f).is_none())
+            .map(|(i, _)| paths[i].clone())
             .collect();
         if !missing_signers.is_empty() {
             return Err(IdlError::MissingSigners { ix: ix_name, names: missing_signers });
         }
-
-        let by_name: HashMap<&str, Pubkey> = flat
-            .iter()
-            .zip(&pubkeys)
-            .map(|(a, pk)| (a.name.as_str(), *pk))
-            .collect();
 
         let mut unresolved = vec![Unresolved {
             account: None,
@@ -450,28 +559,32 @@ impl<'a> SpecBuilder<'a> {
         let mut signers = Vec::new();
         let mut expected_pda_seeds = Vec::with_capacity(flat.len());
 
-        for (i, (acc, pk)) in flat.iter().zip(&pubkeys).enumerate() {
-            accounts.push(if acc.writable {
-                AccountMeta::new(*pk, acc.signer)
+        for (i, (f, pk)) in flat.iter().zip(&pubkeys).enumerate() {
+            accounts.push(if f.account.writable && !omitted[i] {
+                AccountMeta::new(*pk, signs[i])
             } else {
-                AccountMeta::new_readonly(*pk, acc.signer)
+                AccountMeta::new_readonly(*pk, signs[i])
             });
-            if acc.signer {
+            if signs[i] {
                 signer_indices.push(i);
-                signers.push(Arc::clone(&self.signers[&acc.name]));
+                signers.push(Arc::clone(self.bound(&self.signers, f).unwrap()));
             }
-            expected_pda_seeds.push(acc.pda.as_ref().and_then(|pda| {
-                match self.resolve_seeds(pda, &by_name) {
-                    Ok(seeds) => Some(seeds),
-                    Err(why) => {
-                        unresolved.push(Unresolved {
-                            account: Some(acc.name.clone()),
-                            what: format!("pda seeds: {why}"),
-                        });
-                        None
+            let seeds = match (&f.account.pda, omitted[i]) {
+                (Some(pda), false) => {
+                    match self.resolve_seeds(pda, &paths, &pubkeys, f.prefix()) {
+                        Ok(seeds) => Some(seeds),
+                        Err(why) => {
+                            unresolved.push(Unresolved {
+                                account: Some(paths[i].clone()),
+                                what: format!("pda seeds: {why}"),
+                            });
+                            None
+                        }
                     }
                 }
-            }));
+                _ => None,
+            };
+            expected_pda_seeds.push(seeds);
         }
 
         let mut data_sample = self.ix.discriminator.clone();
@@ -479,15 +592,15 @@ impl<'a> SpecBuilder<'a> {
 
         let keypairs = flat
             .iter()
-            .map(|a| if a.signer { None } else { self.signers.get(&a.name).cloned() })
+            .enumerate()
+            .map(|(i, f)| if signs[i] { None } else { self.bound(&self.signers, f).cloned() })
             .collect();
-        let names = flat.iter().map(|a| a.name.clone()).collect();
         let pda_patterns = self
             .idl
             .instructions
             .iter()
             .flat_map(|ix| ix.flat_accounts())
-            .filter_map(|a| a.pda.as_ref())
+            .filter_map(|f| f.account.pda.as_ref())
             .filter(|pda| pda.program.is_none())
             .map(|pda| pda.seeds.clone())
             .collect();
@@ -515,18 +628,23 @@ impl<'a> SpecBuilder<'a> {
                 guards: vec![],
             },
             account_discs: self.idl.account_discriminators(),
-            names,
+            names: paths,
+            idl_seeded: flat.iter().map(|f| f.account.pda.is_some()).collect(),
+            omitted,
             keypairs,
             pda_patterns,
+            arg_seeds: self.arg_seeds,
             unresolved,
-            inferred: vec![],
+            candidates: vec![],
         })
     }
 
     fn resolve_seeds(
         &self,
         pda: &IdlPda,
-        by_name: &HashMap<&str, Pubkey>,
+        paths: &[String],
+        pubkeys: &[Pubkey],
+        prefix: &str,
     ) -> Result<Vec<Vec<u8>>, String> {
         if pda.program.is_some() {
             return Err("derived under another program; pda-forge checks this program only".into());
@@ -535,10 +653,9 @@ impl<'a> SpecBuilder<'a> {
             .iter()
             .map(|seed| match seed {
                 IdlSeed::Const { value } => Ok(value.clone()),
-                IdlSeed::Account { path } => match by_name.get(path.as_str()) {
-                    Some(pk) => Ok(pk.to_bytes().to_vec()),
-                    None => Err(format!("seed reads account data `{path}`")),
-                },
+                IdlSeed::Account { path, .. } => {
+                    seed_slot(paths, prefix, path).map(|j| pubkeys[j].to_bytes().to_vec())
+                }
                 IdlSeed::Arg { path } => self
                     .arg_seeds
                     .get(path)
@@ -549,151 +666,227 @@ impl<'a> SpecBuilder<'a> {
     }
 }
 
-/// Something the IDL could not supply. Printed by `solinv idl` so the
-/// gap is visible instead of silently weakening a detector.
+/// Something the IDL could not supply. Printed so the gap is visible
+/// instead of silently weakening a detector.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Unresolved {
     pub account: Option<String>,
     pub what: String,
 }
 
-/// An expectation the state pass added beyond what the IDL declares.
-/// On an Anchor program these are the slots worth attacking.
+/// An expectation [`IdlSpec::infer_candidates`] proposed for a slot the
+/// IDL leaves unconstrained. A finding on it is a lead to confirm.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Inferred {
+pub struct Candidate {
     pub account: String,
-    pub what: InferredKind,
+    pub what: CandidateKind,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum InferredKind {
+pub enum CandidateKind {
     Owner,
     Discriminator,
     PdaSeeds,
     Signer,
 }
 
-/// A spec built from the IDL, before and after state inference.
+/// A spec built from the IDL, before and after the state passes.
 pub struct IdlSpec {
     spec: InstructionSpec,
-    account_discs: Vec<[u8; 8]>,
-    /// IDL name per slot, for reports.
+    account_discs: Vec<Vec<u8>>,
+    /// Dotted IDL path per slot, for reports.
     names: Vec<String>,
+    /// Slot carries IDL `pda` seeds (resolved or not).
+    idl_seeded: Vec<bool>,
+    /// Optional slot left out of this instruction.
+    omitted: Vec<bool>,
     /// Keypairs bound to slots the IDL does not mark as signers.
     keypairs: Vec<Option<Arc<Keypair>>>,
     /// Every program-local seed pattern declared anywhere in the IDL.
     pda_patterns: Vec<Vec<IdlSeed>>,
+    arg_seeds: HashMap<String, Vec<u8>>,
     unresolved: Vec<Unresolved>,
-    inferred: Vec<Inferred>,
+    candidates: Vec<Candidate>,
+}
+
+/// What a slot's pre-send state says about its type.
+enum Held<'a> {
+    Absent,
+    /// Program-owned with this IDL discriminator.
+    Typed(&'a [u8]),
+    Other,
 }
 
 impl IdlSpec {
-    /// Fill owners, discriminators and created accounts from the
-    /// fixture's pre-send state. `get` is usually
-    /// `|pk| ctx.get_account(pk).ok()`.
-    ///
-    /// Call it after `setup()` has created the accounts the instruction
-    /// reads — an account absent at this point is recorded as created by
-    /// the instruction, which excludes it from pda-forge.
+    fn held<'s>(&'s self, acct: Option<&Account>) -> Held<'s> {
+        let Some(acct) = acct else { return Held::Absent };
+        if acct.owner != self.spec.program_id {
+            return Held::Other;
+        }
+        // Longest match first: a 1-byte discriminator is a prefix of
+        // many 8-byte ones.
+        self.account_discs
+            .iter()
+            .filter(|d| !d.is_empty() && acct.data.starts_with(d))
+            .max_by_key(|d| d.len())
+            .map_or(Held::Other, |d| Held::Typed(d))
+    }
+
+    /// Record the owner, and the discriminator when the detector can
+    /// carry it (it compares exactly 8 bytes).
+    fn expect_type(&mut self, i: usize, disc: &[u8]) -> bool {
+        self.spec.expected_owners[i] = Some(self.spec.program_id);
+        match <[u8; 8]>::try_from(disc) {
+            Ok(d) => {
+                self.spec.expected_discriminators[i] = Some(d);
+                true
+            }
+            Err(_) => {
+                self.unresolved.push(Unresolved {
+                    account: Some(self.names[i].clone()),
+                    what: format!(
+                        "discriminator is {} bytes; discriminator-skip compares 8",
+                        disc.len()
+                    ),
+                });
+                false
+            }
+        }
+    }
+
+    /// Facts from the fixture's pre-send state, for slots the IDL seeds:
+    /// a seeded slot pins one address, so the account found there is
+    /// the one the instruction expects (owner + discriminator), and one
+    /// not there yet is one it creates. `get` is usually
+    /// `|pk| ctx.get_account(pk).ok()`; call after `setup()`.
     pub fn infer_from_state(mut self, get: impl Fn(&Pubkey) -> Option<Account>) -> Self {
-        let program_id = self.spec.program_id;
+        for i in 0..self.spec.accounts.len() {
+            if !self.idl_seeded[i] || self.omitted[i] {
+                continue;
+            }
+            let acct = get(&self.spec.accounts[i].pubkey);
+            let disc = match self.held(acct.as_ref()) {
+                Held::Absent => {
+                    self.spec.creates_indices.push(i);
+                    continue;
+                }
+                Held::Typed(d) => d.to_vec(),
+                Held::Other => continue,
+            };
+            self.expect_type(i, &disc);
+        }
+        self
+    }
+
+    /// Hypotheses for slots the IDL leaves unconstrained, from what the
+    /// fixture put there. Each one is listed in [`IdlSpec::candidates`];
+    /// see the module docs for why they are leads and not facts.
+    pub fn infer_candidates(mut self, get: impl Fn(&Pubkey) -> Option<Account>) -> Self {
         let state: Vec<Option<Account>> =
             self.spec.accounts.iter().map(|m| get(&m.pubkey)).collect();
-        // Discriminator of each slot that holds a program-owned account
-        // of a type the IDL declares.
-        let owned: Vec<Option<[u8; 8]>> = state
+        let typed: Vec<Option<Vec<u8>>> = state
             .iter()
-            .map(|acct| {
-                let acct = acct.as_ref()?;
-                let head: [u8; 8] = acct.data.get(..8)?.try_into().ok()?;
-                (acct.owner == program_id && self.account_discs.contains(&head)).then_some(head)
+            .map(|a| match self.held(a.as_ref()) {
+                Held::Typed(d) => Some(d.to_vec()),
+                _ => None,
             })
             .collect();
 
         for i in 0..self.spec.accounts.len() {
-            if state[i].is_none() {
-                if self.spec.expected_pda_seeds[i].is_some() {
-                    self.spec.creates_indices.push(i);
-                }
+            if self.idl_seeded[i] || self.omitted[i] || state[i].is_none() {
                 continue;
             }
-            if let Some(head) = owned[i] {
-                self.spec.expected_owners[i] = Some(program_id);
-                self.spec.expected_discriminators[i] = Some(head);
-                // A slot with IDL seeds is constrained, so a typed
-                // `Account<'info, T>` already enforces both; anything
-                // else may be an `UncheckedAccount` and is worth listing.
-                if self.spec.expected_pda_seeds[i].is_none() {
-                    self.note(i, InferredKind::Owner);
-                    self.note(i, InferredKind::Discriminator);
+            if self.spec.accounts[i].is_signer || self.spec.expected_owners[i].is_some() {
+                continue;
+            }
+            if let Some(disc) = &typed[i] {
+                self.note(i, CandidateKind::Owner);
+                if self.expect_type(i, disc) {
+                    self.note(i, CandidateKind::Discriminator);
                 }
             }
-            if self.spec.expected_pda_seeds[i].is_none() {
-                if let Some(seeds) = self.rederive_pda(i) {
+            match self.rederive_pda(i) {
+                Ok(seeds) => {
                     self.spec.expected_pda_seeds[i] = Some(seeds);
-                    self.note(i, InferredKind::PdaSeeds);
+                    self.note(i, CandidateKind::PdaSeeds);
                 }
+                Err(skipped) if skipped > 0 && typed[i].is_some() => {
+                    self.unresolved.push(Unresolved {
+                        account: Some(self.names[i].clone()),
+                        what: format!(
+                            "no seed pattern re-derives this address; {skipped} pattern(s) \
+                             could not be evaluated (unbound arg or account-data seeds)"
+                        ),
+                    });
+                }
+                Err(_) => {}
             }
         }
 
         if self.spec.signer_indices.is_empty() {
             let written: Vec<&Account> = (0..state.len())
-                .filter(|&i| self.spec.accounts[i].is_writable && owned[i].is_some())
+                .filter(|&i| self.spec.accounts[i].is_writable && typed[i].is_some())
                 .filter_map(|i| state[i].as_ref())
                 .collect();
             for i in 0..self.spec.accounts.len() {
+                if self.omitted[i] {
+                    continue;
+                }
                 let key = self.spec.accounts[i].pubkey.to_bytes();
-                let stored = written.iter().any(|a| a.data.windows(32).any(|w| w == key));
+                if !written.iter().any(|a| a.data.windows(32).any(|w| w == key)) {
+                    continue;
+                }
                 let Some(kp) = self.keypairs[i].clone() else {
-                    if stored {
-                        self.unresolved.push(Unresolved {
-                            account: Some(self.names[i].clone()),
-                            what: "no signer on this ix, and its key is stored in written state: \
-                                   bind its keypair with .signer() to test signer-skip"
-                                .into(),
-                        });
-                    }
+                    self.unresolved.push(Unresolved {
+                        account: Some(self.names[i].clone()),
+                        what: "no signer on this ix, and written state stores this key: \
+                               bind its keypair with .signer() to test it as the authority"
+                            .into(),
+                    });
                     continue;
                 };
-                if stored {
-                    self.spec.accounts[i].is_signer = true;
-                    self.spec.signer_indices.push(i);
-                    self.spec.signers.push(kp);
-                    self.note(i, InferredKind::Signer);
-                }
+                self.spec.accounts[i].is_signer = true;
+                self.spec.signer_indices.push(i);
+                self.spec.signers.push(kp);
+                self.note(i, CandidateKind::Signer);
             }
         }
         self
     }
 
-    fn rederive_pda(&self, i: usize) -> Option<Vec<Vec<u8>>> {
+    /// Seeds of the first IDL pattern that re-derives slot `i`'s address,
+    /// or how many patterns could not be evaluated.
+    fn rederive_pda(&self, i: usize) -> Result<Vec<Vec<u8>>, usize> {
         let target = self.spec.accounts[i].pubkey;
-        self.pda_patterns.iter().find_map(|pattern| {
+        let mut skipped = 0;
+        for pattern in &self.pda_patterns {
             let seeds: Option<Vec<Vec<u8>>> = pattern
                 .iter()
                 .map(|seed| match seed {
                     IdlSeed::Const { value } => Some(value.clone()),
-                    IdlSeed::Account { path } => self
-                        .names
-                        .iter()
-                        .position(|n| n == path)
+                    IdlSeed::Account { path, .. } => slot_of(&self.names, path)
                         .map(|j| self.spec.accounts[j].pubkey.to_bytes().to_vec()),
-                    IdlSeed::Arg { .. } => None,
+                    IdlSeed::Arg { path } => self.arg_seeds.get(path).cloned(),
                 })
                 .collect();
-            let seeds = seeds?;
+            let Some(seeds) = seeds else {
+                skipped += 1;
+                continue;
+            };
             let refs: Vec<&[u8]> = seeds.iter().map(|s| s.as_slice()).collect();
-            (Pubkey::find_program_address(&refs, &self.spec.program_id).0 == target)
-                .then_some(seeds)
-        })
+            if Pubkey::find_program_address(&refs, &self.spec.program_id).0 == target {
+                return Ok(seeds);
+            }
+        }
+        Err(skipped)
     }
 
-    fn note(&mut self, i: usize, what: InferredKind) {
-        self.inferred.push(Inferred { account: self.names[i].clone(), what });
+    fn note(&mut self, i: usize, what: CandidateKind) {
+        self.candidates.push(Candidate { account: self.names[i].clone(), what });
     }
 
-    pub fn inferred(&self) -> &[Inferred] {
-        &self.inferred
+    pub fn candidates(&self) -> &[Candidate] {
+        &self.candidates
     }
 
     pub fn unresolved(&self) -> &[Unresolved] {
@@ -800,7 +993,11 @@ mod tests {
         assert!(bare.spec().signer_indices.is_empty());
         assert_eq!(bare.spec().expected_pda_seeds, vec![None, None]);
 
-        let built = bare.infer_from_state(|pk| (*pk == vault).then(|| vault_state.clone()));
+        // Nothing on these slots is a fact: the facts pass adds nothing.
+        let get = |pk: &Pubkey| (*pk == vault).then(|| vault_state.clone());
+        let bare = bare.infer_from_state(get);
+        assert_eq!(bare.spec().expected_owners, vec![None, None]);
+        let built = bare.infer_candidates(get);
         let s = built.spec();
         assert_eq!(s.expected_owners, vec![Some(pid), None]);
         assert_eq!(
@@ -810,14 +1007,14 @@ mod tests {
         assert_eq!(s.signer_indices, vec![1]);
         assert!(s.accounts[1].is_signer);
         assert_eq!(s.signers.len(), 1);
-        let kinds: Vec<_> = built.inferred().iter().map(|i| (i.account.as_str(), i.what)).collect();
+        let kinds: Vec<_> = built.candidates().iter().map(|i| (i.account.as_str(), i.what)).collect();
         assert_eq!(
             kinds,
             vec![
-                ("vault", InferredKind::Owner),
-                ("vault", InferredKind::Discriminator),
-                ("vault", InferredKind::PdaSeeds),
-                ("depositor", InferredKind::Signer),
+                ("vault", CandidateKind::Owner),
+                ("vault", CandidateKind::Discriminator),
+                ("vault", CandidateKind::PdaSeeds),
+                ("depositor", CandidateKind::Signer),
             ]
         );
     }
@@ -842,6 +1039,7 @@ mod tests {
             .build()
             .unwrap()
             .infer_from_state(|pk| (*pk == vault).then(|| vault_state.clone()))
+            .infer_candidates(|pk| (*pk == vault).then(|| vault_state.clone()))
             .into_spec();
         assert_eq!(s.signer_indices, vec![2]);
         assert!(!s.accounts[1].is_signer);
@@ -969,5 +1167,153 @@ mod tests {
             built.spec().expected_pda_seeds[0],
             Some(vec![b"m".to_vec(), 7u64.to_le_bytes().to_vec()])
         );
+    }
+
+    fn json_idl(accounts: &str, types: &str) -> Idl {
+        Idl::from_json(&format!(
+            r#"{{"instructions":[{{"name":"ix","discriminator":[1,2,3,4,5,6,7,8],
+                "accounts":{accounts}}}],"accounts":{types}}}"#
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn composite_paths_keep_duplicate_leaves_apart() {
+        let idl = json_idl(
+            r#"[{"name":"group_a","accounts":[{"name":"authority","signer":true},
+                  {"name":"pool","writable":true,"pda":{"seeds":[{"kind":"account","path":"authority"}]}}]},
+                {"name":"group_b","accounts":[{"name":"authority","signer":true}]}]"#,
+            "[]",
+        );
+        let pid = Pubkey::new_unique();
+        let (a, b) = (Arc::new(Keypair::new()), Arc::new(Keypair::new()));
+        // The leaf alone is ambiguous: nothing binds.
+        let err = idl.spec("ix", pid).unwrap().signer("authority", Arc::clone(&a)).build();
+        assert!(matches!(err, Err(IdlError::MissingAccounts { .. })));
+
+        let built = idl
+            .spec("ix", pid)
+            .unwrap()
+            .signer("group_a.authority", Arc::clone(&a))
+            .account("pool", Pubkey::new_unique())
+            .signer("group_b.authority", Arc::clone(&b))
+            .build()
+            .unwrap();
+        let s = built.spec();
+        assert_eq!(s.accounts[0].pubkey, a.pubkey());
+        assert_eq!(s.accounts[2].pubkey, b.pubkey());
+        // The seed  inside group_a resolves to group_a's.
+        assert_eq!(s.expected_pda_seeds[1], Some(vec![a.pubkey().to_bytes().to_vec()]));
+        let stub = idl.instruction("ix").unwrap().rust_bindings();
+        assert!(stub.contains(".signer(\"group_b.authority\""));
+    }
+
+    #[test]
+    fn account_data_seed_is_unresolved() {
+        let idl = json_idl(
+            r#"[{"name":"vault"},{"name":"pool","pda":{"seeds":
+                [{"kind":"account","path":"vault.authority","account":"Vault"}]}}]"#,
+            "[]",
+        );
+        let built = idl
+            .spec("ix", Pubkey::new_unique())
+            .unwrap()
+            .account("vault", Pubkey::new_unique())
+            .account("pool", Pubkey::new_unique())
+            .build()
+            .unwrap();
+        assert_eq!(built.spec().expected_pda_seeds[1], None);
+        assert!(built
+            .unresolved()
+            .iter()
+            .any(|u| u.what == "pda seeds: seed reads account data `vault.authority`"));
+    }
+
+    #[test]
+    fn omitted_optional_signer_builds_without_a_keypair() {
+        let idl = json_idl(
+            r#"[{"name":"admin","signer":true,"optional":true},{"name":"state","writable":true}]"#,
+            "[]",
+        );
+        let pid = Pubkey::new_unique();
+        let s = idl
+            .spec("ix", pid)
+            .unwrap()
+            .account("state", Pubkey::new_unique())
+            .build()
+            .unwrap()
+            .into_spec();
+        assert_eq!(s.accounts[0], AccountMeta::new_readonly(pid, false));
+        assert!(s.signer_indices.is_empty() && s.signers.is_empty());
+    }
+
+    #[test]
+    fn short_discriminator_sets_owner_and_says_why_not_disc() {
+        let idl = json_idl(
+            r#"[{"name":"cfg","pda":{"seeds":[{"kind":"const","value":[99]}]}}]"#,
+            r#"[{"name":"Config","discriminator":[1]}]"#,
+        );
+        let pid = Pubkey::new_unique();
+        let (cfg, _) = Pubkey::find_program_address(&[b"c"], &pid);
+        let acct = Account { lamports: 1, data: vec![1, 0, 0], owner: pid, executable: false, rent_epoch: 0 };
+        let built = idl
+            .spec("ix", pid)
+            .unwrap()
+            .account("cfg", cfg)
+            .build()
+            .unwrap()
+            .infer_from_state(|_| Some(acct.clone()));
+        assert_eq!(built.spec().expected_owners, vec![Some(pid)]);
+        assert_eq!(built.spec().expected_discriminators, vec![None]);
+        assert!(built.unresolved().iter().any(|u| u.what.contains("discriminator is 1 bytes")));
+    }
+
+    #[test]
+    fn rederive_uses_bound_arg_seeds_and_reports_skips() {
+        let idl = Idl::from_json(
+            r#"{"instructions":[
+              {"name":"open","discriminator":[1,1,1,1,1,1,1,1],"accounts":[{"name":"receipt",
+                "writable":true,"pda":{"seeds":[{"kind":"const","value":[114]},{"kind":"arg","path":"id"}]}}]},
+              {"name":"settle","discriminator":[2,2,2,2,2,2,2,2],"accounts":[{"name":"receipt","writable":true}]}],
+             "accounts":[{"name":"Receipt","discriminator":[9,9,9,9,9,9,9,9]}]}"#,
+        )
+        .unwrap();
+        let pid = Pubkey::new_unique();
+        let id = 7u64.to_le_bytes();
+        let (receipt, _) = Pubkey::find_program_address(&[b"r", &id], &pid);
+        let acct = Account { lamports: 1, data: vec![9; 16], owner: pid, executable: false, rent_epoch: 0 };
+        let get = |_: &Pubkey| Some(acct.clone());
+        let base = || idl.spec("settle", pid).unwrap().account("receipt", receipt);
+
+        let unbound = base().build().unwrap().infer_candidates(get);
+        assert_eq!(unbound.spec().expected_pda_seeds, vec![None]);
+        assert!(unbound.unresolved().iter().any(|u| u.what.contains("1 pattern(s) could not be evaluated")));
+
+        let bound = base().seed_arg("id", &id).build().unwrap().infer_candidates(get);
+        assert_eq!(bound.spec().expected_pda_seeds, vec![Some(vec![b"r".to_vec(), id.to_vec()])]);
+    }
+
+    /// The counterexample to the signer rule: a correct permissionless
+    /// crank that pays a stored beneficiary. The rule fires, and the
+    /// result must be visible as a candidate, never silently a fact.
+    #[test]
+    fn crank_beneficiary_is_only_ever_a_candidate() {
+        let idl = json_idl(
+            r#"[{"name":"job","writable":true},{"name":"beneficiary","writable":true}]"#,
+            r#"[{"name":"Job","discriminator":[5,5,5,5,5,5,5,5]}]"#,
+        );
+        let pid = Pubkey::new_unique();
+        let (job, ben) = (Pubkey::new_unique(), Arc::new(Keypair::new()));
+        let mut data = vec![5u8; 8];
+        data.extend_from_slice(ben.pubkey().as_ref());
+        let acct = Account { lamports: 1, data, owner: pid, executable: false, rent_epoch: 0 };
+        let get = |pk: &Pubkey| (*pk == job).then(|| acct.clone());
+        let build = || {
+            idl.spec("ix", pid).unwrap().account("job", job).signer("beneficiary", Arc::clone(&ben)).build().unwrap()
+        };
+        assert!(build().infer_from_state(get).spec().signer_indices.is_empty());
+        let c = build().infer_from_state(get).infer_candidates(get);
+        assert_eq!(c.spec().signer_indices, vec![1]);
+        assert!(c.candidates().contains(&Candidate { account: "beneficiary".into(), what: CandidateKind::Signer }));
     }
 }

@@ -628,10 +628,13 @@ solinv idl target/idl/my_program.json          # where to point the Critical 5
 solinv idl target/idl/my_program.json --rust deposit   # binding stub for one ix
 ```
 
-`solinv idl` needs no fixture. It lists every instruction's slots as the
-IDL declares them and names the instructions with **no signer that
-write a slot the IDL leaves unconstrained** — on escrow-demo's planted
-program that is exactly the three planted account-validation bugs.
+Reads the Anchor 0.30+ IDL format (legacy IDLs without discriminators
+are rejected). `solinv idl` needs no fixture. It lists every
+instruction's slots as the IDL declares them and names the instructions
+with **no signer that write a slot the IDL leaves unconstrained** —
+either deliberately permissionless, or missing an authority check. On
+escrow-demo's planted program those are exactly its three planted
+account-validation bugs.
 
 In the fixture, the stub becomes the spec:
 
@@ -642,30 +645,43 @@ let spec = idl.spec("deposit", program_id)?
     .args(&50_000u64.to_le_bytes())
     .build()?
     .infer_from_state(|pk| ctx.get_account(pk).ok())   // after setup()
+    .infer_candidates(|pk| ctx.get_account(pk).ok())
     .into_spec();
 ```
 
 The IDL supplies the account list, signers, PDA seeds and instruction
-data. The state pass supplies owners, discriminators and created
-accounts — and, more usefully, **expectations the IDL does not make**:
+data. `infer_from_state` adds facts: owner and discriminator of each
+seeded slot, and which seeded accounts the instruction creates.
 
-What the IDL declares, Anchor already enforces (`signer: true` is a
-`Signer<'info>`, `pda.seeds` is a `seeds = [...]` constraint), so a spec
-built from the IDL alone asks the program to honour checks its own
-macros generated, and on Anchor finds nothing. Bugs live where the IDL
-is silent. For those slots the state pass adds a check only on evidence:
-a program-owned account carrying an IDL discriminator (owner +
-discriminator); a seed pattern from another instruction that re-derives
-the slot's exact address (pda seeds); and, on an instruction with no
-signer that writes program state, a slot whose pubkey that state stores
-(signer). `IdlSpec::inferred()` lists each one.
+That alone finds nothing on Anchor. What the IDL declares, Anchor
+already enforces (`signer: true` is a `Signer<'info>`, `pda.seeds` is a
+`seeds = [...]` constraint), so the spec only asks the program to
+honour checks its own macros generated. Bugs live where the IDL is
+silent. `infer_candidates` proposes checks for those slots from what
+the fixture put there — a program-owned account with an IDL
+discriminator (owner + discriminator); a seed pattern from elsewhere in
+the IDL that re-derives the slot's address (pda seeds); on an
+instruction with no signer that writes program state, a slot whose
+pubkey that state stores (signer) — and lists each in
+`IdlSpec::candidates()`.
 
-Measured on escrow-demo (`--features idl_specs` on both harnesses,
-seed 1): the IDL-built specs fire the same Critical-5 detector on the
-same instruction as the hand-written ones for all five, and the clean
-twin stays at 0 violations under `invariant_all` (60 s, ~62 exec/s vs
-~64 hand-written). Still hand-written: `swap_alternates`, state
-invariants and guards — semantic, not in any IDL.
+**Candidates are leads, not facts.** They describe what the fixture
+passed, not what the instruction must require: a correct permissionless
+crank that pays a stored `beneficiary` matches the signer rule. Confirm
+a finding on a candidate slot against the program's intent before
+reporting it. Anything neither pass can fill (account-data seeds, seeds
+under another program, non-8-byte discriminators) is listed in
+`IdlSpec::unresolved()` rather than dropped.
+
+Still hand-written: `swap_alternates`, state invariants and guards —
+semantic, not in any IDL. Composite accounts are named by dotted path
+(`"group_a.authority"`), or by leaf name when it is unique.
+
+`scripts/idl-specs-parity.sh` runs escrow-demo's detectors with the
+hand-written specs and with `--features idl_specs`. Last run (seed 1,
+20 s per planted run, 60 s clean): the same detector fired on the same
+instruction in both modes for all five of the Critical 5, and the clean
+twin stayed at 0 under `invariant_all`.
 
 ## Integration — adopting solinv on your own program
 

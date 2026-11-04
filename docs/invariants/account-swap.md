@@ -214,10 +214,13 @@ The fixture creates the alternates: here a copy of a real record, owned
 by the rogue program. Every swap in a set is applied in one attempt;
 the finding names each slot and ends `…, together`. A set that cannot run —
 an instruction name no spec has, an index out of range or repeated, an
-alternate equal to the real account or missing from the context — is a
-harness bug, reported as an `[account-swap-config:<ix>]` finding with
+alternate equal to the real account, or missing from the context while
+the real account at that slot exists — is a harness bug, reported as an `[account-swap-config:<ix>]` finding with
 the reason, so CI fails instead of testing nothing
-([#13](https://github.com/psyto/solinv/issues/13)). `check`'s per-slot
+([#13](https://github.com/psyto/solinv/issues/13)). Where the real account
+is absent too — an account the instruction creates, or a PDA it only uses
+as an address — the alternate may be absent as well
+([#15](https://github.com/psyto/solinv/issues/15)). `check`'s per-slot
 alternates still skip quietly. Signers whose slot a swap replaced are
 left out of the transaction; this matters only with sigverify on, where
 an alternate that signs also needs its keypair in `spec.signers`.

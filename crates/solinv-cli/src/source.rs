@@ -670,6 +670,28 @@ pub struct F<'info> {
         );
     }
 
+    /// strip() blanks byte for byte: non-ASCII text in a comment or a
+    /// string before the attribute must not shift the expression read
+    /// from the comments-only copy.
+    #[test]
+    fn non_ascii_before_an_expression_keeps_offsets_aligned() {
+        let src = "pub fn f(ctx: Context<F>) -> Result<()> {}\n\
+            // 日本語のコメント — with an em dash\n\
+            const NOTE: &str = \"ünïcödé ✓\";\n\
+            #[derive(Accounts)]\n\
+            pub struct F<'info> {\n\
+                /// ドキュメント\n\
+                #[account(constraint = vault.owner_name == \"所有者\" @ E::X)]\n\
+                pub vault: Account<'info, Vault>,\n\
+            }\n";
+        assert_eq!(strip(src, false).len(), src.len());
+        assert_eq!(strip(src, true).len(), src.len());
+        let k = SourceKinds::parse(src);
+        let v = k.slot("f", "vault").unwrap();
+        assert_eq!(v.attrs.constraints, vec!["vault.owner_name == \"所有者\""]);
+        assert_eq!(v.line, 8);
+    }
+
     #[test]
     fn brace_char_literals_do_not_end_a_struct() {
         let src = r#"

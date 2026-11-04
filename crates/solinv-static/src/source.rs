@@ -853,7 +853,7 @@ fn read_body(blanked: &str, expr: &str) -> Vec<BodyCheck> {
     };
     let norm = |t: &str| -> String {
         let t: String = t.chars().filter(|c| !c.is_whitespace()).collect();
-        t.replace("ctx.accounts.", "")
+        commuted(&t.replace("ctx.accounts.", ""))
     };
     let check = |text: String, src: &str, ties: bool| BodyCheck {
         refs: account
@@ -953,6 +953,52 @@ fn read_body(blanked: &str, expr: &str) -> Vec<BodyCheck> {
     out
 }
 
+/// `a==b` / `a!=b` with the two sides in order, so writing them the
+/// other way round is the same check; anything else unchanged.
+fn commuted(t: &str) -> String {
+    let (prefix, body) = match t.find('(') {
+        Some(i) if t[..i].ends_with('!') && t.ends_with(')') => (&t[..=i], &t[i + 1..t.len() - 1]),
+        _ => match t.strip_prefix("if") {
+            Some(rest) => ("if ", rest.trim_start()),
+            None => ("", t),
+        },
+    };
+    let b = body.as_bytes();
+    let (mut depth, mut quoted, mut compound) = (0i32, false, false);
+    let mut ops = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        // Literals are kept in the text: an operator inside one is not one.
+        if !quoted {
+            if let Some(n) = raw_string_len(&body[i..]).filter(|_| i == 0 || !b[i - 1].is_ascii_alphanumeric()) {
+                i += n;
+                continue;
+            }
+        }
+        match b[i] {
+            b'"' if i == 0 || b[i - 1] != b'\\' => quoted = !quoted,
+            _ if quoted => {}
+            b'&' | b'|' if depth == 0 && b.get(i + 1) == Some(&b[i]) => compound = true,
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth -= 1,
+            b'=' | b'!'
+                if depth == 0
+                    && b.get(i + 1) == Some(&b'=')
+                    && (i == 0 || !matches!(b[i - 1], b'=' | b'<' | b'>' | b'!')) =>
+            {
+                ops.push(i)
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    let (Some(&op), true) = (ops.first(), ops.len() == 1 && !compound) else { return t.to_string() };
+    let (l, r) = (&body[..op], &body[op + 2..]);
+    let (l, r) = if l <= r { (l, r) } else { (r, l) };
+    let close = if prefix.ends_with('(') { ")" } else { "" };
+    format!("{prefix}{l}{}{r}{close}", &body[op..op + 2])
+}
+
 /// Attach a body check to the first slot it names, or to the
 /// instruction when it names none.
 fn attach_body_check(
@@ -971,6 +1017,23 @@ fn attach_body_check(
                 .find(|p| out.contains_key(&(ix.to_string(), p.clone())))
         })
         .collect();
+    // `x.key` without `()` is an address only on an `AccountInfo`-like
+    // slot; on `Account<T>` it reads a data field and ties nothing.
+    // The full path, so `external.user.key` is not `internal.user`'s.
+    let field_key_on_data = |h: &String| {
+        let field = chk.text.match_indices(&format!("{h}.key")).any(|(i, m)| {
+            let before = chk.text[..i].chars().next_back();
+            !before.is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '.')
+                && !chk.text[i + m.len()..].starts_with('(')
+                && !chk.text[i + m.len()..].starts_with(|c: char| c.is_alphanumeric() || c == '_')
+        });
+        field
+            && out.get(&(ix.to_string(), h.clone())).is_some_and(|s| {
+                matches!(s.ty.as_str(), "Account" | "AccountLoader" | "InterfaceAccount")
+            })
+    };
+    // Such a slot drops out of the tie; the rest of the check still ties.
+    let tied: Vec<String> = heads.iter().filter(|h| !field_key_on_data(h)).cloned().collect();
     let Some(first) = heads.first().cloned() else {
         let list = ix_checks.entry(ix.to_string()).or_default();
         if !list.contains(&chk.text) {
@@ -978,7 +1041,7 @@ fn attach_body_check(
         }
         return;
     };
-    let mut names = heads;
+    let mut names = tied;
     if chk.constant {
         names.push("::".into());
     }
@@ -1653,7 +1716,7 @@ pub struct Act<'info> {
 "#;
         let k = SourceKinds::parse(src);
         let body = |p: &str| k.slot("act", p).unwrap().attrs.body.clone();
-        assert_eq!(body("authority"), vec!["if !authority.is_signer", "if authority.key!=&token.owner"]);
+        assert_eq!(body("authority"), vec!["if !authority.is_signer", "if &token.owner!=authority.key"]);
         // Text sorted, attached to `vault`, the first written.
         assert_eq!(body("vault"), vec!["require_keys_eq!(pool.vault,vault.key())"]);
         assert!(body("pool").is_empty(), "inside a loop is not top level");
@@ -1663,6 +1726,49 @@ pub struct Act<'info> {
         // difference check and ties nothing.
         assert!(!k.unbound("act", "vault") && !k.unbound("act", "pool"));
         assert!(k.unbound("act", "a") && k.unbound("act", "b"));
+
+        // An `==` in a string is not the operator; `>=` is not `==`.
+        assert_eq!(commuted("require!(\"a==b\"==a.key())"), commuted("require!(a.key()==\"a==b\")"));
+        assert_eq!(commuted("require!(a.amount>=b.amount)"), "require!(a.amount>=b.amount)");
+        assert_eq!(commuted("require!(a.key()==f(\"x&&y\"))"), commuted("require!(f(\"x&&y\")==a.key())"));
+        assert_eq!(commuted("require!(r#\"p==q\"#.k()==a.key())"), commuted("require!(a.key()==r#\"p==q\"#.k())"));
+
+        // The field form is judged on the account it is read from.
+        let paths = r#"
+pub fn act(ctx: Context<Act>) -> Result<()> {
+    require_keys_eq!(ctx.accounts.external.user.key, ctx.accounts.internal.user.key(), E::X);
+    Ok(())
+}
+#[derive(Accounts)]
+pub struct Ext<'info> {
+    pub user: AccountInfo<'info>,
+}
+#[derive(Accounts)]
+pub struct Int<'info> {
+    pub user: Account<'info, User>,
+}
+#[derive(Accounts)]
+pub struct Act<'info> {
+    pub external: Ext<'info>,
+    pub internal: Int<'info>,
+}
+"#;
+        assert!(!SourceKinds::parse(paths).unbound("act", "internal.user"));
+
+        // `.key` on `Account<T>` is a data field: no tie.
+        let data = src.replace(
+            "    require!(token.amount > 0, E::Empty);",
+            "    require!(token.amount > 0, E::Empty);\n    require_eq!(ctx.accounts.a.key, ctx.accounts.b.key, E::K);",
+        );
+        let k = SourceKinds::parse(&data);
+        assert!(k.unbound("act", "a") && k.unbound("act", "b"));
+        // In a compound check only the data-field account drops out.
+        let compound = src.replace(
+            "    require!(token.amount > 0, E::Empty);",
+            "    require!(token.amount > 0, E::Empty);\n    require!(ctx.accounts.a.key() == ctx.accounts.b.key() && ctx.accounts.vault.key == EXPECTED, E::K);",
+        );
+        let k = SourceKinds::parse(&compound);
+        assert!(!k.unbound("act", "a") && !k.unbound("act", "b"));
     }
 
     /// strip() blanks byte for byte: non-ASCII text in a comment or a

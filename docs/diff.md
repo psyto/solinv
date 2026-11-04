@@ -52,6 +52,8 @@ Constraints are compared by expression, with whitespace collapsed and the
 `@ Error` dropped, so reformatting or renaming an error is not a change,
 and swapping one check for another is. String literals in an expression
 are kept, so `role == "admin"` → `role == "attacker"` is a change.
+Handler checks are compared with spaces dropped and the two sides of a
+lone `==` / `!=` in order, so `a == b` and `b == a` are one check.
 vipers key checks are compared with their arguments sorted and written
 from the instruction's root (`assert_keys_eq!(common.bank.crate_mint,
 common.crate_mint)`), so swapping the arguments is not a change; removing

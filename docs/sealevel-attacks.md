@@ -15,19 +15,19 @@ solinv diff --base-src programs/<class>/<fixed>/src --head-src programs/<class>/
 
 ## Result
 
-| Class | recommended → insecure | secure → insecure |
+| Class | recommended → insecure | secure → insecure (texts as `solinv diff` prints them: spaces dropped, `==` / `!=` sides in order) |
 |---|---|---|
 | 0 signer-authorization | ✅ `Signer` → `AccountInfo` | ✅ `if !authority.is_signer` removed from the handler |
-| 1 account-data-matching | ✅ `Account` → `AccountInfo`; `constraint = authority.key == &token.owner` removed | ✅ `if authority.key != &token.owner` removed |
-| 2 owner-checks | ✅ `Account` → `AccountInfo` | ✅ `if token.owner != &spl_token::ID` removed |
-| 3 type-cosplay | ✅ `Account` → `AccountInfo`; `has_one = authority` removed | ✅ `if user.discriminant != AccountDiscriminant::User` removed |
+| 1 account-data-matching | ✅ `Account` → `AccountInfo`; `constraint = authority.key == &token.owner` removed | ✅ `if &token.owner!=authority.key` removed |
+| 2 owner-checks | ✅ `Account` → `AccountInfo` | ✅ `if &spl_token::ID!=token.owner` removed |
+| 3 type-cosplay | ✅ `Account` → `AccountInfo`; `has_one = authority` removed | ✅ `if AccountDiscriminant::User!=user.discriminant` removed |
 | 4 initialization | ✅ `Account` → `AccountInfo`, with `init` renamed `initialize` in the same change: paired by their slots and compared ([#9](https://github.com/psyto/solinv/issues/9)) | ✅ `if !user.discriminator` removed |
-| 5 arbitrary-cpi | ✅ `Program` → `AccountInfo` (plus signer and both token accounts) | ✅ `if &spl_token::ID != token_program.key` removed |
-| 6 duplicate-mutable-accounts | ✅ `constraint = user_a.key() != user_b.key()` removed | ✅ `if user_a.key() == user_b.key()` removed |
-| 7 bump-seed-canonicalization | ✅ `seeds` removed | ✅ `if expected_bump != bump` removed |
+| 5 arbitrary-cpi | ✅ `Program` → `AccountInfo` (plus signer and both token accounts) | ✅ `if &spl_token::ID!=token_program.key` removed |
+| 6 duplicate-mutable-accounts | ✅ `constraint = user_a.key() != user_b.key()` removed | ✅ `if user_a.key()==user_b.key()` removed |
+| 7 bump-seed-canonicalization | ✅ `seeds` removed | ✅ `if bump!=expected_bump` removed |
 | 8 pda-sharing | ✅ `seeds` removed | ❌ the CPI's signer seeds change; no check is deleted |
 | 9 closing-accounts | ✅ `close = destination` removed ([#10](https://github.com/psyto/solinv/issues/10)) | ❌ the zeroing code goes; `force_defund` (with its check) reported as a gone instruction |
-| 10 sysvar-address-checking | ✅ `Sysvar` → `AccountInfo` | ✅ `require_eq!(rent.key(), sysvar::rent::ID)` removed |
+| 10 sysvar-address-checking | ✅ `Sysvar` → `AccountInfo` | ✅ `require_eq!(rent.key(),sysvar::rent::ID)` removed |
 | **Total** | **11 of 11** (9 of 11 at 06e3adf) | **9 of 11** (0 of 11 before [#12](https://github.com/psyto/solinv/issues/12)) |
 
 **False positives:** 0. Every pair was also compared the other way round, `insecure` →

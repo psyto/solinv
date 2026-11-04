@@ -32,3 +32,5 @@ sha2 = "0.10"
 # Edge points this way (fuzz -> disclose) on purpose: disclose stays
 # free of Crucible/Solana so report consumers don't build the fuzzer.
 solinv-disclose = { path = "../solinv-disclose" }
+# IDL types and report; re-exported from `idl`.
+solinv-static = { path = "../solinv-static" }

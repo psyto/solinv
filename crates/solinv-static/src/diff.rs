@@ -14,7 +14,7 @@
 //! right default for a reviewer to look at.
 
 use crate::source::{Slot, SourceKinds};
-use solinv_fuzz::SlotKind;
+use crate::idl::SlotKind;
 use std::collections::BTreeSet;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]

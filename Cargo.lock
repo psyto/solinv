@@ -4756,6 +4756,7 @@ dependencies = [
  "solinv-disclose",
  "solinv-fuzz",
  "solinv-mutate",
+ "solinv-static",
  "toml",
 ]
 
@@ -4818,10 +4819,21 @@ dependencies = [
  "solana-pubkey 3.0.0",
  "solana-signer",
  "solinv-disclose",
+ "solinv-static",
 ]
 
 [[package]]
 name = "solinv-mutate"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "regex",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "solinv-static"
 version = "0.0.1"
 dependencies = [
  "anyhow",

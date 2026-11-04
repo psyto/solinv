@@ -934,6 +934,7 @@ impl EscrowFixture {
         }
         static IDL: std::sync::OnceLock<solinv_fuzz::Idl> = std::sync::OnceLock::new();
         let idl = IDL.get_or_init(|| solinv_fuzz::Idl::from_json(ESCROW_IDL).unwrap());
+        use solinv_fuzz::IdlSpecExt;
         let spec = bind(idl.spec(ix, self.program_id).unwrap())
             .build()
             .unwrap()

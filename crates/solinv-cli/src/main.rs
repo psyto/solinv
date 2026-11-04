@@ -12,8 +12,7 @@ use clap::{Parser, Subcommand};
 use serde::Deserialize;
 use std::{fs, path::PathBuf};
 
-mod diff;
-mod source;
+use solinv_static::{diff, source};
 
 #[derive(Parser)]
 #[command(

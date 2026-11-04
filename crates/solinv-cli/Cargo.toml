@@ -20,6 +20,7 @@ toml.workspace = true
 regex = "1"
 solinv-core = { path = "../solinv-core" }
 solinv-fuzz = { path = "../solinv-fuzz" }
+solinv-static = { path = "../solinv-static" }
 solinv-cheat = { path = "../solinv-cheat" }
 solinv-corpus = { path = "../solinv-corpus" }
 solinv-disclose = { path = "../solinv-disclose" }

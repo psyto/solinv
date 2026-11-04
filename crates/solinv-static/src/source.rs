@@ -12,7 +12,7 @@
 
 use anyhow::{Context, Result};
 use regex::Regex;
-use solinv_fuzz::SlotKind;
+use crate::idl::SlotKind;
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;

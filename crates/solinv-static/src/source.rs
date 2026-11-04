@@ -290,7 +290,7 @@ impl SourceKinds {
                 }
             })
             .collect();
-        Idl { address: String::new(), instructions, accounts: Vec::new() }
+        Idl { address: String::new(), instructions, accounts: Vec::new(), legacy: false }
     }
 
     /// Handler-body checks of `ix` that name no slot (#12).

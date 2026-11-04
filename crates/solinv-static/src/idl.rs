@@ -17,6 +17,9 @@ pub struct Idl {
     /// Account types and their discriminators.
     #[serde(default)]
     pub accounts: Vec<IdlAccountType>,
+    /// Converted from the legacy (pre-0.30) format, which has no fixed `address` on any slot.
+    #[serde(skip)]
+    pub legacy: bool,
 }
 
 #[derive(Clone, Debug, Deserialize)]

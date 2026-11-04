@@ -43,6 +43,8 @@ pub struct Attrs {
     /// `init` (not `init_if_needed`, which also accepts an existing
     /// account): the account is created here.
     pub init: bool,
+    /// `init_if_needed`: like `init`, a non-PDA one must sign.
+    pub init_if_needed: bool,
     /// `associated_token::authority`: the account is the one associated
     /// token account of that authority and mint. `token::authority` and
     /// `token::mint` are not: one authority can own many token accounts.
@@ -561,7 +563,11 @@ fn read_attrs(text: &str, expr: &str) -> Attrs {
                 a.mutable = true;
                 a.init = true;
             }
-            ("mut" | "init_if_needed", _) => a.mutable = true,
+            ("init_if_needed", _) => {
+                a.mutable = true;
+                a.init_if_needed = true;
+            }
+            ("mut", _) => a.mutable = true,
             ("signer", _) => a.signer = true,
             ("seeds", Some(_)) => a.seeds = true,
             ("address", Some(_)) => a.address = true,

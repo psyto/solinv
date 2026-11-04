@@ -79,8 +79,11 @@ Assumptions accepted as limitations:
 
 Anchor 0.30+ IDLs, built with PDA resolution on (`anchor build` does
 this; a bare `cargo test --features idl-build` needs
-`ANCHOR_IDL_BUILD_RESOLUTION=TRUE`). Legacy IDLs are rejected with the
-conversion command; Shank IDLs are rejected as unsupported. Composite
+`ANCHOR_IDL_BUILD_RESOLUTION=TRUE`). `Idl::from_json` takes that format
+only; `Idl::from_json_any` (used by `solinv idl` and `solinv diff
+--base-idl`) also reads legacy (pre-0.30) IDLs, converted as `anchor idl
+convert` does except for its two bugs (anchor#5255 seed quotes, anchor#5256
+relations on the wrong account). Shank IDLs are rejected as unsupported. Composite
 accounts bind by dotted path (`group_a.authority`) or by a leaf name
 that is unique in the instruction; an unbound optional account is
 encoded as the program id and signs nothing.

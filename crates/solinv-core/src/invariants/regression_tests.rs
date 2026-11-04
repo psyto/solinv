@@ -404,6 +404,15 @@ fn account_swap_sets_swap_slots_together() {
     account_swap::check_sets(&mut fixture(), &[set.clone()]);
     assert_detected("together");
 
+    // `to` is never created, so its slot takes an absent alternate: the set
+    // runs rather than being refused (#15).
+    clear_violation_tracking();
+    let absent_to = SwapSet { swaps: vec![(0, rogue_from), (1, rogue_base.pubkey()), (2, Pubkey::new_unique())], ..set.clone() };
+    account_swap::check_sets(&mut fixture(), &[absent_to]);
+    let msg = take_violation().unwrap_or_default();
+    assert!(!msg.starts_with("[account-swap-config:"), "absent slot refused: {msg}");
+    assert!(msg.contains("together"), "absent slot not run: {msg}");
+
     // A set that cannot run is a harness bug, reported as one (#13).
     let missing = Pubkey::new_unique();
     for (bad, why) in [

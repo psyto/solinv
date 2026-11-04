@@ -70,8 +70,11 @@ pub struct SwapSet {
 /// beside `check` from the same `#[invariant_test]`. A set is declared on
 /// purpose, so one that cannot run — no instruction of that name, an index
 /// out of range or repeated, an alternate equal to the real account or
-/// missing from the context — is reported as an `[account-swap-config:…]`
-/// finding, failing CI instead of testing nothing (#13).
+/// missing from the context while the real account is present — is
+/// reported as an `[account-swap-config:…]` finding, failing CI instead of
+/// testing nothing (#13). An alternate may be absent where the real account
+/// is absent too: an account the instruction creates, or a PDA used only as
+/// an address (#15).
 pub fn check_sets<F>(fixture: &mut F, sets: &[SwapSet])
 where
     F: HasContext + HasInstructionSet,
@@ -118,9 +121,14 @@ where
         return Err(format!("account {idx}'s alternate is the real account"));
     }
 
-    // Sanity: each alt must exist in ctx. Fixture is supposed to have
-    // created it during setup.
-    if let Some(&(idx, alt)) = swaps.iter().find(|&&(_, alt)| fixture.ctx().get_account(&alt).is_err()) {
+    // Sanity: each alt must exist in ctx when the real account at its slot
+    // does. Fixture is supposed to have created it during setup. A slot
+    // whose real account is absent too — one the instruction creates, or a
+    // PDA used only as an address — takes an absent alternate (#15).
+    let exists = |k: &Pubkey| fixture.ctx().get_account(k).is_ok();
+    if let Some(&(idx, alt)) =
+        swaps.iter().find(|&&(idx, alt)| !exists(&alt) && exists(&spec.accounts[idx].pubkey))
+    {
         return Err(format!("account {idx}'s alternate {alt} does not exist (create it in setup())"));
     }
 

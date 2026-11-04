@@ -22,7 +22,7 @@ stop. Apache-2.0.
 
 **Try it without installing:** paste a pull request or a program address into
 [solinv check](https://solinv-check.meowna-server.workers.dev). It runs `solinv diff` in the browser
-(solinv-static built to WebAssembly, at 8bcb011), and for a deployed program it rebuilds the IDL
+(solinv-static built to WebAssembly, at c098640), and for a deployed program it rebuilds the IDL
 from its upgrade history and diffs each upgrade. To fail every pull request in CI, or to fuzz the
 checks, install it (below).
 
@@ -31,6 +31,7 @@ checks, install it (below).
 | I want to… | Use |
 |---|---|
 | fail a pull request that removes an account check, with a note on the line | the `psyto/solinv` GitHub Action, or `solinv diff --base-src <before> --head-src <after>` |
+| see which account checks a deployed program's upgrade dropped, without its source | `solinv diff --base-idl <audited.json> --head-idl <onchain.json>` (`anchor idl fetch`), or every upgrade at once in [solinv check](https://solinv-check.meowna-server.workers.dev); [how it decides](docs/idl-diff.md) |
 | see which instructions need a hand-checked account, before writing any harness | `solinv idl target/idl/<program>.json --src programs/<program>/src` |
 | get a paste-ready spec for one instruction | `solinv idl <idl> --rust <ix>` |
 | fill an `InstructionSpec` from the IDL and fixture state instead of by hand | `solinv_fuzz::Idl` → `.spec()` → `.infer_from_state()` / `.infer_candidates()` |
@@ -104,6 +105,7 @@ flagged instructions are the demo program's three planted account-validation bug
 | A removed check fails the PR | The demo above; [the demo pull request](https://github.com/psyto/solinv/pull/2) |
 | A check in vipers' `validate()` counts too | Cashio's real source, fixed → before the fix: the check its fix added is named, in both instructions ([details](docs/diff.md#checked-on)); the map marks 2 of its 26 typed accounts `t`, both validated by the program they are passed to (26 before vipers was read, [#8](https://github.com/psyto/solinv/issues/8)) |
 | …on the 11 classes of [sealevel-attacks](https://github.com/coral-xyz/sealevel-attacks) | Turning each fixed program into its insecure version: 11 of 11 caught where the check was declared, 9 of 11 where it was written in the handler (the other two change CPI seeds and zeroing code, not a check); 0 removed checks reported in the other direction ([details](docs/sealevel-attacks.md)) |
+| …on real merged pull requests | Over 1,133 merged PRs of ten public Anchor programs: two mango-v4 PRs dropped a `has_one` that an audit restored 7 and 17 days later, and solinv names each on the PR that dropped it. On a random sample of 40 removals it reported there, 5 were real loosenings and 35 the same check written another way or moved — expect a reviewer to clear most failures as "moved" ([details](docs/history-scan.md)) |
 | No noise on code that keeps its checks | Comparing Jito tip-payment, tip-distribution and Raydium cp-swap with themselves: 0 reports. Reformatting a constraint or renaming its error: 0 reports (tested) |
 | The fuzz detectors catch a check that is removed | Mutation test on the clean escrow: of the removed checks the harness reached, 5 of 6 were caught, each by the detector predicted for it — after setting aside 5 mutations that cannot change behaviour, each argued in the [report](examples/escrow-demo/campaigns/escrow-clean-report.md) (5 of 11 before) |
 | …but not every kind yet | On Raydium's native AMM, 0 of 18: its guards compare values computed inside the handler, which a declaration cannot name ([why](#mutation-testing--measuring-detector-power-on-a-real-target)) |
@@ -120,7 +122,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: psyto/solinv@737823fcab83c1853c7b35c2825262eeefe56c3b
+      - uses: psyto/solinv@c0986406529e5e245b27cc5abd2e68df587de002
         with:
           program-src: programs/my_program/src
 ```
@@ -137,15 +139,15 @@ program works too, but each job compiles solinv: they race to save the same cach
 The CLI (not on crates.io yet; pin a commit):
 
 ```bash
-cargo install --git https://github.com/psyto/solinv --rev 737823fcab83 solinv-cli
+cargo install --git https://github.com/psyto/solinv --rev c0986406529e solinv-cli
 ```
 
 In your Crucible fuzz harness:
 
 ```toml
 [dependencies]
-solinv-fuzz = { git = "https://github.com/psyto/solinv", rev = "737823fcab83c1853c7b35c2825262eeefe56c3b" }
-solinv-core = { git = "https://github.com/psyto/solinv", rev = "737823fcab83c1853c7b35c2825262eeefe56c3b" }
+solinv-fuzz = { git = "https://github.com/psyto/solinv", rev = "c0986406529e5e245b27cc5abd2e68df587de002" }
+solinv-core = { git = "https://github.com/psyto/solinv", rev = "c0986406529e5e245b27cc5abd2e68df587de002" }
 crucible-test-context = { git = "https://github.com/asymmetric-research/crucible", tag = "v0.1.0" }
 ```
 ```rust
@@ -185,18 +187,20 @@ one-page walk-through, with what to time and what to send back.
 
 ### Where we use it ourselves
 
-Both installed from the pins above, the same way as for anyone else:
+All installed from the pins above, the same way as for anyone else:
 
 | Repo | What runs | Measured |
 |---|---|---|
 | [fabrknt/veil](https://github.com/fabrknt/veil/blob/main/.github/workflows/solinv.yml) | the action on 5 Anchor 0.30 programs, one matrix job each | A throwaway pull request that dropped a `has_one` failed only that program's job, with the annotation on the line ([fabrknt/veil#2](https://github.com/fabrknt/veil/pull/2)) |
 | [psyto/princeps-solana](https://github.com/psyto/princeps-solana/tree/main/fuzz/psol-vault) | a fuzz harness for a native (Pinocchio) vault: signer-skip, owner-skip, account-swap, 3 minutes per pull request | Deleting one check at a time: 6 of 6 caught; 0 findings on the current code. Two of them — the compliance-program pin in `deposit` and `withdraw` — need two accounts swapped together, which `account_swap::check_sets` does ([#4](https://github.com/psyto/solinv/issues/4), [psyto/princeps-solana#3](https://github.com/psyto/princeps-solana/pull/3)) |
+| [psyto/openhl-solana](https://github.com/psyto/openhl-solana/tree/main/fuzz/vault) | a fuzz harness for the native trading vault of the Solana Internals course, Chapter 12, which ends with it as an exercise ([§12.7](https://github.com/psyto/openhl-solana/blob/main/docs/chapter-12-vault/DRAFT.en.md)) | Its first run found a real hole: withdraw did not check that the share belonged to the vault, so shares minted cheaply in one vault drained another. Deleting the 9 account checks one at a time: 5 caught; the other 4 are refused anyway by the runtime's owner rule or by SPL Token, and the chapter explains each |
 
 What using it ourselves turned up: the `t` mark for typed accounts not tied to the instruction
 ([#3](https://github.com/psyto/solinv/issues/3); in veil it surrounds four real holes the earlier map showed as `T`),
 a signer-skip false positive ([#5](https://github.com/psyto/solinv/issues/5)), matrix jobs that
 race on the action's cache so each one recompiles ([#6](https://github.com/psyto/solinv/issues/6)),
-and two setup gaps in the docs ([#7](https://github.com/psyto/solinv/issues/7)). Upstream:
+two setup gaps in the docs ([#7](https://github.com/psyto/solinv/issues/7)), and `check_sets`
+skipping a set whose accounts are missing without saying so ([#13](https://github.com/psyto/solinv/issues/13)). Upstream:
 crucible's `--timeout` overran by 18 minutes in CI ([crucible#25](https://github.com/asymmetric-research/crucible/issues/25)),
 and it exits 0 on findings, so CI has to look for `[FUZZ_FINDING]` itself ([crucible#26](https://github.com/asymmetric-research/crucible/issues/26)).
 
@@ -877,11 +881,16 @@ solinv idl target/idl/my_program.json --src programs/my_program/src  # + declare
 solinv idl target/idl/my_program.json --rust deposit   # binding stub for one ix
 ```
 
-Reads the Anchor 0.30+ IDL format. A legacy (pre-0.30) IDL is rejected
-with the fix: convert it with
-`anchor idl convert <path> -p <program id> -o <out>` (`-p` is needed
-when the IDL has no `metadata.address`; klend's does not). Shank IDLs
-from native programs are not supported. Building an IDL on Anchor 0.30
+Reads the Anchor 0.30+ IDL format, and a legacy (pre-0.30) IDL directly:
+`solinv idl` and `solinv diff --base-idl` convert it the way
+`anchor idl convert` does, minus two bugs in that converter (string const
+seeds keep their JSON quotes,
+[anchor#5255](https://github.com/otter-sec/anchor/issues/5255); `has_one`
+relations land on the wrong account,
+[anchor#5256](https://github.com/otter-sec/anchor/issues/5256)), so do
+not pre-convert with it. In a harness, `Idl::from_json_any` does the
+same; `Idl::from_json` takes 0.30+ only. Shank IDLs from native programs
+are not supported. Building an IDL on Anchor 0.30
 with current Rust needs a `proc-macro2` pin
 ([anchor#3661](https://github.com/otter-sec/anchor/issues/3661)); the
 steps are in [`docs/try-solinv.md`](docs/try-solinv.md#step-2--map-your-program-about-5-minutes).

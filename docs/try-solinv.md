@@ -17,18 +17,18 @@ Please point solinv at one Anchor program you know well, time each step, and tel
 | 1–2 (map) | Rust (`cargo`); an Anchor program's source and its IDL, Anchor 0.30 or later |
 | 3 (fuzz, optional) | the above, plus the Solana toolchain (`cargo build-sbf`) and the [Crucible](https://github.com/asymmetric-research/crucible) CLI |
 
-An older (pre-0.30) IDL works after `anchor idl convert <path> -p <program id> -o <out>`. Native and Shank programs are not supported yet — telling us that you have one is useful too.
+An older (pre-0.30) IDL works as it is: solinv converts it itself (do not run `anchor idl convert` first; it has two bugs that change seeds and `has_one`, [anchor#5255](https://github.com/otter-sec/anchor/issues/5255) and [#5256](https://github.com/otter-sec/anchor/issues/5256)). Native and Shank programs are not supported yet — telling us that you have one is useful too.
 
 Keep a clock running: note the time you start each step.
 
 ## Step 1 — install (about 1–2 minutes)
 
 ```bash
-cargo install --git https://github.com/psyto/solinv --rev 737823fcab83 solinv-cli
+cargo install --git https://github.com/psyto/solinv --rev c0986406529e solinv-cli
 solinv --help
 ```
 
-The commit is pinned so we all run the same code. On our machine the install took about 75 seconds.
+The commit is pinned so we all run the same code. On our machine the install took about 85 seconds.
 
 ## Step 2 — map your program (about 5 minutes)
 
@@ -91,7 +91,7 @@ Pick one instruction from step 2, ideally one with a `U` slot. Most of the time 
    ```
 
    If the program is already deployed, fuzzing the deployed binary is usually better: `solana program dump -u m <program id> <program>.so`. Rebuilding a program whose Cargo.lock has solana-program below 1.16 (check it) with current platform-tools broke, in our tests, the one kind of CPI we tried (`init` calling System Program `create_account`), failing with "Access violation … 0xffffffffffffffff", on a real validator too ([why](https://github.com/psyto/solinv/blob/main/docs/phase5-day61-h1-was-the-build.md)).
-2. Start the harness from solinv's template: copy `Cargo.toml` and `src/main.rs` from [examples/escrow-demo/fuzz/escrow_clean](https://github.com/psyto/solinv/tree/737823fcab83/examples/escrow-demo/fuzz/escrow_clean) into `fuzz/<program>/`. Delete its `escrow-clean` dependency and the `use escrow_clean::ID;` line, and point the `solinv-fuzz` / `solinv-core` path dependencies at `{ git = "https://github.com/psyto/solinv", rev = "737823fcab83" }`.
+2. Start the harness from solinv's template: copy `Cargo.toml` and `src/main.rs` from [examples/escrow-demo/fuzz/escrow_clean](https://github.com/psyto/solinv/tree/c0986406529e/examples/escrow-demo/fuzz/escrow_clean) into `fuzz/<program>/`. Delete its `escrow-clean` dependency and the `use escrow_clean::ID;` line, and point the `solinv-fuzz` / `solinv-core` path dependencies at `{ git = "https://github.com/psyto/solinv", rev = "c0986406529e" }`.
 3. Print the spec stub and paste it into `instructions()`:
 
    ```bash

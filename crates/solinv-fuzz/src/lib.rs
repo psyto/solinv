@@ -38,7 +38,7 @@ pub use capability::{
 pub use schema::{
     relation, AccountSchema, SchemaError, SchemaField, ANCHOR_DISCRIMINATOR_LEN, READABLE_WIDTHS,
 };
-pub use idl::{Candidate, CandidateKind, FlatAccount, Idl, IdlError, IdlSpec, SlotKind, SpecBuilder, Unresolved};
+pub use idl::{Candidate, CandidateKind, FlatAccount, Idl, IdlError, IdlSpec, IdlSpecExt, SlotKind, SpecBuilder, Unresolved};
 pub use differential::{
     check_all_pairs, check_pair_equivalent, read_pair_bodies, BodyDivergence, CuComparison,
     DiffAccountPair, DifferentialFixture, ParityDivergence, SendFailure, SideResult,
@@ -60,7 +60,7 @@ pub mod prelude {
         HasContext, HasInstructionSet, InstructionSpec, MonotonicDir, RelOp, RelTerm,
         StateInvariant, StateInvariantKind,
     };
-    pub use crate::idl::{Candidate, CandidateKind, FlatAccount, Idl, IdlError, IdlSpec, SlotKind, SpecBuilder, Unresolved};
+    pub use crate::idl::{Candidate, CandidateKind, FlatAccount, Idl, IdlError, IdlSpec, IdlSpecExt, SlotKind, SpecBuilder, Unresolved};
     pub use crate::schema::{relation, AccountSchema, SchemaError, SchemaField};
     pub use crate::differential::{
         check_all_pairs, check_pair_equivalent, read_pair_bodies, BodyDivergence, CuComparison,

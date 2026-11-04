@@ -24,11 +24,11 @@ Keep a clock running: note the time you start each step.
 ## Step 1 — install (about 1–2 minutes)
 
 ```bash
-cargo install --git https://github.com/psyto/solinv --rev 6ebc1ca651e3 solinv-cli
+cargo install --git https://github.com/psyto/solinv --rev 8bcb011bd5d3 solinv-cli
 solinv --help
 ```
 
-The commit is pinned so we all run the same code. On our machine the install took 74 seconds.
+The commit is pinned so we all run the same code. On our machine the install took about 85 seconds.
 
 ## Step 2 — map your program (about 5 minutes)
 
@@ -39,7 +39,7 @@ anchor build      # writes target/idl/<program>.json
 solinv idl target/idl/<program>.json --src programs/<program>/src
 ```
 
-If you would rather not build, an IDL already in the repo works too, but it may lack PDA seeds and fixed addresses if it was generated without resolution.
+If you would rather not build, an IDL already in the repo works too, but it may lack PDA seeds and fixed addresses if it was generated without resolution. With no IDL at all (an older Anchor version, or a build that fails), `solinv idl --src programs/<program>/src` reads the map from the source alone, the columns taken from the `#[account(...)]` attributes. It differs from the IDL's in small ways: instructions in name order, and `A` also on an `address = …` that is not a constant.
 
 On Anchor 0.30, building the IDL with current Rust fails in `anchor-syn` with `no method named source_file found for struct proc_macro2::Span` ([anchor#3661](https://github.com/otter-sec/anchor/issues/3661); fixed in 0.31.1). What worked for us on 0.30.1, from the workspace root:
 
@@ -91,7 +91,7 @@ Pick one instruction from step 2, ideally one with a `U` slot. Most of the time 
    ```
 
    If the program is already deployed, fuzzing the deployed binary is usually better: `solana program dump -u m <program id> <program>.so`. Rebuilding a program whose Cargo.lock has solana-program below 1.16 (check it) with current platform-tools broke, in our tests, the one kind of CPI we tried (`init` calling System Program `create_account`), failing with "Access violation … 0xffffffffffffffff", on a real validator too ([why](https://github.com/psyto/solinv/blob/main/docs/phase5-day61-h1-was-the-build.md)).
-2. Start the harness from solinv's template: copy `Cargo.toml` and `src/main.rs` from [examples/escrow-demo/fuzz/escrow_clean](https://github.com/psyto/solinv/tree/6ebc1ca651e3/examples/escrow-demo/fuzz/escrow_clean) into `fuzz/<program>/`. Delete its `escrow-clean` dependency and the `use escrow_clean::ID;` line, and point the `solinv-fuzz` / `solinv-core` path dependencies at `{ git = "https://github.com/psyto/solinv", rev = "6ebc1ca651e3" }`.
+2. Start the harness from solinv's template: copy `Cargo.toml` and `src/main.rs` from [examples/escrow-demo/fuzz/escrow_clean](https://github.com/psyto/solinv/tree/8bcb011bd5d3/examples/escrow-demo/fuzz/escrow_clean) into `fuzz/<program>/`. Delete its `escrow-clean` dependency and the `use escrow_clean::ID;` line, and point the `solinv-fuzz` / `solinv-core` path dependencies at `{ git = "https://github.com/psyto/solinv", rev = "8bcb011bd5d3" }`.
 3. Print the spec stub and paste it into `instructions()`:
 
    ```bash

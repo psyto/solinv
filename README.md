@@ -6,8 +6,11 @@ Some of Solana's largest losses came down to one account nobody checked:
 [Cashio](https://halborn.com/explained-the-cashio-hack-march-2022/) (Mar 2022, ~$48M) never
 validated a `mint` field, so a chain of fake accounts passed;
 [Crema](https://halborn.com/explained-the-crema-finance-hack-july-2022/) (Jul 2022, ~$8.8M) let a
-fake tick account past its owner check. In Anchor each of those checks is one type or one
-`#[account(...)]` line, enforced only while it is written down — and a refactor that loosens
+fake tick account past its owner check. Those checks were missing from the start, and spotting a
+check that was never written is a reviewer's job: solinv would not have caught them (we checked
+Cashio's real source, see [#8](https://github.com/psyto/solinv/issues/8)). solinv covers the other
+half: a check that *was* written down and a later change removes. In Anchor that is one type or one
+`#[account(...)]` line, enforced only while it is there — and a refactor that loosens
 `Account<'info, Vault>` to `UncheckedAccount` or deletes a `has_one` fails no test. As more
 programs are written and refactored by AI coding agents, that kind of change gets more common and
 easier to miss: it compiles, the tests the agent wrote pass, and a one-line deletion is easy to skim
@@ -27,7 +30,7 @@ stop. Apache-2.0.
 | fill an `InstructionSpec` from the IDL and fixture state instead of by hand | `solinv_fuzz::Idl` → `.spec()` → `.infer_from_state()` / `.infer_candidates()` |
 | check a signer is really required | `solinv_core::invariants::signer_skip::check` |
 | check an account's owner program / type tag is really checked | `owner_skip::check` / `discriminator_skip::check` |
-| check a PDA can't be forged, or swapped for another user's | `pda_forge::check` / `account_swap::check` / `bump_seed_canonicalization::check` |
+| check a PDA can't be forged, or swapped for another user's | `pda_forge::check` / `account_swap::check` (`check_sets` for slots swapped together) / `bump_seed_canonicalization::check` |
 | check a `require!` guard can't be skipped | `precondition_skip::check` + `InstructionSpec.guards` |
 | catch wrapped arithmetic on named fields | `unchecked_math::check` + `AccountSchema` |
 | cap compute units, or catch re-entry / under-funded `realloc` | `cu_dos` / `cpi_reentrancy` / `realloc_race` |
@@ -76,7 +79,7 @@ unsafe_withdraw   ! no signer, writes an unconstrained slot
    1 depositor        W   U
 
 7 slots are UncheckedAccount / AccountInfo in source: their checks are hand-written, which is where the Critical 5 can find something.
-! 1 writable typed accounts have no declared constraint fixing which account they are (no seeds, address, has_one, associated_token:: or .key() comparison; the handler body is not read). Unless the handler checks the key, a caller may pass any account of the type: expected for their own token accounts, a hole for a vault, escrow or pool the program owns. account-swap candidates: unsafe_set_amount_from_source.target
+! 1 writable typed accounts have no declared constraint fixing which account they are (no seeds, address, has_one, associated_token:: or .key() comparison, in the attributes or at the top of the handler). Unless a function the handler calls checks the key, a caller may pass any account of the type: expected for their own token accounts, a hole for a vault, escrow or pool the program owns. account-swap candidates: unsafe_set_amount_from_source.target
 3 instruction(s) with no signer write an unconstrained slot: unsafe_set_amount_from_source, unsafe_withdraw_with_bump, unsafe_withdraw
 Start there: either they are meant to be permissionless, or an authority check is missing.
 ```
@@ -93,6 +96,8 @@ flagged instructions are the demo program's three planted account-validation bug
 | Claim | Evidence |
 |---|---|
 | A removed check fails the PR | The demo above; [the demo pull request](https://github.com/psyto/solinv/pull/2) |
+| A check in vipers' `validate()` counts too | Cashio's real source, fixed → before the fix: the check its fix added is named, in both instructions ([details](docs/diff.md#checked-on)); the map marks 2 of its 26 typed accounts `t`, both validated by the program they are passed to (26 before vipers was read, [#8](https://github.com/psyto/solinv/issues/8)) |
+| …on the 11 classes of [sealevel-attacks](https://github.com/coral-xyz/sealevel-attacks) | Turning each fixed program into its insecure version: 11 of 11 caught where the check was declared, 9 of 11 where it was written in the handler (the other two change CPI seeds and zeroing code, not a check); 0 removed checks reported in the other direction ([details](docs/sealevel-attacks.md)) |
 | No noise on code that keeps its checks | Comparing Jito tip-payment, tip-distribution and Raydium cp-swap with themselves: 0 reports. Reformatting a constraint or renaming its error: 0 reports (tested) |
 | The fuzz detectors catch a check that is removed | Mutation test on the clean escrow: of the removed checks the harness reached, 5 of 6 were caught, each by the detector predicted for it — after setting aside 5 mutations that cannot change behaviour, each argued in the [report](examples/escrow-demo/campaigns/escrow-clean-report.md) (5 of 11 before) |
 | …but not every kind yet | On Raydium's native AMM, 0 of 18: its guards compare values computed inside the handler, which a declaration cannot name ([why](#mutation-testing--measuring-detector-power-on-a-real-target)) |
@@ -109,7 +114,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: psyto/solinv@f5267c8f23c3b21bc8f2b54308bcbd52824da806
+      - uses: psyto/solinv@8bcb011bd5d3ace5748d291a823c30ae018fc79e
         with:
           program-src: programs/my_program/src
 ```
@@ -126,18 +131,20 @@ program works too, but each job compiles solinv: they race to save the same cach
 The CLI (not on crates.io yet; pin a commit):
 
 ```bash
-cargo install --git https://github.com/psyto/solinv --rev 6ebc1ca651e3 solinv-cli
+cargo install --git https://github.com/psyto/solinv --rev 8bcb011bd5d3 solinv-cli
 ```
 
 In your Crucible fuzz harness:
 
 ```toml
 [dependencies]
-solinv-fuzz = { git = "https://github.com/psyto/solinv", rev = "6ebc1ca651e362df67e75ab9836692fc0940697c" }
-solinv-core = { git = "https://github.com/psyto/solinv", rev = "6ebc1ca651e362df67e75ab9836692fc0940697c" }
+solinv-fuzz = { git = "https://github.com/psyto/solinv", rev = "8bcb011bd5d3ace5748d291a823c30ae018fc79e" }
+solinv-core = { git = "https://github.com/psyto/solinv", rev = "8bcb011bd5d3ace5748d291a823c30ae018fc79e" }
 crucible-test-context = { git = "https://github.com/asymmetric-research/crucible", tag = "v0.1.0" }
 ```
 ```rust
+use solinv_fuzz::{Idl, IdlSpecExt};   // `spec()` comes from IdlSpecExt (or `use solinv_fuzz::prelude::*`)
+
 let spec = Idl::from_json(include_str!("../idl/my_program.json"))?
     .spec("deposit", program_id)?
     .account("vault", vault)
@@ -177,7 +184,7 @@ Both installed from the pins above, the same way as for anyone else:
 | Repo | What runs | Measured |
 |---|---|---|
 | [fabrknt/veil](https://github.com/fabrknt/veil/blob/main/.github/workflows/solinv.yml) | the action on 5 Anchor 0.30 programs, one matrix job each | A throwaway pull request that dropped a `has_one` failed only that program's job, with the annotation on the line ([fabrknt/veil#2](https://github.com/fabrknt/veil/pull/2)) |
-| [psyto/princeps-solana](https://github.com/psyto/princeps-solana/tree/main/fuzz/psol-vault) | a fuzz harness for a native (Pinocchio) vault: signer-skip, owner-skip, account-swap, 3 minutes per pull request | Deleting one check at a time: 4 of 5 caught; 0 findings on the current code. The miss needs two accounts swapped together ([#4](https://github.com/psyto/solinv/issues/4)) |
+| [psyto/princeps-solana](https://github.com/psyto/princeps-solana/tree/main/fuzz/psol-vault) | a fuzz harness for a native (Pinocchio) vault: signer-skip, owner-skip, account-swap, 3 minutes per pull request | Deleting one check at a time: 6 of 6 caught; 0 findings on the current code. Two of them — the compliance-program pin in `deposit` and `withdraw` — need two accounts swapped together, which `account_swap::check_sets` does ([#4](https://github.com/psyto/solinv/issues/4), [psyto/princeps-solana#3](https://github.com/psyto/princeps-solana/pull/3)) |
 
 What using it ourselves turned up: the `t` mark for typed accounts not tied to the instruction
 ([#3](https://github.com/psyto/solinv/issues/3); in veil it surrounds four real holes the earlier map showed as `T`),
@@ -818,13 +825,16 @@ solinv/
 │   │                      #   no Crucible/Solana)
 │   ├── solinv-cheat/      # LiteSVM cheatcode wrappers
 │   ├── solinv-corpus/     # Yellowstone gRPC seeder (scaffold)
+│   ├── solinv-static/     # no Solana deps (builds to WASM): the IDL report,
+│   │                      #   source.rs (declared account types, #[account]
+│   │                      #   constraints, vipers validate()), diff.rs (what a
+│   │                      #   change removes), idl_diff.rs (the same from IDLs)
 │   ├── solinv-disclose/   # Divergence findings as checkable evidence
 │   │                      #   (serde+sha2 only, no Crucible/Solana);
 │   │                      #   platform formatters pending
-│   └── solinv-cli/        # `solinv` binary — idl, diff (+ source.rs: declared
-│                          #   account types and #[account] constraints; diff.rs:
-│                          #   what a change removes), mutate, score (+ scaffolds:
-│                          #   init, check, fuzz, corpus, disclose)
+│   └── solinv-cli/        # `solinv` binary — idl, diff (on solinv-static),
+│                          #   mutate, score (+ scaffolds: init, check, fuzz,
+│                          #   corpus, disclose)
 ├── examples/
 │   ├── escrow-demo/             # planted-bug acceptance fixture (7 invariants)
 │   │   ├── diff/drop-a-check/   # escrow-clean with one check dropped (diff quickstart)
@@ -888,19 +898,23 @@ comparison identifies — on it, or on
 another slot naming it — and that `init` does not create, is marked
 `t`: Anchor checks its owner and type, not which account it is, so it
 is where `account-swap` should look. It is a candidate list, not a
-verdict: `seeds`, `address`, `has_one`, `associated_token::authority` and each
+verdict: `seeds`, `address`, `has_one`, `associated_token::authority`, a
+vipers `assert_keys_eq!` in an `impl Validate` that `#[access_control]`
+runs, and each
 `&&` clause of a constraint comparing a `.key()` (not an `||`, where
 one branch can pass alone) count when they
 name another account of the instruction or an upper-case constant
 (`seeds` of literals alone too), not an instruction argument the caller
-picks, and what a comparison says is not checked; a key
-comparison in the handler body is not read (Jito
-tip-distribution's `upload_merkle_root` checks there), nor is the fact
+picks, and what a comparison says is not checked. A key comparison at
+the top level of the handler body (`require_keys_eq!`, `if a.key() !=
+b.key() { return Err(..) }`) counts; one inside a function the handler
+calls is not read (Jito tip-distribution's `upload_merkle_root` checks
+in such a helper), nor is the fact
 that a type only ever exists at one PDA. A tie to another account
 counts even when that account is itself the caller's choice (the pool
 or sale the instruction acts on): whether a caller can create a matching
 pair depends on who can create the type, which the map does not read —
-`account-swap` with both slots swapped is the test for that. The reader is a line reader,
+`account_swap::check_sets` with both slots swapped is the test for that. The reader is a line reader,
 not a parser: a slot typed by a type alias, a struct name
 defined twice, or a field type split over lines is left unplaced and
 counted as not found — never guessed. On the production programs
@@ -927,6 +941,8 @@ features than the IDL.
 In the fixture, the stub becomes the spec:
 
 ```rust
+use solinv_fuzz::IdlSpecExt;   // brings `spec()` into scope
+
 let spec = idl.spec("deposit", program_id)?
     .account("vault", vault_pda)
     .signer("depositor", Arc::clone(&depositor))
@@ -1109,9 +1125,14 @@ CLI surface:
 
 ```
 solinv idl <idl.json>                        # account-validation map + unsigned writers
+solinv idl --src <program src>               # the map from source alone (no IDL: older Anchor);
+                                             #   A also marks a non-constant `address =`
 solinv idl <idl.json> --src <program src>    # + U/T/t: unchecked, typed, typed but untied
 solinv diff --base-src <before> --head-src <after>  # checks a change removes; exit 1 if any
 solinv diff … --format github                # the same, as Actions annotations
+solinv diff --base-idl <a.json> --head-idl <b.json>  # from two IDLs, e.g. the audited build
+                                             #   and `anchor idl fetch`: signer, seeds,
+                                             #   address, has_one only
 solinv idl <idl.json> --rust <ix|all>        # SpecBuilder stub to paste into a fixture
 solinv init                                  # scaffold a solinv harness (not yet implemented)
 solinv check <target>                        # run invariant checks

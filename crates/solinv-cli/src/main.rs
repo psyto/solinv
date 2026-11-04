@@ -12,8 +12,7 @@ use clap::{Parser, Subcommand};
 use serde::Deserialize;
 use std::{fs, path::PathBuf};
 
-mod diff;
-mod source;
+use solinv_static::{diff, source};
 
 #[derive(Parser)]
 #[command(
@@ -58,8 +57,9 @@ enum Commands {
     /// Show an Anchor IDL's account-validation surface, and which
     /// instructions to point the Critical 5 at first
     Idl {
-        /// Anchor IDL JSON, e.g. target/idl/my_program.json
-        path: PathBuf,
+        /// Anchor IDL JSON, e.g. target/idl/my_program.json. Optional
+        /// with --src: without it the map is read from source alone
+        path: Option<PathBuf>,
         /// Print a `SpecBuilder` binding stub for this instruction
         /// (`all` for every instruction)
         #[arg(long)]
@@ -74,11 +74,18 @@ enum Commands {
     /// of an Anchor program's source (no build needed)
     Diff {
         /// The program source before the change (file or directory)
-        #[arg(long)]
-        base_src: PathBuf,
+        #[arg(long, requires = "head_src", conflicts_with_all = ["base_idl", "head_idl"])]
+        base_src: Option<PathBuf>,
         /// The program source after the change
-        #[arg(long)]
-        head_src: PathBuf,
+        #[arg(long, requires = "base_src", conflicts_with_all = ["base_idl", "head_idl"])]
+        head_src: Option<PathBuf>,
+        /// The Anchor IDL before the change (e.g. the audited build), instead
+        /// of source. Sees fewer checks: signer, seeds, address, has_one
+        #[arg(long, requires = "head_idl")]
+        base_idl: Option<PathBuf>,
+        /// The Anchor IDL after the change (e.g. `anchor idl fetch <program>`)
+        #[arg(long, requires = "base_idl")]
+        head_idl: Option<PathBuf>,
         /// `text`, or `github` for Actions annotations on the changed lines
         #[arg(long, default_value = "text")]
         format: String,
@@ -524,16 +531,29 @@ fn main() -> Result<()> {
             println!("solinv disclose {bug_id}: not yet implemented");
         }
         Commands::Mutate { action } => run_mutate(action)?,
-        Commands::Diff { base_src, head_src, format, no_fail } => {
-            let base = source::SourceKinds::read(&base_src)?;
-            let head = source::SourceKinds::read(&head_src)?;
-            if base.is_empty() {
-                anyhow::bail!(
-                    "no #[derive(Accounts)] field under {} could be matched to an instruction",
-                    base_src.display()
-                );
-            }
-            let changes = diff::diff(&base, &head);
+        Commands::Diff { base_src, head_src, base_idl, head_idl, format, no_fail } => {
+            let changes = match (base_src, head_src, base_idl, head_idl) {
+                (Some(base_src), Some(head_src), None, None) => {
+                    let base = source::SourceKinds::read(&base_src)?;
+                    let head = source::SourceKinds::read(&head_src)?;
+                    if base.is_empty() {
+                        anyhow::bail!(
+                            "no #[derive(Accounts)] field under {} could be matched to an instruction",
+                            base_src.display()
+                        );
+                    }
+                    diff::diff(&base, &head)
+                }
+                (None, None, Some(base_idl), Some(head_idl)) => {
+                    let read = |p: &PathBuf| -> Result<solinv_static::idl::Idl> {
+                        let raw = fs::read_to_string(p)
+                            .with_context(|| format!("failed to read IDL: {}", p.display()))?;
+                        Ok(solinv_static::idl::Idl::from_json_any(&raw)?.0)
+                    };
+                    solinv_static::idl_diff::diff_idl(&read(&base_idl)?, &read(&head_idl)?)
+                }
+                _ => anyhow::bail!("pass --base-src and --head-src, or --base-idl and --head-idl"),
+            };
             match format.as_str() {
                 "github" => {
                     print!("{}", diff::render_github(&changes));
@@ -548,9 +568,41 @@ fn main() -> Result<()> {
             }
         }
         Commands::Idl { path, rust, src } => {
+            let Some(path) = path else {
+                // No IDL (#11): the account lists come from the source.
+                let Some(dir) = src else {
+                    anyhow::bail!("solinv idl: give an IDL, or --src <program src> to map from source alone");
+                };
+                if rust.is_some() {
+                    anyhow::bail!("solinv idl --rust needs the IDL: discriminators and args are not in the source");
+                }
+                let kinds = source::SourceKinds::read(&dir)?;
+                if kinds.is_empty() {
+                    anyhow::bail!(
+                        "solinv idl: no #[derive(Accounts)] field under {} could be matched to an instruction",
+                        dir.display()
+                    );
+                }
+                eprintln!(
+                    "note: no IDL: S/W/P/A below come from the #[account] attributes in {} \
+                     (instructions in name order, seeds not resolved)",
+                    dir.display()
+                );
+                print!(
+                    "{}",
+                    kinds.to_idl().report_with_bound(
+                        |ix, path| kinds.get(ix, path),
+                        |ix, path| !kinds.unbound(ix, path)
+                    )
+                );
+                return Ok(());
+            };
             let raw = fs::read_to_string(&path)
                 .with_context(|| format!("failed to read IDL: {}", path.display()))?;
-            let idl = solinv_fuzz::Idl::from_json(&raw)?;
+            let (idl, legacy) = solinv_fuzz::Idl::from_json_any(&raw)?;
+            if legacy {
+                eprintln!("note: legacy (pre-0.30) IDL, read as `anchor idl convert` would convert it");
+            }
             match rust.as_deref() {
                 None => match src {
                     Some(dir) => {

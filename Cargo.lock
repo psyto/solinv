@@ -4747,7 +4747,6 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "clap",
- "regex",
  "serde",
  "serde_json",
  "solinv-cheat",
@@ -4756,6 +4755,7 @@ dependencies = [
  "solinv-disclose",
  "solinv-fuzz",
  "solinv-mutate",
+ "solinv-static",
  "toml",
 ]
 
@@ -4818,6 +4818,7 @@ dependencies = [
  "solana-pubkey 3.0.0",
  "solana-signer",
  "solinv-disclose",
+ "solinv-static",
 ]
 
 [[package]]
@@ -4828,6 +4829,18 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "solinv-static"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "heck 0.5.0",
+ "regex",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
 ]
 
 [[package]]

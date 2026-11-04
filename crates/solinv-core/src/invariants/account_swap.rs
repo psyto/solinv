@@ -44,47 +44,95 @@ where
     for spec in &ixs {
         for (idx, alternates) in spec.swap_alternates.iter().enumerate() {
             for &alt_pubkey in alternates {
-                run_attempt(fixture, spec, idx, alt_pubkey);
+                // A per-slot alternate that cannot run is skipped quietly.
+                let _ = run_attempt(fixture, spec, &[(idx, alt_pubkey)]);
             }
         }
     }
 }
 
-/// Single attempt: substitute one real alternate pubkey for the
-/// canonical account at idx.
+/// Slots of one instruction swapped together in a single attempt.
+///
+/// Some bindings take two accounts to break: a program that trusts the
+/// records a caller-chosen program owns rejects a rogue program alone
+/// (the record's owner no longer matches) and a rogue record alone (its
+/// owner is not the trusted program), but accepts both (#4). A set names
+/// each slot index and its alternate; all are substituted at once.
+#[derive(Clone, Debug)]
+pub struct SwapSet {
+    /// The instruction, by `InstructionSpec::name`.
+    pub ix: String,
+    /// `(account index, alternate pubkey)` for every slot swapped.
+    pub swaps: Vec<(usize, Pubkey)>,
+}
+
+/// [`check`] for sets of slots that must be swapped together. Call it
+/// beside `check` from the same `#[invariant_test]`. A set is declared on
+/// purpose, so one that cannot run — no instruction of that name, an index
+/// out of range or repeated, an alternate equal to the real account or
+/// missing from the context — is reported as an `[account-swap-config:…]`
+/// finding, failing CI instead of testing nothing (#13).
+pub fn check_sets<F>(fixture: &mut F, sets: &[SwapSet])
+where
+    F: HasContext + HasInstructionSet,
+{
+    let ixs = fixture.instructions();
+    for set in sets {
+        let outcome = match ixs.iter().find(|s| s.name == set.ix) {
+            Some(spec) => run_attempt(fixture, spec, &set.swaps),
+            None => Err("no instruction of that name in instructions()".to_string()),
+        };
+        if let Err(why) = outcome {
+            fuzz_assert!(false, "[account-swap-config:{}] swap set cannot run: {}", set.ix, why);
+        }
+    }
+}
+
+/// Single attempt: substitute each real alternate pubkey for the
+/// canonical account at its index, all in one instruction.
+///
+/// `Err` names why the attempt could not run; `check` ignores it.
 fn run_attempt<F>(
     fixture: &mut F,
     spec: &solinv_fuzz::InstructionSpec,
-    idx: usize,
-    alt_pubkey: Pubkey,
-) where
+    swaps: &[(usize, Pubkey)],
+) -> Result<(), String>
+where
     F: HasContext + HasInstructionSet,
 {
-    if idx >= spec.accounts.len() {
-        return;
+    if swaps.is_empty() {
+        return Err("no swaps".into());
     }
-
-    let real_pubkey = spec.accounts[idx].pubkey;
-    if alt_pubkey == real_pubkey {
+    if let Some(&(idx, _)) = swaps.iter().find(|&&(idx, _)| idx >= spec.accounts.len()) {
+        return Err(format!("account {idx} out of range ({} accounts)", spec.accounts.len()));
+    }
+    // One alternate per slot: a repeated index is a malformed set.
+    if let Some((_, &(idx, _))) =
+        swaps.iter().enumerate().find(|&(i, &(idx, _))| swaps[..i].iter().any(|&(j, _)| j == idx))
+    {
+        return Err(format!("account {idx} swapped twice"));
+    }
+    if let Some(&(idx, _)) = swaps.iter().find(|&&(idx, alt)| alt == spec.accounts[idx].pubkey) {
         // Same account; not a swap. (Defensive — fixture should not
-        // include real in alternates list, but skip gracefully.)
-        return;
+        // include real in alternates list.)
+        return Err(format!("account {idx}'s alternate is the real account"));
     }
 
-    // Sanity: alt must exist in ctx. Fixture is supposed to have
-    // created it during setup; skip silently if not.
-    if fixture.ctx().get_account(&alt_pubkey).is_err() {
-        return;
+    // Sanity: each alt must exist in ctx. Fixture is supposed to have
+    // created it during setup.
+    if let Some(&(idx, alt)) = swaps.iter().find(|&&(_, alt)| fixture.ctx().get_account(&alt).is_err()) {
+        return Err(format!("account {idx}'s alternate {alt} does not exist (create it in setup())"));
     }
 
     // 1. Build the full list of pubkeys the modified ix will touch:
-    //    canonical accounts with alt substituted at idx. This captures
-    //    state changes whether they happen in canonical OR alt account.
+    //    canonical accounts with alts substituted. This captures state
+    //    changes whether they happen in canonical OR alt accounts.
+    let alt_at = |i: usize| swaps.iter().find(|&&(idx, _)| idx == i).map(|&(_, alt)| alt);
     let touched: Vec<Pubkey> = spec
         .accounts
         .iter()
         .enumerate()
-        .map(|(i, m)| if i == idx { alt_pubkey } else { m.pubkey })
+        .map(|(i, m)| alt_at(i).unwrap_or(m.pubkey))
         .collect();
 
     // 2. Manual save — includes alt so restore undoes any attack damage
@@ -96,22 +144,30 @@ fn run_attempt<F>(
     //    NO fake construction — alt is already a real legitimate PDA
     //    in the fixture's state.
     let mut metas = spec.accounts.clone();
-    metas[idx].pubkey = alt_pubkey;
+    for &(idx, alt) in swaps {
+        metas[idx].pubkey = alt;
+    }
+
+    // 4. Signers: fee-payer prepended + the business signers the swapped
+    //    instruction still asks for. With sigverify on, a keypair whose
+    //    slot was swapped out would make signing fail before the program
+    //    runs, hiding the result, and an alternate that signs needs its
+    //    keypair in `spec.signers`. (Crucible's default, sigverify off,
+    //    uses placeholder signatures and needs neither.)
+    let fee_payer = fixture.fee_payer();
+    let mut signer_refs: Vec<&Keypair> = vec![&*fee_payer];
+    for kp in &spec.signers {
+        let wanted = metas.iter().any(|m| m.is_signer && m.pubkey == kp.pubkey());
+        if kp.pubkey() != fee_payer.pubkey() && wanted {
+            signer_refs.push(&**kp);
+        }
+    }
 
     let ix = solana_instruction::Instruction {
         program_id: spec.program_id,
         accounts: metas,
         data: spec.data_sample.clone(),
     };
-
-    // 4. Signers: fee-payer prepended + canonical business signers.
-    let fee_payer = fixture.fee_payer();
-    let mut signer_refs: Vec<&Keypair> = vec![&*fee_payer];
-    for kp in &spec.signers {
-        if kp.pubkey() != fee_payer.pubkey() {
-            signer_refs.push(&**kp);
-        }
-    }
 
     // 5. Execute via raw_call
     let result = fixture
@@ -127,17 +183,21 @@ fn run_attempt<F>(
     let succeeded = matches!(result, Ok(TxOutcome::Success { .. }));
     let state_changed = pre_hash != post_hash;
 
+    let swapped = swaps
+        .iter()
+        .map(|&(idx, alt)| format!("{idx} swapped from {} to {alt}", spec.accounts[idx].pubkey))
+        .collect::<Vec<_>>()
+        .join(", account ");
     fuzz_assert!(
         !(succeeded && state_changed),
-        "[account-swap:{}] ix {} succeeded with account {} swapped \
-         from {} to {} (different context, same shape)",
+        "[account-swap:{}] ix {} succeeded with account {}{} (different context, same shape)",
         spec.program_id,
         spec.name,
-        idx,
-        real_pubkey,
-        alt_pubkey,
+        swapped,
+        if swaps.len() > 1 { ", together" } else { "" },
     );
 
     // 7. Manual restore of all touched (including alt if attack modified it)
     restore_accounts(fixture.ctx_mut(), saves);
+    Ok(())
 }

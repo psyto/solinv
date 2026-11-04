@@ -293,6 +293,7 @@ fn solinv_all(f: &mut OpenHLFixture) {
 | **Custom auth via PDA/session key** | Instruction uses lookup table or session key instead of direct signer | False positive — user must exclude these instructions from `instructions()` list, or mark all "signers" as optional |
 | **CPI-only auth** | Authorization granted by being CPI'd from a specific program, not by direct signer | solinv only fuzzes direct calls; will not exercise CPI auth paths. Out of scope for signer-skip invariant; covered by future `cpi-reentrancy` invariant |
 | **Sysvar-account-shaped auth** | Authorization checks compare account pubkey to sysvar pubkey rather than checking signer | Different bug class (`sysprogram-substitution`). Not signer-skip |
+| **Key still signed** | The target slot's key also signs at another account of the instruction, or is the fee payer: the runtime marks a key signed if any of its metas signs, so clearing one flag tests nothing and the call succeeds ([#5](https://github.com/psyto/solinv/issues/5)) | The attempt is skipped with a `[SOLINV_SKIP] signer-skip …` line naming the slot. To test that slot, give it a key that signs nowhere else |
 | **Read-only success path** | Instruction returns Ok without state change even without auth (e.g., view-only ix) | `state_changed` filter handles this; no violation reported if no state change |
 
 ### Severity adjustment based on state change

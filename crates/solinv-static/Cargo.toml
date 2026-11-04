@@ -1,0 +1,19 @@
+[package]
+name = "solinv-static"
+description = "solinv's checks that need no build: read an Anchor IDL or program source, and diff two versions for removed account checks"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+
+# No Solana or Crucible types, so this builds for wasm32 (the browser check).
+[dependencies]
+anyhow.workspace = true
+# Legacy IDL names, as `anchor idl convert` snake_cases them.
+heck = "0.5"
+regex = "1"
+serde.workspace = true
+serde_json.workspace = true
+# Legacy IDL discriminators: sha256("global:<ix>")[..8].
+sha2 = "0.10"

@@ -17,8 +17,10 @@
 
 use crucible_test_context::{fuzz_assert, TxOutcome};
 use solana_keypair::Keypair;
+use solana_pubkey::Pubkey;
 use solana_signer::Signer;
 use solinv_fuzz::{HasContext, HasInstructionSet};
+use std::sync::Mutex;
 
 use super::util::{hash_accounts, hash_accounts_now, restore_accounts, save_accounts};
 
@@ -44,6 +46,42 @@ where
             // Skip optional signers — flipping is not a real bug per
             // signer-skip spec false-positive analysis.
             if spec.optional_signer_indices.contains(&sig_idx) {
+                continue;
+            }
+
+            // A key signs a transaction if any of its metas signs or it
+            // pays the fee, so clearing one meta's flag leaves it signed:
+            // the attempt could not test the check, and a "success" would
+            // be a false positive (#5).
+            let Some(target) = spec.accounts.get(sig_idx).map(|m| m.pubkey) else {
+                continue;
+            };
+            let signed_elsewhere = spec
+                .accounts
+                .iter()
+                .enumerate()
+                .any(|(i, m)| i != sig_idx && m.pubkey == target && m.is_signer);
+            if signed_elsewhere || target == fixture.fee_payer().pubkey() {
+                // Once per slot, not once per fuzz iteration.
+                static SEEN: Mutex<Vec<(String, usize, Pubkey)>> = Mutex::new(Vec::new());
+                let first = SEEN.lock().map_or(false, |mut seen| {
+                    let k = (spec.name.clone(), sig_idx, target);
+                    !seen.contains(&k) && {
+                        seen.push(k);
+                        true
+                    }
+                });
+                if !first {
+                    continue;
+                }
+                println!(
+                    "[SOLINV_SKIP] signer-skip ix={} account={} pubkey={}: {}, so it stays \
+                     signed; pass a different key to test this slot",
+                    spec.name,
+                    sig_idx,
+                    target,
+                    if signed_elsewhere { "the key also signs at another account" } else { "the key is the fee payer" },
+                );
                 continue;
             }
 

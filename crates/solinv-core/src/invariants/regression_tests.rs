@@ -140,6 +140,35 @@ fn signer_skip_detect_pair() {
     assert_not_detected();
 }
 
+/// A key that stays signed — it is the fee payer, or signs at another
+/// account — cannot test its slot's signer check (#5).
+#[test]
+fn signer_skip_skips_the_fee_payer() {
+    clear_violation_tracking();
+    let fee_payer = Arc::new(Keypair::new());
+    let to = Pubkey::new_unique();
+    let mut spec = base_transfer_spec(to, vec![fee_payer.clone()]);
+    spec.signer_indices = vec![0];
+    let mut fixture = base_fixture(spec, &[], 1_000_000, fee_payer);
+    signer_skip::check(&mut fixture);
+    assert_not_detected();
+}
+
+#[test]
+fn signer_skip_skips_a_key_that_signs_at_another_account() {
+    clear_violation_tracking();
+    let to = Pubkey::new_unique();
+    let payer = Arc::new(Keypair::new());
+    let from = Arc::new(Keypair::new());
+    let mut spec = base_transfer_spec(to, vec![from.clone()]);
+    spec.accounts.push(solana_instruction::AccountMeta::new_readonly(from.pubkey(), true));
+    spec.signer_indices = vec![0, 2];
+    let from_acct = mk_account(1_000_000, SYSTEM_PROGRAM_ID, Vec::new());
+    let mut fixture = base_fixture(spec, &[(from.pubkey(), from_acct)], 1_000_000, payer);
+    signer_skip::check(&mut fixture);
+    assert_not_detected();
+}
+
 #[test]
 #[ignore = "Needs a purposely vulnerable fixture where swapped accounts still drive state changes"]
 fn owner_skip_detect_pair() {
@@ -326,6 +355,69 @@ fn pda_forge_non_detect() {
     );
     pda_forge::check(&mut fixture);
     assert_not_detected();
+}
+
+/// `transfer_with_seed` debits an account derived from a signing base:
+/// a rogue `from` alone fails the derivation, a rogue `base` alone fails
+/// it too, and only both together succeed — the shape of #4.
+#[test]
+fn account_swap_sets_swap_slots_together() {
+    use account_swap::SwapSet;
+    let seed = "vault";
+    let (base, rogue_base) = (Arc::new(Keypair::new()), Arc::new(Keypair::new()));
+    let derive = |b: &Keypair| Pubkey::create_with_seed(&b.pubkey(), seed, &SYSTEM_PROGRAM_ID).unwrap();
+    let (from, rogue_from, to) = (derive(&base), derive(&rogue_base), Pubkey::new_unique());
+    let ix = solana_system_interface::instruction::transfer_with_seed(
+        &from, &base.pubkey(), seed.to_string(), &SYSTEM_PROGRAM_ID, &to, 1,
+    );
+    let fixture = || {
+        let mut spec = base_transfer_spec(to, vec![base.clone(), rogue_base.clone()]);
+        spec.name = "transfer_with_seed".into();
+        spec.accounts = ix.accounts.clone();
+        spec.data_sample = ix.data.clone();
+        spec.swap_alternates = vec![vec![rogue_from], vec![rogue_base.pubkey()], vec![]];
+        let funded = mk_account(1_000_000, SYSTEM_PROGRAM_ID, Vec::new());
+        base_fixture(
+            spec,
+            &[
+                (from, funded.clone()),
+                (rogue_from, funded.clone()),
+                (base.pubkey(), funded.clone()),
+                (rogue_base.pubkey(), funded),
+            ],
+            1_000_000,
+            Arc::new(Keypair::new()),
+        )
+    };
+
+    // One slot at a time: each swap breaks the derivation.
+    clear_violation_tracking();
+    account_swap::check(&mut fixture());
+    assert_not_detected();
+
+    // Both at once.
+    clear_violation_tracking();
+    let set = SwapSet {
+        ix: "transfer_with_seed".into(),
+        swaps: vec![(0, rogue_from), (1, rogue_base.pubkey())],
+    };
+    account_swap::check_sets(&mut fixture(), &[set.clone()]);
+    assert_detected("together");
+
+    // A set that cannot run is a harness bug, reported as one (#13).
+    let missing = Pubkey::new_unique();
+    for (bad, why) in [
+        (SwapSet { swaps: vec![(0, rogue_from), (1, rogue_base.pubkey()), (1, base.pubkey())], ..set.clone() }, "swapped twice"),
+        (SwapSet { ix: "other".into(), ..set.clone() }, "no instruction of that name"),
+        (SwapSet { swaps: vec![(0, rogue_from), (9, rogue_base.pubkey())], ..set.clone() }, "out of range"),
+        (SwapSet { swaps: vec![(0, from)], ..set.clone() }, "is the real account"),
+        (SwapSet { swaps: vec![(0, missing)], ..set.clone() }, "does not exist"),
+    ] {
+        clear_violation_tracking();
+        account_swap::check_sets(&mut fixture(), &[bad]);
+        let msg = take_violation().unwrap_or_default();
+        assert!(msg.starts_with("[account-swap-config:") && msg.contains(why), "{why}: {msg}");
+    }
 }
 
 #[test]

@@ -7,6 +7,7 @@ members = [
     "crates/solinv-corpus",
     "crates/solinv-disclose",
     "crates/solinv-mutate",
+    "crates/solinv-static",
     "crates/solinv-cli",
 ]
 

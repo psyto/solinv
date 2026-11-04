@@ -12,7 +12,7 @@
 
 use anyhow::{Context, Result};
 use regex::Regex;
-use solinv_fuzz::SlotKind;
+use crate::idl::{Idl, IdlAccount, IdlAccountItem, IdlInstruction, IdlPda, SlotKind};
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
@@ -36,6 +36,10 @@ pub struct Attrs {
     pub has_one: Vec<String>,
     /// Each `constraint = <expr>`, whitespace collapsed, error dropped.
     pub constraints: Vec<String>,
+    /// `close = <target>`: when the instruction ends Anchor sends the
+    /// lamports to the target, clears the data and hands the account back
+    /// to the system program.
+    pub close: Option<String>,
     /// `init` (not `init_if_needed`, which also accepts an existing
     /// account): the account is created here.
     pub init: bool,
@@ -58,6 +62,23 @@ pub struct Attrs {
     /// `seeds`, `address`, `token::authority` and `associated_token::*`
     /// value. Each names a slot this one is tied to.
     pub refs: Vec<String>,
+    /// Each vipers `assert_keys_eq!` / `assert_keys_neq!` in an
+    /// `impl Validate` that the handler's `#[access_control]` runs, with
+    /// this slot as its first argument naming a slot: arguments sorted,
+    /// paths from the instruction's root, e.g.
+    /// `assert_keys_eq!(common.bank.crate_mint, common.crate_mint)`.
+    pub validate: Vec<String>,
+    /// For each `assert_keys_eq!` above, the slots its arguments name
+    /// (full paths) and `"::"` for a constant: like `keyed_constraints`.
+    pub validate_keys: Vec<Vec<String>>,
+    /// Checks at the top level of the handler body naming this slot first
+    /// (#12): `require!` / `require_eq!` / `require_keys_eq!` and their
+    /// kin, and `if <cond> { return Err(..) }`, with `ctx.accounts.` and
+    /// whitespace dropped, e.g. `if!authority.is_signer`.
+    pub body: Vec<String>,
+    /// For each body check that requires two keys equal, the slots it
+    /// names and `"::"` for a constant: like `validate_keys`.
+    pub body_keys: Vec<Vec<String>>,
 }
 
 /// One account slot as the source declares it.
@@ -76,11 +97,36 @@ pub struct Slot {
     /// Where the field is declared, for annotations.
     pub file: String,
     pub line: usize,
+    /// Position in the instruction's account list, composites flattened
+    /// in place, as Anchor lays the accounts out.
+    pub order: usize,
 }
 
 /// Declared slots per (instruction, dotted slot path).
 pub struct SourceKinds {
     map: HashMap<(String, String), Slot>,
+    /// Body checks that name no slot (they read a local), per instruction.
+    ix_checks: HashMap<String, Vec<String>>,
+    /// Where each instruction's handler is declared.
+    handlers: HashMap<String, (String, usize)>,
+}
+
+/// One check read from a handler body, before it is attached.
+struct BodyCheck {
+    text: String,
+    /// `ctx.accounts.<path>` references, as path segments.
+    refs: Vec<Vec<String>>,
+    constant: bool,
+    /// Requires two keys to be equal: ties the accounts it names.
+    ties: bool,
+}
+
+/// `assert_keys_eq!` / `assert_keys_neq!` calls and `self.<field>.validate()`
+/// calls in one `impl Validate for <struct>`.
+#[derive(Default)]
+struct ValidateImpl {
+    checks: Vec<(bool, [String; 2])>,
+    calls: Vec<String>,
 }
 
 struct RawField {
@@ -131,13 +177,33 @@ impl SourceKinds {
         if a.init {
             return false;
         }
+        // An `assert_keys_eq!` or a handler check requiring its key equal
+        // to another slot's or a constant.
+        if self.map.iter().any(|((i, _), t)| {
+            i == ix
+                && t.attrs
+                    .validate_keys
+                    .iter()
+                    .chain(&t.attrs.body_keys)
+                    .any(|c| c.iter().any(|n| n == path) && c.iter().any(|n| n != path))
+        }) {
+            return false;
+        }
         // A name in slot `p`'s attribute, resolved among `p`'s siblings.
         let resolve = |p: &str, n: &str| format!("{}{n}", p.rfind('.').map_or("", |i| &p[..=i]));
         // A keyed constraint on `p` ties `path` when it names `path` and
         // another slot of the instruction or a constant — not only
         // `path`, and not an instruction argument.
+        // `x.key` (no `()`) compares an address only when `x` is an
+        // `AccountInfo`-like slot; on `Account<T>` it reads a data field.
+        let address_field = |p: &str, recv: &str| {
+            self.slot(ix, &resolve(p, recv)).is_some_and(|s| {
+                matches!(s.ty.as_str(), "AccountInfo" | "UncheckedAccount" | "Signer" | "SystemAccount" | "Program" | "Sysvar")
+            })
+        };
         let ties = |p: &str, c: &[String]| {
-            c.iter().any(|n| resolve(p, n) == path)
+            c.iter().filter_map(|n| n.strip_prefix("@key:")).all(|recv| address_field(p, recv))
+                && c.iter().any(|n| resolve(p, n) == path)
                 && c.iter().any(|n| {
                     n == "::" || {
                         let q = resolve(p, n);
@@ -174,6 +240,67 @@ impl SourceKinds {
                     || t.attrs.keyed_constraints.iter().any(|c| ties(p, c))
             }
         })
+    }
+
+    /// The account lists as an IDL would give them, read from source
+    /// alone, for programs with no IDL to hand (#11): signer from `Signer`
+    /// or `#[account(signer)]`, writable from `mut` / `init`, a PDA from
+    /// `seeds` or `associated_token::authority` (seed values not read), a
+    /// fixed address from an `address` constraint — constant or not, where
+    /// an IDL lists only constant ones — or a `Program<'info, T>` / `Sysvar`
+    /// type,
+    /// relations from `has_one`. Unplaced slots (an alias, a multi-line
+    /// type) are listed too, as nothing declared. No discriminators, args
+    /// or program id: enough for the map, not for building a spec.
+    pub fn to_idl(&self) -> Idl {
+        let mut by_ix: std::collections::BTreeMap<&str, Vec<(&String, &Slot)>> = Default::default();
+        for ((ix, path), s) in &self.map {
+            by_ix.entry(ix.as_str()).or_default().push((path, s));
+        }
+        let instructions = by_ix
+            .into_iter()
+            .map(|(ix, mut slots)| {
+                slots.sort_by_key(|(_, s)| s.order);
+                IdlInstruction {
+                    name: ix.to_string(),
+                    discriminator: Vec::new(),
+                    args: Vec::new(),
+                    accounts: slots
+                        .into_iter()
+                        .map(|(path, s)| {
+                            IdlAccountItem::Single(IdlAccount {
+                                name: path.clone(),
+                                writable: s.attrs.mutable,
+                                // Anchor makes a non-PDA `init` account sign: it is
+                                // created at a fresh keypair's address.
+                                signer: s.ty == "Signer"
+                                    || s.attrs.signer
+                                    || (s.attrs.init && !s.attrs.seeds && !s.attrs.token_authority),
+                                optional: s.optional,
+                                // `Program<'info, T>` and `Sysvar` name one address by type.
+                                address: (s.attrs.address || matches!(s.ty.as_str(), "Program" | "Sysvar"))
+                                    .then(|| "(from source)".into()),
+                                // An associated token account is a PDA of the ATA program.
+                                pda: (s.attrs.seeds || s.attrs.token_authority)
+                                    .then(|| IdlPda { seeds: Vec::new(), program: None }),
+                                relations: s.attrs.has_one.clone(),
+                            })
+                        })
+                        .collect(),
+                }
+            })
+            .collect();
+        Idl { address: String::new(), instructions, accounts: Vec::new() }
+    }
+
+    /// Handler-body checks of `ix` that name no slot (#12).
+    pub fn ix_checks(&self, ix: &str) -> &[String] {
+        self.ix_checks.get(ix).map_or(&[], |v| v.as_slice())
+    }
+
+    /// Where `ix`'s handler is declared, if it was found.
+    pub fn handler_at(&self, ix: &str) -> Option<(&str, usize)> {
+        self.handlers.get(ix).map(|(f, l)| (f.as_str(), *l))
     }
 
     /// Every placed slot, as ((instruction, path), slot), sorted.
@@ -218,6 +345,21 @@ impl SourceKinds {
         )
         .unwrap();
         let ident = Regex::new(r"\b([A-Z]\w*)\b").unwrap();
+        // vipers' `impl<'info> Validate<'info> for X<'info>`, run by
+        // `#[access_control(ctx.accounts.validate())]` on the handler.
+        let validate_impl = Regex::new(
+            r"\bimpl\b[^{;]*?\bValidate\s*(?:<[^{;>]*>)?\s+for\s+(?:[A-Za-z_]\w*::)*([A-Za-z_]\w*)[^{;]*\{",
+        )
+        .unwrap();
+        let key_assert = Regex::new(r"\bassert_keys_(eq|neq)\s*!\s*[(\[]").unwrap();
+        // `self.x.validate()` or `Validate::validate(&self.x)`.
+        let validate_call = Regex::new(
+            r"\bself\s*\.\s*([a-z_]\w*)\s*\.\s*validate\s*\(\s*\)|\bValidate\s*::\s*validate\s*\(\s*&\s*self\s*\.\s*([a-z_]\w*)\s*\)",
+        )
+        .unwrap();
+        let access_control =
+            Regex::new(r"access_control\s*\([^]]*\bctx\s*\.\s*accounts\s*\.\s*validate\s*\(\s*\)")
+                .unwrap();
 
         let stripped: Vec<(String, String)> = files
             .iter()
@@ -268,14 +410,73 @@ impl SourceKinds {
             structs.insert(name.clone(), fields);
         }
 
+        let mut validates: HashMap<String, ValidateImpl> = HashMap::new();
+        let mut seen: HashMap<String, usize> = HashMap::new();
+        for (file, src) in &stripped {
+            for c in validate_impl.captures_iter(src) {
+                let open = c.get(0).unwrap().end();
+                let Some(body) = braced(&src[open..]) else { continue };
+                let expr_body = &exprs[file.as_str()][open..open + body.len()];
+                *seen.entry(c[1].to_string()).or_default() += 1;
+                let v = validates.entry(c[1].to_string()).or_default();
+                for m in key_assert.captures_iter(body) {
+                    let at = m.get(0).unwrap().end();
+                    let Some(close) = closing_paren(&body[at..]) else { continue };
+                    let args = split_top(&body[at..at + close], &expr_body[at..at + close]);
+                    if let [a, b, ..] = args.as_slice() {
+                        v.checks.push((&m[1] == "eq", [a.clone(), b.clone()]));
+                    }
+                }
+                v.calls.extend(
+                    validate_call
+                        .captures_iter(body)
+                        .filter_map(|c| c.get(1).or(c.get(2)).map(|m| m.as_str().to_string())),
+                );
+            }
+        }
+        // Two impls for one name cannot be told apart: use neither.
+        validates.retain(|n, _| seen[n] == 1);
+
         let mut map = HashMap::new();
-        for (_, src) in &stripped {
+        let mut validated = Vec::new();
+        let mut handlers = HashMap::new();
+        let mut body_checks: Vec<(String, Vec<BodyCheck>)> = Vec::new();
+        for (file, src) in &stripped {
             for c in handler.captures_iter(src) {
                 let Some(ctx) = ident.captures_iter(&c[2]).last() else { continue };
                 walk(&structs, &ctx[1], &c[1], "", &mut map, 0);
+                let end = c.get(0).unwrap().end();
+                // A declaration with no body (`fn f(..) -> R;` in a trait) has none
+                // to read: never the next item's.
+                let open = src[end..].find(['{', ';']).filter(|&i| src.as_bytes()[end + i] == b'{');
+                if let Some(open) = open.map(|i| end + i + 1) {
+                    if let Some(body) = braced(&src[open..]) {
+                        let expr_body = &exprs[file.as_str()][open..open + body.len()];
+                        body_checks.push((c[1].to_string(), read_body(body, expr_body)));
+                    }
+                }
+                let line = src[..c.get(0).unwrap().start()].matches('\n').count() + 1;
+                handlers.entry(c[1].to_string()).or_insert((file.clone(), line));
+                // The handler's attributes: back to the item before it.
+                let start = c.get(0).unwrap().start();
+                let from = src[..start].rfind(['}', ';', '{']).map_or(0, |i| i + 1);
+                if access_control.is_match(&src[from..start]) {
+                    validated.push((ctx[1].to_string(), c[1].to_string()));
+                }
             }
         }
-        SourceKinds { map }
+        // After every walk: a second fn of the same name (the program's
+        // wrapper and the action it calls) walks the same slots again.
+        for (ctx, ix) in validated {
+            apply_validate(&structs, &validates, &ctx, &ix, "", &mut map, 0);
+        }
+        let mut ix_checks: HashMap<String, Vec<String>> = HashMap::new();
+        for (ix, checks) in body_checks {
+            for chk in checks {
+                attach_body_check(&ix, chk, &mut map, &mut ix_checks);
+            }
+        }
+        SourceKinds { map, ix_checks, handlers }
     }
 }
 
@@ -289,7 +490,11 @@ fn read_attrs(text: &str, expr: &str) -> Attrs {
     // An upper-case constant: `VAULT_ID`, `crate::ID`. A qualified call
     // (`helpers::f(arg)`) is not one.
     let constant = Regex::new(r"\b[A-Z][A-Z0-9_]*\b").unwrap();
-    let keyed = Regex::new(r"\.\s*key\s*\(\s*\)").unwrap();
+    // `x.key()`, or `x.key` — the `AccountInfo` field older Anchor code
+    // compares (`authority.key == &token.owner`).
+    let keyed = Regex::new(r"\.\s*key\b(?:\s*\(\s*\))?").unwrap();
+    let keyed_call = Regex::new(r"\.\s*key\s*\(\s*\)").unwrap();
+    let field_key = Regex::new(r"\b([a-z_][A-Za-z0-9_]*)\s*\.\s*key\b").unwrap();
     // A name at the head of a path: not after `.` (a field) or `::` (a
     // module item). `text` has literals blanked, so `b"vault"` names
     // nothing.
@@ -325,7 +530,14 @@ fn read_attrs(text: &str, expr: &str) -> Attrs {
                 // `admin.key() == ADMIN && vault.amount > 0` the key
                 // comparison says nothing about `vault`.
                 for clause in clauses(v).into_iter().filter(|c| keyed.is_match(c)) {
-                    a.keyed_constraints.push(names_in(clause));
+                    let mut names = names_in(clause);
+                    // `x.key` without `()` is the address only on an
+                    // `AccountInfo`-like slot; on `Account<T>` it is a data
+                    // field. Mark the receivers so `unbound` can check.
+                    if !keyed_call.is_match(clause) {
+                        names.extend(field_key.captures_iter(clause).map(|c| format!("@key:{}", &c[1])));
+                    }
+                    a.keyed_constraints.push(names);
                 }
             }
             let fixes = match bare {
@@ -354,6 +566,7 @@ fn read_attrs(text: &str, expr: &str) -> Attrs {
             ("seeds", Some(_)) => a.seeds = true,
             ("address", Some(_)) => a.address = true,
             ("owner", Some(_)) => a.owner = true,
+            ("close", Some(v)) => a.close = Some(v[..error_cut(v)].split_whitespace().collect()),
             ("has_one", Some(v)) => {
                 let target: String =
                     v.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
@@ -528,8 +741,13 @@ fn walk(
             Field::Kind(k) => Some(*k),
             Field::Unknown => None,
         };
+        let key = (ix.to_string(), path);
+        // A second handler of the same name walks the same slots again.
+        let order = out
+            .get(&key)
+            .map_or_else(|| out.keys().filter(|(i, _)| i == ix).count(), |s| s.order);
         out.insert(
-            (ix.to_string(), path),
+            key,
             Slot {
                 kind,
                 ty: f.ty.clone(),
@@ -538,9 +756,277 @@ fn walk(
                 attrs: f.attrs.clone(),
                 file: f.file.clone(),
                 line: f.line,
+                order,
             },
         );
     }
+}
+
+/// Attach the key checks `name`'s `validate()` runs (and the composites'
+/// `validate()` it calls) to the slots they name, for instruction `ix`.
+fn apply_validate(
+    structs: &HashMap<String, Vec<RawField>>,
+    validates: &HashMap<String, ValidateImpl>,
+    name: &str,
+    ix: &str,
+    prefix: &str,
+    out: &mut HashMap<(String, String), Slot>,
+    depth: usize,
+) {
+    let Some(v) = validates.get(name) else { return };
+    if depth > 8 {
+        return;
+    }
+    let join = |p: &str, f: &str| if p.is_empty() { f.to_string() } else { format!("{p}.{f}") };
+    let constant = Regex::new(r"^(?:[A-Za-z_]\w*::)*[A-Z][A-Z0-9_]*$").unwrap();
+    for (eq, args) in &v.checks {
+        // Each argument: its text from the instruction's root, and the
+        // slot it names (`self.bank.crate_mint` names `bank`), or "::"
+        // for a constant.
+        let mut resolved: Vec<(String, Option<String>)> = args
+            .iter()
+            .map(|a| a.trim_start_matches(['&', '*']))
+            .map(|a| a.strip_suffix(".key()").unwrap_or(a))
+            .map(|a| match a.strip_prefix("self.") {
+                Some(rest) => {
+                    let segs: Vec<&str> = rest
+                        .split('.')
+                        .take_while(|s| !s.is_empty() && s.chars().all(|c| c.is_alphanumeric() || c == '_'))
+                        .collect();
+                    let text = join(prefix, rest);
+                    let head = (1..=segs.len()).rev().map(|k| join(prefix, &segs[..k].join("."))).find(|p| {
+                        out.contains_key(&(ix.to_string(), p.clone()))
+                    });
+                    (text, head)
+                }
+                None if constant.is_match(a) => (a.to_string(), Some("::".to_string())),
+                None => (a.to_string(), None),
+            })
+            .collect();
+        // Sorted, so swapping the arguments is not a change.
+        resolved.sort();
+        let Some(slot) = resolved.iter().find_map(|(_, h)| h.clone().filter(|h| h != "::")) else {
+            continue;
+        };
+        let texts: Vec<&str> = resolved.iter().map(|(t, _)| t.as_str()).collect();
+        let check = format!("assert_keys_{}!({})", if *eq { "eq" } else { "neq" }, texts.join(", "));
+        let names: Vec<String> = resolved.iter().filter_map(|(_, h)| h.clone()).collect();
+        if let Some(s) = out.get_mut(&(ix.to_string(), slot)) {
+            if !s.attrs.validate.contains(&check) {
+                s.attrs.validate.push(check);
+                if *eq {
+                    s.attrs.validate_keys.push(names);
+                }
+            }
+        }
+    }
+    let Some(fields) = structs.get(name) else { return };
+    for call in &v.calls {
+        if let Some(Field::Composite(inner)) = fields.iter().find(|f| &f.name == call).map(|f| &f.field) {
+            apply_validate(structs, validates, inner, ix, &join(prefix, call), out, depth + 1);
+        }
+    }
+}
+
+/// The checks at the top level of a handler body: `require*!` macros, and
+/// `if <cond> { return Err(..) }` with no `else`. `blanked` decides the
+/// structure; `expr` (the same bytes, literals kept) supplies the text.
+fn read_body(blanked: &str, expr: &str) -> Vec<BodyCheck> {
+    let mac = Regex::new(r"^(require(?:_keys)?(?:_eq|_neq|_gt|_gte)?)\s*!\s*[(\[]").unwrap();
+    let account = Regex::new(r"\bctx\s*\.\s*accounts\s*\.\s*([a-z_]\w*(?:\s*\.\s*[a-z_]\w*)*)").unwrap();
+    let constant = Regex::new(r"\b[A-Z][A-Z0-9_]*\b|\bctx\s*\.\s*program_id\b").unwrap();
+    let key = Regex::new(r"\.\s*key\b").unwrap();
+    let fails = Regex::new(r"^return\s+(?:Err\s*\(|err!\s*\()").unwrap();
+    // `let x = &ctx.accounts.y;` / `let a = &ctx.accounts;` at the top
+    // level: later checks through `x` are checks on `y`.
+    let alias = Regex::new(
+        r"^let\s+(?:mut\s+)?([a-z_]\w*)\s*=\s*&\s*(?:mut\s+)?(ctx\s*\.\s*accounts(?:\s*\.\s*[a-z_]\w*)?)\s*;",
+    )
+    .unwrap();
+    let mut aliases: Vec<(Regex, String)> = Vec::new();
+    let unalias = |t: &str, aliases: &[(Regex, String)]| -> String {
+        let mut t = t.to_string();
+        for (re, to) in aliases {
+            t = re.replace_all(&t, |c: &regex::Captures| format!("{}{to}.", &c[1])).into_owned();
+        }
+        t
+    };
+    let norm = |t: &str| -> String {
+        let t: String = t.chars().filter(|c| !c.is_whitespace()).collect();
+        t.replace("ctx.accounts.", "")
+    };
+    let check = |text: String, src: &str, ties: bool| BodyCheck {
+        refs: account
+            .captures_iter(src)
+            .map(|c| c[1].split('.').map(|s| s.trim().to_string()).collect())
+            .collect(),
+        constant: constant.is_match(src),
+        ties,
+        text,
+    };
+    let b = blanked.as_bytes();
+    let mut out = Vec::new();
+    let (mut depth, mut i) = (0i32, 0usize);
+    while i < b.len() {
+        let ch = b[i];
+        let starts_word = i == 0 || !(b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'_');
+        if depth == 0 && starts_word {
+            if let Some(m) = alias.captures(&expr[i..]) {
+                let to: String = m[2].chars().filter(|c| !c.is_whitespace()).collect();
+                let re = Regex::new(&format!(r"(^|[^.\w]){}\s*\.", regex::escape(&m[1]))).unwrap();
+                aliases.push((re, to));
+                i += m.get(0).unwrap().end();
+                continue;
+            }
+            if let Some(m) = mac.captures(&blanked[i..]) {
+                let at = i + m.get(0).unwrap().end();
+                if let Some(close) = closing_paren(&blanked[at..]) {
+                    let name = &m[1];
+                    let args = split_top(&blanked[at..at + close], &expr[at..at + close]);
+                    let keep = if name == "require" { 1 } else { 2 };
+                    let written: Vec<String> =
+                        args.into_iter().take(keep).map(|a| unalias(&a, &aliases)).collect();
+                    // `a == b` reads the same both ways round: sorted for the
+                    // text, attached by the order written.
+                    let mut args = written.clone();
+                    if name != "require" && !name.ends_with("_gt") && !name.ends_with("_gte") {
+                        args.sort();
+                    }
+                    let joined = args.join(",");
+                    let ties = match name {
+                        "require_keys_eq" => true,
+                        "require_eq" => key.is_match(&joined),
+                        "require" => key.is_match(&joined) && joined.contains("==") && !joined.contains("!="),
+                        _ => false,
+                    };
+                    out.push(check(norm(&format!("{name}!({joined})")), &written.join(","), ties));
+                    i = at + close + 1;
+                    continue;
+                }
+            }
+            if blanked[i..].starts_with("if") && b.get(i + 2).is_some_and(|c| !c.is_ascii_alphanumeric() && *c != b'_') {
+                // The condition runs to the `{` at its own depth.
+                let mut d = 0i32;
+                let open = blanked[i + 2..].char_indices().find_map(|(j, c)| {
+                    match c {
+                        '(' | '[' => d += 1,
+                        ')' | ']' => d -= 1,
+                        '{' if d == 0 => return Some(i + 2 + j),
+                        _ => {}
+                    }
+                    None
+                });
+                if let Some(open) = open {
+                    if let Some(block) = braced(&blanked[open + 1..]) {
+                        let mut end = open + 1 + block.len() + 1;
+                        let body = expr[open + 1..open + 1 + block.len()].trim_start();
+                        let has_else = blanked[end.min(blanked.len())..].trim_start().starts_with("else");
+                        if fails.is_match(body) && !has_else {
+                            let cond = unalias(expr[i + 2..open].trim(), &aliases);
+                            // `if (x)` and `if x` are one check.
+                            let cond = match cond.strip_prefix('(').and_then(|c| c.strip_suffix(')')) {
+                                Some(inner) if closing_paren(inner).is_none() => inner.to_string(),
+                                _ => cond,
+                            };
+                            let ties = key.is_match(&cond) && cond.contains("!=") && !cond.contains("==");
+                            out.push(check(format!("if {}", norm(&cond)), &cond, ties));
+                        }
+                        // Skip the whole `else if … else` chain: its `if`s are branches.
+                        while blanked[end.min(blanked.len())..].trim_start().starts_with("else") {
+                            let Some(next) = blanked[end..].find('{') else { break };
+                            let Some(block) = braced(&blanked[end + next + 1..]) else { break };
+                            end = end + next + 1 + block.len() + 1;
+                        }
+                        i = end;
+                        continue;
+                    }
+                }
+            }
+        }
+        match ch {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth -= 1,
+            _ => {}
+        }
+        i += 1;
+    }
+    out
+}
+
+/// Attach a body check to the first slot it names, or to the
+/// instruction when it names none.
+fn attach_body_check(
+    ix: &str,
+    chk: BodyCheck,
+    out: &mut HashMap<(String, String), Slot>,
+    ix_checks: &mut HashMap<String, Vec<String>>,
+) {
+    let heads: Vec<String> = chk
+        .refs
+        .iter()
+        .filter_map(|segs| {
+            (1..=segs.len())
+                .rev()
+                .map(|k| segs[..k].join("."))
+                .find(|p| out.contains_key(&(ix.to_string(), p.clone())))
+        })
+        .collect();
+    let Some(first) = heads.first().cloned() else {
+        let list = ix_checks.entry(ix.to_string()).or_default();
+        if !list.contains(&chk.text) {
+            list.push(chk.text);
+        }
+        return;
+    };
+    let mut names = heads;
+    if chk.constant {
+        names.push("::".into());
+    }
+    if let Some(s) = out.get_mut(&(ix.to_string(), first)) {
+        if !s.attrs.body.contains(&chk.text) {
+            s.attrs.body.push(chk.text);
+            if chk.ties {
+                s.attrs.body_keys.push(names);
+            }
+        }
+    }
+}
+
+/// Offset of the `)` that closes a parenthesis already opened.
+fn closing_paren(s: &str) -> Option<usize> {
+    let mut depth = 0i32;
+    for (i, ch) in s.char_indices() {
+        match ch {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' if depth == 0 => return Some(i),
+            ')' | ']' | '}' => depth -= 1,
+            _ => {}
+        }
+    }
+    None
+}
+
+/// `expr` split at the top-level commas `blanked` (the same bytes, with
+/// literals blanked) shows, each part with whitespace removed.
+fn split_top(blanked: &str, expr: &str) -> Vec<String> {
+    let (mut depth, mut start, mut parts) = (0i32, 0usize, Vec::new());
+    for (i, ch) in blanked.char_indices() {
+        match ch {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth -= 1,
+            ',' if depth == 0 => {
+                parts.push(&expr[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(&expr[start..]);
+    parts
+        .into_iter()
+        .map(|p| p.chars().filter(|c| !c.is_whitespace()).collect::<String>())
+        .filter(|p| !p.is_empty())
+        .collect()
 }
 
 const TYPED: &[&str] = &[
@@ -733,7 +1219,7 @@ fn collect(dir: &Path, out: &mut Vec<(String, String)>) -> Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -915,6 +1401,12 @@ pub struct Buy<'info> {
     pub same: Account<'info, TokenAccount>,
     #[account(mut, constraint = fixed.key() == FIXED_ID)]
     pub fixed: Account<'info, TokenAccount>,
+    #[account(constraint = buyer.key == &field_key.owner)]
+    pub field_key: Account<'info, TokenAccount>,
+    #[account(mut, constraint = keyring.keys_len > 0 && buyer.key() == ADMIN)]
+    pub keyring: Account<'info, TokenAccount>,
+    #[account(mut, constraint = order.key == config.key)]
+    pub order: Account<'info, Order>,
     #[account(mut, constraint = arg.key() == expected)]
     pub arg: Account<'info, TokenAccount>,
     #[account(mut, constraint = sale.key() == sale.key())]
@@ -980,11 +1472,11 @@ pub struct Bound<'info> {
         for slot in [
             "sale", "vault", "mint_only", "reused", "elsewhere", "same", "arg", "other", "err",
             "call", "by_arg", "seeded_by_arg", "owned_by_arg", "arg_has_one", "clause",
-            "grouped", "either",
+            "grouped", "either", "keyring", "order",
         ] {
             assert!(k.unbound("buy", slot), "{slot}");
         }
-        for slot in ["own", "config", "registry", "fixed", "both", "buyer", "token_program"] {
+        for slot in ["own", "config", "registry", "fixed", "both", "field_key", "buyer", "token_program"] {
             assert!(!k.unbound("buy", slot), "{slot}");
         }
         for slot in [
@@ -995,6 +1487,182 @@ pub struct Bound<'info> {
         }
         // One authority can own many token accounts.
         assert!(k.unbound("bound", "owned_by_sale"));
+    }
+
+    /// vipers' `impl Validate` blocks, run through `#[access_control]`,
+    /// the way the Saber family (Cashio among them) writes its checks.
+    pub(crate) const VALIDATED: &str = r#"
+#[access_control(ctx.accounts.validate())]
+pub fn print(ctx: Context<Print>, amount: u64) -> Result<()> {}
+pub fn unvalidated(ctx: Context<Print>) -> Result<()> {}
+#[derive(Accounts)]
+pub struct Common<'info> {
+    pub bank: Box<Account<'info, Bank>>,
+    pub crate_mint: Account<'info, Mint>,
+    pub crate_token: Account<'info, CrateToken>,
+}
+#[derive(Accounts)]
+pub struct Print<'info> {
+    pub common: Common<'info>,
+    #[account(mut)]
+    pub source: Account<'info, TokenAccount>,
+    #[account(mut)]
+    pub destination: Account<'info, TokenAccount>,
+    #[account(mut)]
+    pub fee: Account<'info, TokenAccount>,
+    pub issue_authority: Account<'info, Authority>,
+    pub depositor: Signer<'info>,
+}
+impl<'info> Validate<'info> for Common<'info> {
+    fn validate(&self) -> Result<()> {
+        assert_keys_eq!(self.bank.crate_mint, self.crate_mint, "mint");
+        assert_keys_eq!(self.crate_mint, self.crate_token.mint);
+        Ok(())
+    }
+}
+impl<'info> ::vipers::Validate<'info> for crate::Print<'info> {
+    fn validate(&self) -> Result<()> {
+        Validate::validate(&self.common)?;
+        assert_keys_eq![&self.depositor, self.source.owner.key()];
+        assert_keys_neq!(self.destination, self.source);
+        assert_keys_eq!(self.issue_authority, crate::ISSUE_AUTHORITY);
+        Ok(())
+    }
+}
+"#;
+
+    #[test]
+    fn vipers_validate_checks_tie_slots_when_access_control_runs_them() {
+        let k = SourceKinds::parse(VALIDATED);
+        for slot in ["common.bank", "common.crate_mint", "common.crate_token", "source", "issue_authority"] {
+            assert!(!k.unbound("print", slot), "{slot}");
+        }
+        // `assert_keys_neq!` ties nothing; `fee` is checked nowhere.
+        assert!(k.unbound("print", "destination") && k.unbound("print", "fee"));
+        // Without `#[access_control]` the impl never runs.
+        assert!(k.unbound("unvalidated", "source") && k.unbound("unvalidated", "common.bank"));
+        assert_eq!(
+            k.slot("print", "common.bank").unwrap().attrs.validate,
+            vec!["assert_keys_eq!(common.bank.crate_mint, common.crate_mint)"]
+        );
+        assert_eq!(
+            k.slot("print", "destination").unwrap().attrs.validate,
+            vec!["assert_keys_neq!(destination, source)"]
+        );
+    }
+
+    /// Without an IDL the map's columns come from the attributes (#11),
+    /// accounts in declaration order with composites flattened in place.
+    #[test]
+    fn to_idl_reads_the_columns_from_the_attributes() {
+        let src = r#"
+pub fn swap(ctx: Context<Swap>) -> Result<()> {}
+#[derive(Accounts)]
+pub struct Pool<'info> {
+    #[account(mut, seeds = [b"pool"], bump)]
+    pub state: Account<'info, State>,
+}
+#[derive(Accounts)]
+pub struct Swap<'info> {
+    #[account(mut)]
+    pub user: Signer<'info>,
+    pub pool: Pool<'info>,
+    #[account(mut, address = pool.state.vault)]
+    pub vault: Account<'info, TokenAccount>,
+    #[account(mut, associated_token::mint = mint, associated_token::authority = user)]
+    pub user_ata: Account<'info, TokenAccount>,
+    pub mint: Account<'info, Mint>,
+    pub token_program: Program<'info, Token>,
+}
+"#;
+        let idl = SourceKinds::parse(src).to_idl();
+        let ix = &idl.instructions[0];
+        let rows: Vec<(String, bool, bool, bool, bool)> = ix
+            .flat_accounts()
+            .iter()
+            .map(|f| {
+                let a = f.account;
+                (f.path(), a.signer, a.writable, a.pda.is_some(), a.address.is_some())
+            })
+            .collect();
+        let fresh = SourceKinds::parse(&src.replace("    pub mint: Account<'info, Mint>,", "    #[account(init, payer = user, space = 8)]\n    pub mint: Account<'info, Mint>,"))
+            .to_idl();
+        let mint = fresh.instructions[0].flat_accounts().into_iter().find(|f| f.path() == "mint").unwrap();
+        // A non-PDA `init` account signs, as Anchor's IDL says.
+        assert!(mint.account.signer && mint.account.writable);
+        let want = [
+            ("user", true, true, false, false),
+            ("pool.state", false, true, true, false),
+            ("vault", false, true, false, true),
+            ("user_ata", false, true, true, false),
+            ("mint", false, false, false, false),
+            ("token_program", false, false, false, true),
+        ];
+        assert_eq!(
+            rows,
+            want.iter().map(|&(p, s, w, pda, a)| (p.to_string(), s, w, pda, a)).collect::<Vec<_>>()
+        );
+    }
+
+    /// Checks at the top level of a handler body (#12), the forms
+    /// sealevel-attacks' `secure` programs use.
+    #[test]
+    fn handler_body_checks_are_read_at_the_top_level() {
+        let src = r#"
+pub fn act(ctx: Context<Act>, bump: u8) -> Result<()> {
+    if !ctx.accounts.authority.is_signer {
+        return Err(ProgramError::MissingRequiredSignature);
+    }
+    let token = Token::unpack(&ctx.accounts.token.data.borrow())?;
+    if ctx.accounts.authority.key != &token.owner {
+        return Err(ProgramError::InvalidAccountData);
+    }
+    require_keys_eq!(ctx.accounts.vault.key(), ctx.accounts.pool.vault, E::Vault);
+    require!(token.amount > 0, E::Empty);
+    if ctx.accounts.a.key() == ctx.accounts.b.key() {
+        return err!(E::Same);
+    }
+    if bump > 3 {
+        msg!("not a check: no error");
+    }
+    if bump == 0 {
+        return Err(E::A.into());
+    } else if ctx.accounts.vault.key() != ctx.accounts.pool.vault {
+        return Err(E::B.into());
+    } else {
+        msg!("an if with an else is a branch, not a guard");
+    }
+    if bump == 9 {
+        return Ok(MyErr::new());
+    }
+    for _ in 0..1 {
+        require!(ctx.accounts.pool.open, E::Closed);
+    }
+    Ok(())
+}
+#[derive(Accounts)]
+pub struct Act<'info> {
+    pub authority: AccountInfo<'info>,
+    pub token: AccountInfo<'info>,
+    #[account(mut)]
+    pub vault: Account<'info, Vault>,
+    pub pool: Account<'info, Pool>,
+    pub a: Account<'info, Vault>,
+    pub b: Account<'info, Vault>,
+}
+"#;
+        let k = SourceKinds::parse(src);
+        let body = |p: &str| k.slot("act", p).unwrap().attrs.body.clone();
+        assert_eq!(body("authority"), vec!["if !authority.is_signer", "if authority.key!=&token.owner"]);
+        // Text sorted, attached to `vault`, the first written.
+        assert_eq!(body("vault"), vec!["require_keys_eq!(pool.vault,vault.key())"]);
+        assert!(body("pool").is_empty(), "inside a loop is not top level");
+        assert_eq!(body("a"), vec!["if a.key()==b.key()"]);
+        assert_eq!(k.ix_checks("act"), ["require!(token.amount>0)"], "no else-if, no `return Ok(..Err..)`");
+        // `require_keys_eq!` ties vault to pool; `a == b` failing is a
+        // difference check and ties nothing.
+        assert!(!k.unbound("act", "vault") && !k.unbound("act", "pool"));
+        assert!(k.unbound("act", "a") && k.unbound("act", "b"));
     }
 
     /// strip() blanks byte for byte: non-ASCII text in a comment or a

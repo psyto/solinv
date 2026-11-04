@@ -274,8 +274,8 @@ impl Idl {
                 out += &format!(
                     "! {} writable typed accounts have no declared constraint fixing which \
                      account they are (no seeds, address, has_one, associated_token:: or \
-                     .key() comparison; the handler body is not read). Unless the handler \
-                     checks the key, a caller may pass any account of the type: expected for \
+                     .key() comparison, in the attributes or at the top of the handler). \
+                     Unless a function the handler calls checks the key, a caller may pass any account of the type: expected for \
                      their own token accounts, a hole for a vault, escrow or pool the program \
                      owns. account-swap candidates: {}\n",
                     loose.len(),

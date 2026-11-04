@@ -71,6 +71,14 @@ pub struct Attrs {
     /// For each `assert_keys_eq!` above, the slots its arguments name
     /// (full paths) and `"::"` for a constant: like `keyed_constraints`.
     pub validate_keys: Vec<Vec<String>>,
+    /// Checks at the top level of the handler body naming this slot first
+    /// (#12): `require!` / `require_eq!` / `require_keys_eq!` and their
+    /// kin, and `if <cond> { return Err(..) }`, with `ctx.accounts.` and
+    /// whitespace dropped, e.g. `if!authority.is_signer`.
+    pub body: Vec<String>,
+    /// For each body check that requires two keys equal, the slots it
+    /// names and `"::"` for a constant: like `validate_keys`.
+    pub body_keys: Vec<Vec<String>>,
 }
 
 /// One account slot as the source declares it.
@@ -97,6 +105,20 @@ pub struct Slot {
 /// Declared slots per (instruction, dotted slot path).
 pub struct SourceKinds {
     map: HashMap<(String, String), Slot>,
+    /// Body checks that name no slot (they read a local), per instruction.
+    ix_checks: HashMap<String, Vec<String>>,
+    /// Where each instruction's handler is declared.
+    handlers: HashMap<String, (String, usize)>,
+}
+
+/// One check read from a handler body, before it is attached.
+struct BodyCheck {
+    text: String,
+    /// `ctx.accounts.<path>` references, as path segments.
+    refs: Vec<Vec<String>>,
+    constant: bool,
+    /// Requires two keys to be equal: ties the accounts it names.
+    ties: bool,
 }
 
 /// `assert_keys_eq!` / `assert_keys_neq!` calls and `self.<field>.validate()`
@@ -155,10 +177,15 @@ impl SourceKinds {
         if a.init {
             return false;
         }
-        // An `assert_keys_eq!` naming it and another slot or a constant.
+        // An `assert_keys_eq!` or a handler check requiring its key equal
+        // to another slot's or a constant.
         if self.map.iter().any(|((i, _), t)| {
             i == ix
-                && t.attrs.validate_keys.iter().any(|c| c.iter().any(|n| n == path) && c.iter().any(|n| n != path))
+                && t.attrs
+                    .validate_keys
+                    .iter()
+                    .chain(&t.attrs.body_keys)
+                    .any(|c| c.iter().any(|n| n == path) && c.iter().any(|n| n != path))
         }) {
             return false;
         }
@@ -264,6 +291,16 @@ impl SourceKinds {
             })
             .collect();
         Idl { address: String::new(), instructions, accounts: Vec::new() }
+    }
+
+    /// Handler-body checks of `ix` that name no slot (#12).
+    pub fn ix_checks(&self, ix: &str) -> &[String] {
+        self.ix_checks.get(ix).map_or(&[], |v| v.as_slice())
+    }
+
+    /// Where `ix`'s handler is declared, if it was found.
+    pub fn handler_at(&self, ix: &str) -> Option<(&str, usize)> {
+        self.handlers.get(ix).map(|(f, l)| (f.as_str(), *l))
     }
 
     /// Every placed slot, as ((instruction, path), slot), sorted.
@@ -402,10 +439,24 @@ impl SourceKinds {
 
         let mut map = HashMap::new();
         let mut validated = Vec::new();
-        for (_, src) in &stripped {
+        let mut handlers = HashMap::new();
+        let mut body_checks: Vec<(String, Vec<BodyCheck>)> = Vec::new();
+        for (file, src) in &stripped {
             for c in handler.captures_iter(src) {
                 let Some(ctx) = ident.captures_iter(&c[2]).last() else { continue };
                 walk(&structs, &ctx[1], &c[1], "", &mut map, 0);
+                let end = c.get(0).unwrap().end();
+                // A declaration with no body (`fn f(..) -> R;` in a trait) has none
+                // to read: never the next item's.
+                let open = src[end..].find(['{', ';']).filter(|&i| src.as_bytes()[end + i] == b'{');
+                if let Some(open) = open.map(|i| end + i + 1) {
+                    if let Some(body) = braced(&src[open..]) {
+                        let expr_body = &exprs[file.as_str()][open..open + body.len()];
+                        body_checks.push((c[1].to_string(), read_body(body, expr_body)));
+                    }
+                }
+                let line = src[..c.get(0).unwrap().start()].matches('\n').count() + 1;
+                handlers.entry(c[1].to_string()).or_insert((file.clone(), line));
                 // The handler's attributes: back to the item before it.
                 let start = c.get(0).unwrap().start();
                 let from = src[..start].rfind(['}', ';', '{']).map_or(0, |i| i + 1);
@@ -419,7 +470,13 @@ impl SourceKinds {
         for (ctx, ix) in validated {
             apply_validate(&structs, &validates, &ctx, &ix, "", &mut map, 0);
         }
-        SourceKinds { map }
+        let mut ix_checks: HashMap<String, Vec<String>> = HashMap::new();
+        for (ix, checks) in body_checks {
+            for chk in checks {
+                attach_body_check(&ix, chk, &mut map, &mut ix_checks);
+            }
+        }
+        SourceKinds { map, ix_checks, handlers }
     }
 }
 
@@ -767,6 +824,170 @@ fn apply_validate(
     for call in &v.calls {
         if let Some(Field::Composite(inner)) = fields.iter().find(|f| &f.name == call).map(|f| &f.field) {
             apply_validate(structs, validates, inner, ix, &join(prefix, call), out, depth + 1);
+        }
+    }
+}
+
+/// The checks at the top level of a handler body: `require*!` macros, and
+/// `if <cond> { return Err(..) }` with no `else`. `blanked` decides the
+/// structure; `expr` (the same bytes, literals kept) supplies the text.
+fn read_body(blanked: &str, expr: &str) -> Vec<BodyCheck> {
+    let mac = Regex::new(r"^(require(?:_keys)?(?:_eq|_neq|_gt|_gte)?)\s*!\s*[(\[]").unwrap();
+    let account = Regex::new(r"\bctx\s*\.\s*accounts\s*\.\s*([a-z_]\w*(?:\s*\.\s*[a-z_]\w*)*)").unwrap();
+    let constant = Regex::new(r"\b[A-Z][A-Z0-9_]*\b|\bctx\s*\.\s*program_id\b").unwrap();
+    let key = Regex::new(r"\.\s*key\b").unwrap();
+    let fails = Regex::new(r"^return\s+(?:Err\s*\(|err!\s*\()").unwrap();
+    // `let x = &ctx.accounts.y;` / `let a = &ctx.accounts;` at the top
+    // level: later checks through `x` are checks on `y`.
+    let alias = Regex::new(
+        r"^let\s+(?:mut\s+)?([a-z_]\w*)\s*=\s*&\s*(?:mut\s+)?(ctx\s*\.\s*accounts(?:\s*\.\s*[a-z_]\w*)?)\s*;",
+    )
+    .unwrap();
+    let mut aliases: Vec<(Regex, String)> = Vec::new();
+    let unalias = |t: &str, aliases: &[(Regex, String)]| -> String {
+        let mut t = t.to_string();
+        for (re, to) in aliases {
+            t = re.replace_all(&t, |c: &regex::Captures| format!("{}{to}.", &c[1])).into_owned();
+        }
+        t
+    };
+    let norm = |t: &str| -> String {
+        let t: String = t.chars().filter(|c| !c.is_whitespace()).collect();
+        t.replace("ctx.accounts.", "")
+    };
+    let check = |text: String, src: &str, ties: bool| BodyCheck {
+        refs: account
+            .captures_iter(src)
+            .map(|c| c[1].split('.').map(|s| s.trim().to_string()).collect())
+            .collect(),
+        constant: constant.is_match(src),
+        ties,
+        text,
+    };
+    let b = blanked.as_bytes();
+    let mut out = Vec::new();
+    let (mut depth, mut i) = (0i32, 0usize);
+    while i < b.len() {
+        let ch = b[i];
+        let starts_word = i == 0 || !(b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'_');
+        if depth == 0 && starts_word {
+            if let Some(m) = alias.captures(&expr[i..]) {
+                let to: String = m[2].chars().filter(|c| !c.is_whitespace()).collect();
+                let re = Regex::new(&format!(r"(^|[^.\w]){}\s*\.", regex::escape(&m[1]))).unwrap();
+                aliases.push((re, to));
+                i += m.get(0).unwrap().end();
+                continue;
+            }
+            if let Some(m) = mac.captures(&blanked[i..]) {
+                let at = i + m.get(0).unwrap().end();
+                if let Some(close) = closing_paren(&blanked[at..]) {
+                    let name = &m[1];
+                    let args = split_top(&blanked[at..at + close], &expr[at..at + close]);
+                    let keep = if name == "require" { 1 } else { 2 };
+                    let written: Vec<String> =
+                        args.into_iter().take(keep).map(|a| unalias(&a, &aliases)).collect();
+                    // `a == b` reads the same both ways round: sorted for the
+                    // text, attached by the order written.
+                    let mut args = written.clone();
+                    if name != "require" && !name.ends_with("_gt") && !name.ends_with("_gte") {
+                        args.sort();
+                    }
+                    let joined = args.join(",");
+                    let ties = match name {
+                        "require_keys_eq" => true,
+                        "require_eq" => key.is_match(&joined),
+                        "require" => key.is_match(&joined) && joined.contains("==") && !joined.contains("!="),
+                        _ => false,
+                    };
+                    out.push(check(norm(&format!("{name}!({joined})")), &written.join(","), ties));
+                    i = at + close + 1;
+                    continue;
+                }
+            }
+            if blanked[i..].starts_with("if") && b.get(i + 2).is_some_and(|c| !c.is_ascii_alphanumeric() && *c != b'_') {
+                // The condition runs to the `{` at its own depth.
+                let mut d = 0i32;
+                let open = blanked[i + 2..].char_indices().find_map(|(j, c)| {
+                    match c {
+                        '(' | '[' => d += 1,
+                        ')' | ']' => d -= 1,
+                        '{' if d == 0 => return Some(i + 2 + j),
+                        _ => {}
+                    }
+                    None
+                });
+                if let Some(open) = open {
+                    if let Some(block) = braced(&blanked[open + 1..]) {
+                        let mut end = open + 1 + block.len() + 1;
+                        let body = expr[open + 1..open + 1 + block.len()].trim_start();
+                        let has_else = blanked[end.min(blanked.len())..].trim_start().starts_with("else");
+                        if fails.is_match(body) && !has_else {
+                            let cond = unalias(expr[i + 2..open].trim(), &aliases);
+                            // `if (x)` and `if x` are one check.
+                            let cond = match cond.strip_prefix('(').and_then(|c| c.strip_suffix(')')) {
+                                Some(inner) if closing_paren(inner).is_none() => inner.to_string(),
+                                _ => cond,
+                            };
+                            let ties = key.is_match(&cond) && cond.contains("!=") && !cond.contains("==");
+                            out.push(check(format!("if {}", norm(&cond)), &cond, ties));
+                        }
+                        // Skip the whole `else if … else` chain: its `if`s are branches.
+                        while blanked[end.min(blanked.len())..].trim_start().starts_with("else") {
+                            let Some(next) = blanked[end..].find('{') else { break };
+                            let Some(block) = braced(&blanked[end + next + 1..]) else { break };
+                            end = end + next + 1 + block.len() + 1;
+                        }
+                        i = end;
+                        continue;
+                    }
+                }
+            }
+        }
+        match ch {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth -= 1,
+            _ => {}
+        }
+        i += 1;
+    }
+    out
+}
+
+/// Attach a body check to the first slot it names, or to the
+/// instruction when it names none.
+fn attach_body_check(
+    ix: &str,
+    chk: BodyCheck,
+    out: &mut HashMap<(String, String), Slot>,
+    ix_checks: &mut HashMap<String, Vec<String>>,
+) {
+    let heads: Vec<String> = chk
+        .refs
+        .iter()
+        .filter_map(|segs| {
+            (1..=segs.len())
+                .rev()
+                .map(|k| segs[..k].join("."))
+                .find(|p| out.contains_key(&(ix.to_string(), p.clone())))
+        })
+        .collect();
+    let Some(first) = heads.first().cloned() else {
+        let list = ix_checks.entry(ix.to_string()).or_default();
+        if !list.contains(&chk.text) {
+            list.push(chk.text);
+        }
+        return;
+    };
+    let mut names = heads;
+    if chk.constant {
+        names.push("::".into());
+    }
+    if let Some(s) = out.get_mut(&(ix.to_string(), first)) {
+        if !s.attrs.body.contains(&chk.text) {
+            s.attrs.body.push(chk.text);
+            if chk.ties {
+                s.attrs.body_keys.push(names);
+            }
         }
     }
 }
@@ -1381,6 +1602,67 @@ pub struct Swap<'info> {
             rows,
             want.iter().map(|&(p, s, w, pda, a)| (p.to_string(), s, w, pda, a)).collect::<Vec<_>>()
         );
+    }
+
+    /// Checks at the top level of a handler body (#12), the forms
+    /// sealevel-attacks' `secure` programs use.
+    #[test]
+    fn handler_body_checks_are_read_at_the_top_level() {
+        let src = r#"
+pub fn act(ctx: Context<Act>, bump: u8) -> Result<()> {
+    if !ctx.accounts.authority.is_signer {
+        return Err(ProgramError::MissingRequiredSignature);
+    }
+    let token = Token::unpack(&ctx.accounts.token.data.borrow())?;
+    if ctx.accounts.authority.key != &token.owner {
+        return Err(ProgramError::InvalidAccountData);
+    }
+    require_keys_eq!(ctx.accounts.vault.key(), ctx.accounts.pool.vault, E::Vault);
+    require!(token.amount > 0, E::Empty);
+    if ctx.accounts.a.key() == ctx.accounts.b.key() {
+        return err!(E::Same);
+    }
+    if bump > 3 {
+        msg!("not a check: no error");
+    }
+    if bump == 0 {
+        return Err(E::A.into());
+    } else if ctx.accounts.vault.key() != ctx.accounts.pool.vault {
+        return Err(E::B.into());
+    } else {
+        msg!("an if with an else is a branch, not a guard");
+    }
+    if bump == 9 {
+        return Ok(MyErr::new());
+    }
+    for _ in 0..1 {
+        require!(ctx.accounts.pool.open, E::Closed);
+    }
+    Ok(())
+}
+#[derive(Accounts)]
+pub struct Act<'info> {
+    pub authority: AccountInfo<'info>,
+    pub token: AccountInfo<'info>,
+    #[account(mut)]
+    pub vault: Account<'info, Vault>,
+    pub pool: Account<'info, Pool>,
+    pub a: Account<'info, Vault>,
+    pub b: Account<'info, Vault>,
+}
+"#;
+        let k = SourceKinds::parse(src);
+        let body = |p: &str| k.slot("act", p).unwrap().attrs.body.clone();
+        assert_eq!(body("authority"), vec!["if !authority.is_signer", "if authority.key!=&token.owner"]);
+        // Text sorted, attached to `vault`, the first written.
+        assert_eq!(body("vault"), vec!["require_keys_eq!(pool.vault,vault.key())"]);
+        assert!(body("pool").is_empty(), "inside a loop is not top level");
+        assert_eq!(body("a"), vec!["if a.key()==b.key()"]);
+        assert_eq!(k.ix_checks("act"), ["require!(token.amount>0)"], "no else-if, no `return Ok(..Err..)`");
+        // `require_keys_eq!` ties vault to pool; `a == b` failing is a
+        // difference check and ties nothing.
+        assert!(!k.unbound("act", "vault") && !k.unbound("act", "pool"));
+        assert!(k.unbound("act", "a") && k.unbound("act", "b"));
     }
 
     /// strip() blanks byte for byte: non-ASCII text in a comment or a

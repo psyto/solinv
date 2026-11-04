@@ -105,8 +105,9 @@ wrappers (`Account`, `AccountLoader`, `InterfaceAccount`, `Signer`,
 `seeds`, `address`, `has_one`, `associated_token::*` or `.key()`
 comparison fixes (on it, or on
 another slot naming it) and that `init` does not create — the summary
-lists the writable ones as `account-swap` candidates; a key check in
-the handler body is not read; any other type — type aliases
+lists the writable ones as `account-swap` candidates; a key check at
+the top level of the handler body counts, one in a function the
+handler calls is not read; any other type — type aliases
 included, since what an alias names depends on module scope and
 imports — a struct name defined twice, or a field type split over
 lines leaves the slot unplaced, and the report counts it as not found. When

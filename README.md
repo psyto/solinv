@@ -79,7 +79,7 @@ unsafe_withdraw   ! no signer, writes an unconstrained slot
    1 depositor        W   U
 
 7 slots are UncheckedAccount / AccountInfo in source: their checks are hand-written, which is where the Critical 5 can find something.
-! 1 writable typed accounts have no declared constraint fixing which account they are (no seeds, address, has_one, associated_token:: or .key() comparison; the handler body is not read). Unless the handler checks the key, a caller may pass any account of the type: expected for their own token accounts, a hole for a vault, escrow or pool the program owns. account-swap candidates: unsafe_set_amount_from_source.target
+! 1 writable typed accounts have no declared constraint fixing which account they are (no seeds, address, has_one, associated_token:: or .key() comparison, in the attributes or at the top of the handler). Unless a function the handler calls checks the key, a caller may pass any account of the type: expected for their own token accounts, a hole for a vault, escrow or pool the program owns. account-swap candidates: unsafe_set_amount_from_source.target
 3 instruction(s) with no signer write an unconstrained slot: unsafe_set_amount_from_source, unsafe_withdraw_with_bump, unsafe_withdraw
 Start there: either they are meant to be permissionless, or an authority check is missing.
 ```
@@ -97,7 +97,7 @@ flagged instructions are the demo program's three planted account-validation bug
 |---|---|
 | A removed check fails the PR | The demo above; [the demo pull request](https://github.com/psyto/solinv/pull/2) |
 | A check in vipers' `validate()` counts too | Cashio's real source, fixed → before the fix: the check its fix added is named, in both instructions ([details](docs/diff.md#checked-on)); the map marks 2 of its 26 typed accounts `t`, both validated by the program they are passed to (26 before vipers was read, [#8](https://github.com/psyto/solinv/issues/8)) |
-| …on the 11 classes of [sealevel-attacks](https://github.com/coral-xyz/sealevel-attacks) | Turning each fixed program into its insecure version: 11 of 11 caught where the check was declared, 0 of 11 where it was written in the handler ([#12](https://github.com/psyto/solinv/issues/12)); 0 removed checks reported in the other direction ([details](docs/sealevel-attacks.md)) |
+| …on the 11 classes of [sealevel-attacks](https://github.com/coral-xyz/sealevel-attacks) | Turning each fixed program into its insecure version: 11 of 11 caught where the check was declared, 9 of 11 where it was written in the handler (the other two change CPI seeds and zeroing code, not a check); 0 removed checks reported in the other direction ([details](docs/sealevel-attacks.md)) |
 | No noise on code that keeps its checks | Comparing Jito tip-payment, tip-distribution and Raydium cp-swap with themselves: 0 reports. Reformatting a constraint or renaming its error: 0 reports (tested) |
 | The fuzz detectors catch a check that is removed | Mutation test on the clean escrow: of the removed checks the harness reached, 5 of 6 were caught, each by the detector predicted for it — after setting aside 5 mutations that cannot change behaviour, each argued in the [report](examples/escrow-demo/campaigns/escrow-clean-report.md) (5 of 11 before) |
 | …but not every kind yet | On Raydium's native AMM, 0 of 18: its guards compare values computed inside the handler, which a declaration cannot name ([why](#mutation-testing--measuring-detector-power-on-a-real-target)) |
@@ -905,9 +905,11 @@ runs, and each
 one branch can pass alone) count when they
 name another account of the instruction or an upper-case constant
 (`seeds` of literals alone too), not an instruction argument the caller
-picks, and what a comparison says is not checked; a key
-comparison in the handler body is not read (Jito
-tip-distribution's `upload_merkle_root` checks there), nor is the fact
+picks, and what a comparison says is not checked. A key comparison at
+the top level of the handler body (`require_keys_eq!`, `if a.key() !=
+b.key() { return Err(..) }`) counts; one inside a function the handler
+calls is not read (Jito tip-distribution's `upload_merkle_root` checks
+in such a helper), nor is the fact
 that a type only ever exists at one PDA. A tie to another account
 counts even when that account is itself the caller's choice (the pool
 or sale the instruction acts on): whether a caller can create a matching

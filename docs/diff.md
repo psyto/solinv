@@ -33,6 +33,8 @@ instruction whose handler takes that struct as its `Context<..>`
 | `seeds`, `address` or `owner` constraint deleted | removed |
 | `has_one = x` deleted | removed — or *moved* (warning) if another slot of the instruction now has it |
 | `constraint = <expr>` deleted or replaced | removed, naming the expression — or *moved* (warning) |
+| a check at the top level of the handler body deleted or changed: `require!`, `require_eq!` / `_neq` / `_gt` / `_gte`, `require_keys_eq!` / `_neq`, or `if <cond> { return Err(..) }` with no `else` | removed, naming it (`if !authority.is_signer` removed from the handler) — on the first account it names, or the instruction when it names only locals |
+| …and an account it names now declares a check of the same kind instead — a signer check a `Signer`; a key check a `has_one`, `constraint`, `seeds`, `address` or `Program`/`Sysvar` type; an owner or discriminator check a typed account; a bump check `seeds` | warning: moved to a declaration — confirm it covers the same thing. Any other check (an amount, a slot) has no declared form and stays removed |
 | vipers `assert_keys_eq!` / `assert_keys_neq!` deleted from an `impl Validate` the handler's `#[access_control(ctx.accounts.validate())]` runs (composites' `self.x.validate()` followed) | removed, naming the check — or *moved* (warning) |
 | `close = <target>` deleted | removed: no longer emptied and handed back to the system program |
 | `close` target changed | warning: that is where its lamports go |
@@ -65,8 +67,10 @@ the `#[access_control]` that runs them removes every one.
   the three planted instructions that write state with no signer.
 - [sealevel-attacks](sealevel-attacks.md): every fixed program turned
   into its insecure version — 11 of 11 classes where the check was
-  declared, 0 of 11 where it was written in the handler; 0 removed
-  checks in the 22 pairs the other way round.
+  declared, 9 of 11 where it was written in the handler; 0 removed
+  checks in the 22 pairs the other way round, nor between the two fixed
+  versions (`secure` → `recommended`: the handler checks become
+  declarations, reported as moved).
 - Cashio's real source, fixed (`7df6581`) against the version before the
   fix: `assert_keys_eq!(common.bank.crate_mint, common.crate_mint)` removed
   from `validate()`, in `print_cash` and `burn_cash` — the check its fix
@@ -79,9 +83,17 @@ It reads text, not types, line by line as rustfmt lays fields out:
 
 - A check moved from an attribute into the handler body
   (`require_keys_eq!`) reads as removed. That is deliberate: a reviewer
-  should look. Handler bodies are not read; the one exception is vipers'
-  `assert_keys_eq!` / `assert_keys_neq!` in an `impl Validate` run by
-  `#[access_control]`. A check inside an `if` counts as always run; a
+  should look. Of the handler body only the top level is read: a check
+  inside a loop, a `match`, an `if … else` chain, or a function the
+  handler calls under another name (a helper `auth(&ctx)`) is not; a
+  function of the same name taking the same `Context` (lib.rs delegating
+  to `instructions::swap(ctx, …)`) is read as part of the instruction. A
+  top-level `let x = &ctx.accounts.y;` is followed; a local built from an
+  account's data (`let token = unpack(..)`) is not, so a check on it
+  counts for the instruction, not the account. `if !x.is_signer {
+  return Err }` and `require!(x.is_signer)` are different texts, so
+  rewriting one as the other reads as a removal. The other code read is vipers' `assert_keys_eq!` /
+  `assert_keys_neq!` in an `impl Validate` run by `#[access_control]`. A check inside an `if` counts as always run; a
   second `impl Validate` for the same struct anywhere in the source (a
   test module's included) leaves both unread. Rarer spellings —
   `self.x.to_account_info().key`, `<X as Validate>::validate(&self.x)` —

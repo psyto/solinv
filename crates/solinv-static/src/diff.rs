@@ -9,9 +9,9 @@
 //! slot and names every check that is gone.
 //!
 //! Source only: no build, no IDL, no toolchain, so it runs on any CI
-//! runner. It reads what the source declares; a check moved into the
-//! handler body (`require_keys_eq!`) reads as removed, which is the
-//! right default for a reviewer to look at.
+//! runner. It reads what the source declares, and the checks at the top
+//! level of each handler body; a declared check moved into the handler
+//! reads as removed, which is the right default for a reviewer to look at.
 
 use crate::source::{Slot, SourceKinds};
 use crate::idl::SlotKind;
@@ -97,6 +97,7 @@ pub fn diff(base: &SourceKinds, head: &SourceKinds) -> Vec<Change> {
             .into_iter()
             .filter(|((i, _), _)| i == *old)
             .flat_map(|(_, s)| checks_of(s))
+            .chain(base.ix_checks(old).iter().cloned())
             .collect();
         let message = match renamed.get(*old) {
             Some(n) => format!("instruction renamed to `{n}` (its slots match): compared with it"),
@@ -217,6 +218,23 @@ pub fn diff(base: &SourceKinds, head: &SourceKinds) -> Vec<Change> {
             ),
             _ => {}
         }
+        // Still in the head handler, on whichever account or the
+        // instruction (an alias can move it between them): not removed.
+        let in_head = |c: &String| {
+            head.ix_checks(ix).contains(c) || siblings.iter().any(|(_, s)| s.attrs.body.contains(c))
+        };
+        for check in ba.body.iter().filter(|e| !in_head(e)) {
+            match siblings.iter().find(|(_, s)| s.attrs.body.contains(check)) {
+                Some((other, _)) => push(
+                    Severity::Warning,
+                    format!("`{check}` in the handler moved to `{other}`"),
+                ),
+                None => match declared_instead(base, head, base_ix, ix, check, Some(path)) {
+                    Some(slot) => push(Severity::Warning, moved_message(check, &slot)),
+                    None => push(Severity::Regression, format!("`{check}` removed from the handler")),
+                },
+            }
+        }
         for check in ba.validate.iter().filter(|e| !ha.validate.contains(e)) {
             match siblings.iter().find(|(_, s)| s.attrs.validate.contains(check)) {
                 Some((other, _)) => push(
@@ -225,6 +243,23 @@ pub fn diff(base: &SourceKinds, head: &SourceKinds) -> Vec<Change> {
                 ),
                 None => push(Severity::Regression, format!("`{check}` removed from validate()")),
             }
+        }
+    }
+
+    // Handler checks that name no slot (they read a local), per
+    // instruction: compared as a whole.
+    for base_ix in &base_ixs {
+        let Some(ix) = renamed.get(base_ix).or(head_ixs.get(base_ix)) else { continue };
+        let (file, line) = head.handler_at(ix).map_or((String::new(), 0), |(f, l)| (f.to_string(), l));
+        let in_head = |c: &String| {
+            head.ix_checks(ix).contains(c) || in_ix(ix).iter().any(|(_, s)| s.attrs.body.contains(c))
+        };
+        for check in base.ix_checks(base_ix).iter().filter(|c| !in_head(c)) {
+            let (severity, message) = match declared_instead(base, head, base_ix, ix, check, None) {
+                Some(slot) => (Severity::Warning, moved_message(check, &slot)),
+                None => (Severity::Regression, format!("`{check}` removed from the handler")),
+            };
+            out.push(Change { severity, ix: ix.clone(), path: String::new(), message, file: file.clone(), line });
         }
     }
 
@@ -250,6 +285,98 @@ pub fn diff(base: &SourceKinds, head: &SourceKinds) -> Vec<Change> {
     out
 }
 
+/// A handler check that is gone may have become a declaration — the
+/// safer form. The account it names that now declares a check of the
+/// same kind, if one does: a signer check needs a signer, a key check a
+/// `has_one`, `constraint`, `seeds`, `address` or a `Program` / `Sysvar`
+/// type, an owner or discriminator check a typed account, a bump check
+/// `seeds` on some account of the instruction. Any other check
+/// (an amount, a slot number) has no declared form and stays removed.
+fn declared_instead(
+    base: &SourceKinds,
+    head: &SourceKinds,
+    base_ix: &str,
+    ix: &str,
+    check: &str,
+    slot: Option<&str>,
+) -> Option<String> {
+    let kind = if check.contains("is_signer") {
+        Kind::Signer
+    } else if check.contains(".key") {
+        Kind::Key
+    } else if check.contains(".owner") || check.contains("discrimin") {
+        Kind::Type
+    } else if check.contains("bump") {
+        // A bump compared by hand names no account; `seeds` + `bump` on
+        // any account of the instruction is its declared form.
+        Kind::Bump
+    } else {
+        return None;
+    };
+    let words: BTreeSet<&str> =
+        check.split(|c: char| !(c.is_alphanumeric() || c == '_')).filter(|w| !w.is_empty()).collect();
+    let slots = head.slots();
+    let leaves: BTreeSet<&str> = slots
+        .iter()
+        .filter(|((i, _), _)| i == ix)
+        .map(|((_, p), _)| p.rsplit('.').next().unwrap_or(p))
+        .collect();
+    slots.iter().find_map(|((i, p), h)| {
+        let leaf = p.rsplit('.').next().unwrap_or(p);
+        let named = slot == Some(p.as_str()) || words.contains(leaf) || matches!(kind, Kind::Bump);
+        let b = base.slot(base_ix, p);
+        // The other accounts the check names: words that are slot names of
+        // the instruction, not `key`, `owner` or the macro's.
+        let others: BTreeSet<&str> = words
+            .iter()
+            .copied()
+            .filter(|w| *w != leaf && leaves.contains(w))
+            .collect();
+        (i == ix && named && b.is_some_and(|b| gained(kind, b, h, &others))).then(|| p.clone())
+    })
+}
+
+#[derive(Clone, Copy)]
+enum Kind {
+    Signer,
+    Key,
+    Type,
+    Bump,
+}
+
+/// `h` declares a check of `kind` that `b` did not. For a key check the
+/// declaration must tie `h` to something else the check names (`others`:
+/// the check's words but `h`'s own name): a `has_one` on one of them, a
+/// `constraint` comparing a key with one of them, or `seeds` / `address` /
+/// a program type fixing `h` itself.
+fn gained(kind: Kind, b: &Slot, h: &Slot, others: &BTreeSet<&str>) -> bool {
+    let (ba, ha) = (&b.attrs, &h.attrs);
+    let typed = b.kind == Some(SlotKind::Unchecked) && h.kind == Some(SlotKind::Typed);
+    match kind {
+        Kind::Signer => signs(h) && !signs(b),
+        Kind::Key => {
+            (typed && matches!(h.ty.as_str(), "Program" | "Sysvar"))
+                || (ha.seeds && !ba.seeds)
+                || (ha.address && !ba.address)
+                || ha.has_one.iter().any(|t| !ba.has_one.contains(t) && others.contains(t.as_str()))
+                || ha.constraints.iter().any(|e| {
+                    !ba.constraints.contains(e)
+                        && e.contains(".key")
+                        && e.split(|c: char| !(c.is_alphanumeric() || c == '_')).any(|w| others.contains(w))
+                })
+        }
+        Kind::Type => (typed && h.ty != "Signer") || (ha.owner && !ba.owner),
+        Kind::Bump => ha.seeds && !ba.seeds,
+    }
+}
+
+fn moved_message(check: &str, slot: &str) -> String {
+    format!(
+        "`{check}` removed from the handler, and `{slot}` now declares a check: \
+         confirm the declaration covers it"
+    )
+}
+
 /// What a slot checks, for naming what a removed slot took with it.
 fn checks_of(s: &Slot) -> Vec<String> {
     let mut c = Vec::new();
@@ -268,6 +395,7 @@ fn checks_of(s: &Slot) -> Vec<String> {
     c.extend(a.has_one.iter().map(|t| format!("has_one = {t}")));
     c.extend(a.constraints.iter().map(|e| format!("constraint = {e}")));
     c.extend(a.close.iter().map(|t| format!("close = {t}")));
+    c.extend(a.body.iter().cloned());
     c.extend(a.validate.iter().cloned());
     c
 }
@@ -723,5 +851,105 @@ pub struct N3<'info> {
             .replace("fn init(ctx: Context<Init>) -> Result<()> {}", "fn a(ctx: Context<Init>) -> Result<()> {}\npub fn b(ctx: Context<Init>) -> Result<()> {}");
         let c = diff(&kinds(base), &kinds(&two));
         assert!(c.iter().any(|c| c.slot() == "init" && c.message.contains("not compared")));
+    }
+
+    #[test]
+    fn a_handler_check_removed_or_moved_to_a_declaration() {
+        let base = r#"
+pub fn log(ctx: Context<Log>) -> Result<()> {
+    if !ctx.accounts.authority.is_signer {
+        return Err(ProgramError::MissingRequiredSignature);
+    }
+    let user = User::try_from_slice(&ctx.accounts.user.data.borrow())?;
+    if user.discriminant != Kind::User {
+        return Err(ProgramError::InvalidAccountData);
+    }
+    Ok(())
+}
+#[derive(Accounts)]
+pub struct Log<'info> {
+    pub authority: AccountInfo<'info>,
+    pub user: AccountInfo<'info>,
+}
+"#;
+        // Deleted: removed.
+        let gone = base.replace(
+            "    if !ctx.accounts.authority.is_signer {\n        return Err(ProgramError::MissingRequiredSignature);\n    }\n",
+            "",
+        );
+        let c = diff(&kinds(base), &kinds(&gone));
+        assert!(c.len() == 1 && c[0].severity == Severity::Regression && c[0].slot() == "log.authority", "{c:?}");
+        assert_eq!(c[0].message, "`if !authority.is_signer` removed from the handler");
+
+        // Moved into the declaration (`Signer`, `Account<User>`): warnings.
+        let declared = base
+            .replace(
+                "    if !ctx.accounts.authority.is_signer {\n        return Err(ProgramError::MissingRequiredSignature);\n    }\n",
+                "",
+            )
+            .replace(
+                "    if user.discriminant != Kind::User {\n        return Err(ProgramError::InvalidAccountData);\n    }\n",
+                "",
+            )
+            .replace("pub authority: AccountInfo<'info>", "pub authority: Signer<'info>")
+            .replace("pub user: AccountInfo<'info>", "pub user: Account<'info, User>");
+        let c = diff(&kinds(base), &kinds(&declared));
+        assert_eq!(c.len(), 2, "{c:?}");
+        assert!(c.iter().all(|c| c.severity == Severity::Warning && c.message.contains("now declares a check")));
+    }
+
+    #[test]
+    fn handler_refactors_are_not_removals_and_unrelated_declarations_hide_nothing() {
+        let base = r#"
+pub fn act(ctx: Context<Act>, amount: u64) -> Result<()> {
+    require_keys_eq!(ctx.accounts.vault.authority, ctx.accounts.authority.key(), E::Owner);
+    require!(ctx.accounts.pool.open, E::Closed);
+    require!(amount <= MAX, E::TooMuch);
+    Ok(())
+}
+#[derive(Accounts)]
+pub struct Act<'info> {
+    #[account(mut)]
+    pub vault: Account<'info, Vault>,
+    pub authority: AccountInfo<'info>,
+    pub pool: Account<'info, Pool>,
+    pub config: Account<'info, Config>,
+}
+"#;
+        let same = |head: &str| diff(&kinds(base), &kinds(head));
+        // An alias, swapped arguments: the same checks.
+        let alias = base
+            .replace("    require!(ctx.accounts.pool.open, E::Closed);", "    let pool = &ctx.accounts.pool;\n    require!(pool.open, E::Closed);")
+            .replace(
+                "require_keys_eq!(ctx.accounts.vault.authority, ctx.accounts.authority.key(), E::Owner)",
+                "require_keys_eq!(ctx.accounts.authority.key(), ctx.accounts.vault.authority, E::Owner)",
+            );
+        assert!(same(&alias).is_empty(), "{:?}", same(&alias));
+
+        // A signer is not a key tie: the deleted require_keys_eq! stays removed.
+        let signer = base
+            .replace("    require_keys_eq!(ctx.accounts.vault.authority, ctx.accounts.authority.key(), E::Owner);\n", "")
+            .replace("pub authority: AccountInfo<'info>", "pub authority: Signer<'info>");
+        assert!(same(&signer).iter().any(|c| c.severity == Severity::Regression), "{:?}", same(&signer));
+
+        // A declaration that ties nothing the check named does not excuse it.
+        let check = "    require_keys_eq!(ctx.accounts.vault.authority, ctx.accounts.authority.key(), E::Owner);\n";
+        for decl in [
+            "#[account(mut, has_one = mint)]",
+            "#[account(mut, constraint = vault.amount > 0)]",
+            "#[account(mut, constraint = vault.key() != Pubkey::default())]",
+        ] {
+            let h = base.replace(check, "").replace("#[account(mut)]\n    pub vault", &format!("{decl}\n    pub vault"));
+            assert!(same(&h).iter().any(|c| c.severity == Severity::Regression), "{decl}: {:?}", same(&h));
+        }
+        let tied = base.replace(check, "").replace("#[account(mut)]\n    pub vault", "#[account(mut, has_one = authority)]\n    pub vault");
+        assert!(same(&tied).iter().all(|c| c.severity == Severity::Warning), "{:?}", same(&tied));
+
+        // An unrelated new constraint does not excuse a deleted amount check.
+        let unrelated = base
+            .replace("    require!(amount <= MAX, E::TooMuch);\n", "")
+            .replace("    pub config: Account<'info, Config>,", "    #[account(constraint = config.paused == false)]\n    pub config: Account<'info, Config>,");
+        let c = same(&unrelated);
+        assert!(c.len() == 1 && c[0].severity == Severity::Regression && c[0].slot() == "act", "{c:?}");
     }
 }

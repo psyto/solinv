@@ -186,18 +186,20 @@ one-page walk-through, with what to time and what to send back.
 
 ### Where we use it ourselves
 
-Both installed from the pins above, the same way as for anyone else:
+All installed from the pins above, the same way as for anyone else:
 
 | Repo | What runs | Measured |
 |---|---|---|
 | [fabrknt/veil](https://github.com/fabrknt/veil/blob/main/.github/workflows/solinv.yml) | the action on 5 Anchor 0.30 programs, one matrix job each | A throwaway pull request that dropped a `has_one` failed only that program's job, with the annotation on the line ([fabrknt/veil#2](https://github.com/fabrknt/veil/pull/2)) |
 | [psyto/princeps-solana](https://github.com/psyto/princeps-solana/tree/main/fuzz/psol-vault) | a fuzz harness for a native (Pinocchio) vault: signer-skip, owner-skip, account-swap, 3 minutes per pull request | Deleting one check at a time: 6 of 6 caught; 0 findings on the current code. Two of them — the compliance-program pin in `deposit` and `withdraw` — need two accounts swapped together, which `account_swap::check_sets` does ([#4](https://github.com/psyto/solinv/issues/4), [psyto/princeps-solana#3](https://github.com/psyto/princeps-solana/pull/3)) |
+| [psyto/openhl-solana](https://github.com/psyto/openhl-solana/tree/main/fuzz/vault) | a fuzz harness for the native trading vault of the Solana Internals course, Chapter 12, which ends with it as an exercise ([§12.7](https://github.com/psyto/openhl-solana/blob/main/docs/chapter-12-vault/DRAFT.en.md)) | Its first run found a real hole: withdraw did not check that the share belonged to the vault, so shares minted cheaply in one vault drained another. Deleting the 9 account checks one at a time: 5 caught; the other 4 are refused anyway by the runtime's owner rule or by SPL Token, and the chapter explains each |
 
 What using it ourselves turned up: the `t` mark for typed accounts not tied to the instruction
 ([#3](https://github.com/psyto/solinv/issues/3); in veil it surrounds four real holes the earlier map showed as `T`),
 a signer-skip false positive ([#5](https://github.com/psyto/solinv/issues/5)), matrix jobs that
 race on the action's cache so each one recompiles ([#6](https://github.com/psyto/solinv/issues/6)),
-and two setup gaps in the docs ([#7](https://github.com/psyto/solinv/issues/7)). Upstream:
+two setup gaps in the docs ([#7](https://github.com/psyto/solinv/issues/7)), and `check_sets`
+skipping a set whose accounts are missing without saying so ([#13](https://github.com/psyto/solinv/issues/13)). Upstream:
 crucible's `--timeout` overran by 18 minutes in CI ([crucible#25](https://github.com/asymmetric-research/crucible/issues/25)),
 and it exits 0 on findings, so CI has to look for `[FUZZ_FINDING]` itself ([crucible#26](https://github.com/asymmetric-research/crucible/issues/26)).
 

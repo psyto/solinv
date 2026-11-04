@@ -6,7 +6,10 @@ branding:
 
 inputs:
   program-src:
-    description: Path to the Anchor program's source, relative to the repository root (e.g. programs/my_program/src)
+    description: >-
+      Path to the Anchor program's source, relative to the repository root
+      (e.g. programs/my_program/src). Several programs: one path per line, so a
+      multi-program repository needs one job and one install.
     required: true
   base-ref:
     description: Commit to compare against. Defaults to the pull request's base.
@@ -50,7 +53,7 @@ runs:
     # succeeds, and this job's purpose is to fail on a removed check.
     - name: Restore the solinv binary
       id: cache
-      uses: actions/cache/restore@v4
+      uses: actions/cache/restore@v6
       with:
         path: ${{ runner.temp }}/solinv-bin
         key: solinv-cli-${{ runner.os }}-${{ steps.rev.outputs.rev }}
@@ -66,7 +69,7 @@ runs:
 
     - name: Save the solinv binary
       if: steps.cache.outputs.cache-hit != 'true'
-      uses: actions/cache/save@v4
+      uses: actions/cache/save@v6
       with:
         path: ${{ runner.temp }}/solinv-bin
         key: solinv-cli-${{ runner.os }}-${{ steps.rev.outputs.rev }}
@@ -89,13 +92,23 @@ runs:
         SRC: ${{ inputs.program-src }}
         FAIL: ${{ inputs.fail-on-removed }}
       run: |
-        if [ ! -e "$RUNNER_TEMP/solinv-base/$SRC" ]; then
-          echo "::notice title=solinv::$SRC is new in this pull request; nothing to compare"
-          exit 0
-        fi
         flag=""
         [ "$FAIL" = "true" ] || flag="--no-fail"
-        "$RUNNER_TEMP/solinv-bin/bin/solinv" diff \
-          --base-src "$RUNNER_TEMP/solinv-base/$SRC" \
-          --head-src "$SRC" \
-          --format github $flag
+        # Every path is compared, even after one fails.
+        status=0
+        while IFS= read -r src; do
+          src="${src#"${src%%[![:space:]]*}"}"
+          src="${src%"${src##*[![:space:]]}"}"
+          [ -n "$src" ] || continue
+          if [ ! -e "$RUNNER_TEMP/solinv-base/$src" ]; then
+            echo "::notice title=solinv::$src is new in this pull request; nothing to compare"
+            continue
+          fi
+          echo "::group::solinv diff $src"
+          "$RUNNER_TEMP/solinv-bin/bin/solinv" diff \
+            --base-src "$RUNNER_TEMP/solinv-base/$src" \
+            --head-src "$src" \
+            --format github $flag || status=1
+          echo "::endgroup::"
+        done <<< "$SRC"
+        exit $status

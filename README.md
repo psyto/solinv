@@ -8,7 +8,10 @@ validated a `mint` field, so a chain of fake accounts passed;
 [Crema](https://halborn.com/explained-the-crema-finance-hack-july-2022/) (Jul 2022, ~$8.8M) let a
 fake tick account past its owner check. In Anchor each of those checks is one type or one
 `#[account(...)]` line, enforced only while it is written down — and a refactor that loosens
-`Account<'info, Vault>` to `UncheckedAccount` or deletes a `has_one` fails no test.
+`Account<'info, Vault>` to `UncheckedAccount` or deletes a `has_one` fails no test. As more
+programs are written and refactored by AI coding agents, that kind of change gets more common and
+easier to miss: it compiles, the tests the agent wrote pass, and a one-line deletion is easy to skim
+past in a large generated diff.
 
 **solinv tells you when that happens, on the pull request, before it merges** — and maps where a
 program's hand-written account checks are, and fuzzes them with the attack each check exists to
@@ -62,23 +65,26 @@ cargo run -q -p solinv-cli -- idl examples/escrow-demo/idl/escrow.json \
 ```
 program Esrcw11111111111111111111111111111111111111 — 12 instructions, account types: Vault
 
-S signer  W writable  P pda seeds  A fixed address  · nothing declared  U unchecked in source  T typed in source
+S signer  W writable  P pda seeds  A fixed address  · nothing declared  U unchecked in source  T typed in source  t typed, identity not fixed by a constraint
 …
 unsafe_set_amount_from_source   ! no signer, writes an unconstrained slot
    0 source               U
-   1 target           W   T
+   1 target           W   t
 …
 unsafe_withdraw   ! no signer, writes an unconstrained slot
    0 vault            W   U
    1 depositor        W   U
 
 7 slots are UncheckedAccount / AccountInfo in source: their checks are hand-written, which is where the Critical 5 can find something.
+! 1 writable typed accounts have no declared constraint fixing which account they are (no seeds, address, has_one, associated_token:: or .key() comparison; the handler body is not read). Unless the handler checks the key, a caller may pass any account of the type: expected for their own token accounts, a hole for a vault, escrow or pool the program owns. account-swap candidates: unsafe_set_amount_from_source.target
 3 instruction(s) with no signer write an unconstrained slot: unsafe_set_amount_from_source, unsafe_withdraw_with_bump, unsafe_withdraw
 Start there: either they are meant to be permissionless, or an authority check is missing.
 ```
 
 `U` marks an `UncheckedAccount` / `AccountInfo`, whose owner and type checks are hand-written; `T`
-a typed account Anchor checks. Without `--src` the IDL alone cannot tell them apart. The three
+a typed account Anchor checks. `t` is a typed account whose identity no declared constraint fixes:
+Anchor checks that it is *a* `Vault`, not *which* one, so unless the handler compares its key, a
+caller can pass their own. Without `--src` the IDL alone cannot tell these apart. The three
 flagged instructions are the demo program's three planted account-validation bugs. To fuzz them, see
 [fuzz the planted-bug demo](#quickstart--escrow-demo) (needs the Crucible CLI and `cargo build-sbf`).
 
@@ -102,7 +108,7 @@ jobs:
   account-checks:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: psyto/solinv@f5267c8f23c3b21bc8f2b54308bcbd52824da806
         with:
           program-src: programs/my_program/src
@@ -110,8 +116,12 @@ jobs:
 
 It installs solinv at that commit, compares the program's source with the pull request's base,
 and fails the job when a check is removed. The first run compiles solinv (about 2 minutes on
-`ubuntu-latest` for the demo pull request); later runs restore it from the cache. No Solana
+`ubuntu-latest` for the demo pull request); later runs restore it from the cache (the whole job took 7 seconds on a re-run). No Solana
 toolchain, no build of your program.
+
+Several programs in one repository: give `program-src` one path per line. One job then installs
+solinv once and compares each program in turn, failing if any lost a check. A matrix with a job per
+program works too, but each job compiles solinv: they race to save the same cache entry.
 
 The CLI (not on crates.io yet; pin a commit):
 
@@ -142,10 +152,40 @@ let spec = Idl::from_json(include_str!("../idl/my_program.json"))?
 Return the specs from `HasInstructionSet::instructions()` and call the detectors from an
 `#[invariant_test]`, e.g. `solinv_core::invariants::signer_skip::check(fixture)`. Full walk-through:
 [start from your IDL](#start-from-your-idl) and [integration](#integration--adopting-solinv-on-your-own-program).
+
+To fail CI on a finding, read the log, not the exit code: `crucible run` exits 0 when it reports one
+([crucible#26](https://github.com/asymmetric-research/crucible/issues/26)), and checks `--timeout` only
+every 1000 iterations ([crucible#25](https://github.com/asymmetric-research/crucible/issues/25)).
+
+```bash
+timeout -s INT -k 30 180 crucible run <program> invariant_all \
+    --binary-in target/release/invariant_test --timeout 180 > fuzz.log 2>&1 || true
+if grep '^\[FUZZ_FINDING\] \[' fuzz.log; then exit 1; fi   # solinv's findings start `[<detector>:…]`
+```
+
+[princeps-solana's workflow](https://github.com/psyto/princeps-solana/blob/main/.github/workflows/fuzz-vault.yml)
+is a complete example, separating a crash of `crucible` itself from the timeout.
 Both install lines above were checked from GitHub at that rev, not from a local clone.
 
 Trying it on a program of your own for the first time? [`docs/try-solinv.md`](docs/try-solinv.md) is a
 one-page walk-through, with what to time and what to send back.
+
+### Where we use it ourselves
+
+Both installed from the pins above, the same way as for anyone else:
+
+| Repo | What runs | Measured |
+|---|---|---|
+| [fabrknt/veil](https://github.com/fabrknt/veil/blob/main/.github/workflows/solinv.yml) | the action on 5 Anchor 0.30 programs, one matrix job each | A throwaway pull request that dropped a `has_one` failed only that program's job, with the annotation on the line ([fabrknt/veil#2](https://github.com/fabrknt/veil/pull/2)) |
+| [psyto/princeps-solana](https://github.com/psyto/princeps-solana/tree/main/fuzz/psol-vault) | a fuzz harness for a native (Pinocchio) vault: signer-skip, owner-skip, account-swap, 3 minutes per pull request | Deleting one check at a time: 4 of 5 caught; 0 findings on the current code. The miss needs two accounts swapped together ([#4](https://github.com/psyto/solinv/issues/4)) |
+
+What using it ourselves turned up: the `t` mark for typed accounts not tied to the instruction
+([#3](https://github.com/psyto/solinv/issues/3); in veil it surrounds four real holes the earlier map showed as `T`),
+a signer-skip false positive ([#5](https://github.com/psyto/solinv/issues/5)), matrix jobs that
+race on the action's cache so each one recompiles ([#6](https://github.com/psyto/solinv/issues/6)),
+and two setup gaps in the docs ([#7](https://github.com/psyto/solinv/issues/7)). Upstream:
+crucible's `--timeout` overran by 18 minutes in CI ([crucible#25](https://github.com/asymmetric-research/crucible/issues/25)),
+and it exits 0 on findings, so CI has to look for `[FUZZ_FINDING]` itself ([crucible#26](https://github.com/asymmetric-research/crucible/issues/26)).
 
 ## How it compares
 
@@ -746,22 +786,22 @@ program execution. Different program classes have different reachability:
 | Native (any `solana-program` 1.16+) | ✅ works | Raydium AMM, Slumlord, Save (ex-Solend), Jito restaking |
 | Anchor 1.0+ | ✅ works | escrow-demo |
 | Anchor 0.31 + Solana 2.x | ⚠️ builds clean, runtime untested | Meteora DAMM v2, Jito workspace SDK |
-| Anchor 0.27-0.29 | ⛔ runtime depth-gated (H1 ABI mismatch) | klend, Sanctum unstake, Marinade |
-| Pre-Anchor / `solana-program 1.10` | ⛔ build-gated (toolchain too old) | Wormhole bridge |
+| Anchor 0.28 | ✅ for Sanctum unstake's deployed binary (`solana program dump`): `init` and later instructions run. Our local build of it (solana-program 1.14.20, platform-tools v1.37/v1.39) faulted on the `init` CPI, on a real validator too. Other 0.28 programs untested | Sanctum unstake |
+| Anchor 0.27, 0.29 | ⚠️ untested with the deployed binary (klend's harness targets its source build) | klend |
+| Pre-Anchor / `solana-program 1.10` | ⚠️ the source does not build with any toolchain we tried; the deployed binary is untested | Wormhole bridge |
 
-**Byte-poke pattern unblocks Anchor 0.x post-init reachability**
-without requiring a LiteSVM fork. The `solinv-fuzz::bytepoke` module
-provides reusable Anchor discriminator + sighash helpers + byte-offset
-writers + an `AnchorAccountBuilder`. Adopting solinv on a
-depth-gated Anchor 0.x program: pre-write the target accounts via
-the byte-poke API (skipping the broken init→CPI path), then fuzz
-the post-init attack surface directly. The klend (Anchor 0.29) and
-sanctum-unstake (Anchor 0.28) example harnesses demonstrate the
-pattern. See
-[`docs/phase4-day47-a1-dig.md`](docs/phase4-day47-a1-dig.md) for the
-H1 diagnosis and
-[`docs/phase5-day57-bytepoke-helper.md`](docs/phase5-day57-bytepoke-helper.md)
-for the helper API + usage.
+**Fuzz the binary the protocol deployed.** `solana program dump -u m <program id> out.so`
+gets it. An earlier diagnosis blamed LiteSVM for Sanctum unstake's (Anchor 0.28)
+`init` failure; the real cause was our rebuild of its solana-program 1.14 source
+with new platform-tools
+(see [`docs/phase5-day61-h1-was-the-build.md`](docs/phase5-day61-h1-was-the-build.md)).
+
+The `solinv-fuzz::bytepoke` module (Anchor discriminator + sighash helpers,
+byte-offset writers, `AnchorAccountBuilder`) is still there for pre-writing deep
+state directly instead of reaching it through the program's own instructions.
+The klend example uses it.
+See [`docs/phase5-day57-bytepoke-helper.md`](docs/phase5-day57-bytepoke-helper.md)
+for the helper API.
 
 ## Architecture
 
@@ -791,7 +831,7 @@ solinv/
 │   │   └── idl/                 # IDLs of both programs, for `--features idl_specs`
 │   ├── raydium-amm-fuzz/        # Native production AMM (validated clean)
 │   ├── slumlord-fuzz/           # Native flash-loan (validated clean)
-│   ├── klend-fuzz/              # Anchor 0.29 (gated on ReserveConfig setup)
+│   ├── klend-fuzz/              # Anchor 0.29 (source build; ReserveConfig setup incomplete)
 │   ├── sanctum-unstake-fuzz/    # Anchor 0.28 (mainnet binary, init reachable)
 │   ├── targets.phase4.toml      # target-scoring config (10 protocols)
 │   └── target-scoring.example.toml  # config schema reference
@@ -825,7 +865,11 @@ Reads the Anchor 0.30+ IDL format. A legacy (pre-0.30) IDL is rejected
 with the fix: convert it with
 `anchor idl convert <path> -p <program id> -o <out>` (`-p` is needed
 when the IDL has no `metadata.address`; klend's does not). Shank IDLs
-from native programs are not supported. `solinv idl` needs no fixture. It lists every
+from native programs are not supported. Building an IDL on Anchor 0.30
+with current Rust needs a `proc-macro2` pin
+([anchor#3661](https://github.com/otter-sec/anchor/issues/3661)); the
+steps are in [`docs/try-solinv.md`](docs/try-solinv.md#step-2--map-your-program-about-5-minutes).
+`solinv idl` needs no fixture. It lists every
 instruction's slots as the IDL declares them and names the instructions
 with **no signer that write a slot the IDL leaves unconstrained** —
 either deliberately permissionless, or missing an authority check. On
@@ -837,13 +881,38 @@ The IDL cannot tell a typed `Account<'info, T>` from an
 without source every unconstrained slot counts the same. `--src` reads
 each field's declared type from the `#[derive(Accounts)]` structs and
 marks slots `U` (`UncheckedAccount` / `AccountInfo`: owner and type
-checks are hand-written) or `T` (one of Anchor's typed wrappers). It is a
-line reader, not a parser: a slot typed by a type alias, a struct name
+checks are hand-written) or `T` (one of Anchor's typed wrappers). A typed
+data account (`Account`, `AccountLoader`, `InterfaceAccount`) that no
+`seeds`, `address`, `has_one`, `associated_token::*` or `.key()`
+comparison identifies — on it, or on
+another slot naming it — and that `init` does not create, is marked
+`t`: Anchor checks its owner and type, not which account it is, so it
+is where `account-swap` should look. It is a candidate list, not a
+verdict: `seeds`, `address`, `has_one`, `associated_token::authority` and each
+`&&` clause of a constraint comparing a `.key()` (not an `||`, where
+one branch can pass alone) count when they
+name another account of the instruction or an upper-case constant
+(`seeds` of literals alone too), not an instruction argument the caller
+picks, and what a comparison says is not checked; a key
+comparison in the handler body is not read (Jito
+tip-distribution's `upload_merkle_root` checks there), nor is the fact
+that a type only ever exists at one PDA. A tie to another account
+counts even when that account is itself the caller's choice (the pool
+or sale the instruction acts on): whether a caller can create a matching
+pair depends on who can create the type, which the map does not read —
+`account-swap` with both slots swapped is the test for that. The reader is a line reader,
+not a parser: a slot typed by a type alias, a struct name
 defined twice, or a field type split over lines is left unplaced and
 counted as not found — never guessed. On the production programs
 measured that narrows the review a lot: Jito tip-distribution 29
 unconstrained slots → 5 unchecked, tip-payment 34 → 14, Raydium cp-swap
-108 → 30, with every slot placed.
+108 → 30, with every slot placed. Writable `t` slots: tip-distribution 4
+(a `Config` that `initialize` creates at a PDA, and tip-distribution
+accounts the handler checks or any caller may migrate by design),
+cp-swap 22 (admin-chosen configs and the
+caller's own token accounts — its vaults are tied by `constraint`), and
+20 on an Anchor 0.30 program of our own, among them the vaults behind
+four real holes ([#3](https://github.com/psyto/solinv/issues/3)).
 
 Building a spec, `system_program` and `associated_token_program` are
 bound by name when the IDL gives no address, and listed in
@@ -1026,7 +1095,7 @@ thing" drift after a negative result.
 
 ```bash
 cargo check --workspace               # verify scaffold (~5s)
-cargo test  --workspace               # all crates (272 tests)
+cargo test  --workspace               # all crates (273 tests)
 cargo test  -p solinv-core            # invariant regression tests
 cargo test  -p solinv-fuzz            # bytepoke + differential oracle + schema + idl
 cargo test  -p solinv-mutate          # operators + mutants + scoring (no Solana deps)
@@ -1040,7 +1109,7 @@ CLI surface:
 
 ```
 solinv idl <idl.json>                        # account-validation map + unsigned writers
-solinv idl <idl.json> --src <program src>    # + U/T: unchecked vs typed, from source
+solinv idl <idl.json> --src <program src>    # + U/T/t: unchecked, typed, typed but untied
 solinv diff --base-src <before> --head-src <after>  # checks a change removes; exit 1 if any
 solinv diff … --format github                # the same, as Actions annotations
 solinv idl <idl.json> --rust <ix|all>        # SpecBuilder stub to paste into a fixture

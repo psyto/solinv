@@ -60,6 +60,20 @@ Produces `~/src/klend/target/deploy/kamino_lending.so`. The harness
 loads it via absolute path — see `KLEND_SO_PATH` in
 `fuzz/klend/src/main.rs`.
 
+The harness is written against this source build. The deployed mainnet
+binary takes a longer `init_reserve` account list: loaded with it,
+`init_reserve` fails with `AccountNotEnoughKeys (3005)` on
+`instruction_sysvar_account`, and `setup()` now stops there (it used to
+carry on with no Reserve, so every deposit failed). Moving the harness to
+the deployed binary means updating the `InitReserve` accounts first.
+
+klend locks solana-program 1.17.18, so the local-build CPI fault that
+blocked Sanctum ([Day 61](../../docs/phase5-day61-h1-was-the-build.md))
+does not apply. Against the source build, the last recorded gate is the
+incomplete ReserveConfig setup from
+[Day 27](../../docs/phase2-day27-klend-config-patch.md) (not re-run on
+2026-11-04: no local build at hand).
+
 ## Layout
 
 ```

@@ -1,5 +1,7 @@
 # Phase 5 Day 56 — Gate A result: H1 is CPI-during-init bounded, NOT fundamental
 
+> **Correction (2026-11-04):** the H1 diagnosis below is wrong. The failure came from building an old solana-program (1.14) with new platform-tools, not from LiteSVM; the mainnet binary runs fine. See [phase5-day61-h1-was-the-build.md](phase5-day61-h1-was-the-build.md).
+
 Date: 2026-05-28
 Prior: [phase5-day55-toolchain-fork-setup.md](phase5-day55-toolchain-fork-setup.md)
 Gate A goal: discriminate H1b (fundamental account-layout ABI) vs
@@ -47,6 +49,8 @@ account layout, not SPL Token specifically.
 
 ## The bigger implication — a fork-free workaround exists
 
+> **Superseded (Day 61):** the gate this works around was our build. Path 2 (a LiteSVM shim) would have hidden a fault mainnet does not have. See [phase5-day61-h1-was-the-build.md](phase5-day61-h1-was-the-build.md).
+
 The set_protocol_fee success is a proof-of-concept: **pre-create the
 program's accounts via `write_account` (byte-poke), skip the program's
 own init ixs, and the non-init attack surface is reachable.** This is
@@ -91,6 +95,8 @@ Fix the init→CPI path so Anchor's `init` works directly.
 
 ## Revised Gate B (the toolchain fork decision)
 
+> **Superseded (Day 61):** the recommendation below (byte-poke as *the* Anchor 0.x integration path) no longer holds. Sanctum's deployed binary runs the setup instructions this doc could not reach (smoke-test each target's own binary rather than assuming the same); byte-poke stays useful for reaching deep state quickly, not as the only way past init. See [phase5-day61-h1-was-the-build.md](phase5-day61-h1-was-the-build.md).
+
 Gate A passes "bounded" → the fork is feasible in principle. But Gate
 A *also* revealed that the fork is **not strictly necessary** for
 reachability — Path 1 (byte-poke) unblocks Anchor 0.x without it.
@@ -124,6 +130,8 @@ already-proven one (byte-poke helper API on top of a pattern klend +
 Day 56 already validated).
 
 ## Decision needed (Day 57)
+
+> **Superseded (Day 61):** the choice below (byte-poke vs a LiteSVM fork) rested on the withdrawn H1 diagnosis. For Sanctum, using its deployed binary removed the need for either. See [phase5-day61-h1-was-the-build.md](phase5-day61-h1-was-the-build.md).
 
 The Gate A finding reshapes the toolchain-fork plan. User should weigh:
 

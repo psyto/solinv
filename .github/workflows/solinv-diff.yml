@@ -7,7 +7,7 @@ name: solinv diff
 on:
   pull_request:
     paths:
-      - examples/escrow-demo/programs/escrow-clean/**
+      - examples/escrow-demo/programs/**
 
 permissions:
   contents: read
@@ -16,8 +16,10 @@ jobs:
   account-checks:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: ./
         with:
-          program-src: examples/escrow-demo/programs/escrow-clean/src
+          program-src: |
+            examples/escrow-demo/programs/escrow-clean/src
+            examples/escrow-demo/programs/escrow/src
           solinv-rev: ${{ github.event.pull_request.head.sha }}

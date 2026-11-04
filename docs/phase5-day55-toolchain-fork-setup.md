@@ -1,5 +1,7 @@
 # Phase 5 Day 55 — toolchain fork: setup + first experiment
 
+> **Correction (2026-11-04):** the H1 diagnosis below is wrong. The failure came from building an old solana-program (1.14) with new platform-tools, not from LiteSVM; the mainnet binary runs fine. See [phase5-day61-h1-was-the-build.md](phase5-day61-h1-was-the-build.md).
+
 Date: 2026-05-28
 Phase: 2.5 (OSS audit-accelerator), toolchain fork stage (Day 55-68 plan)
 Goal: resolve the Anchor 0.x ↔ LiteSVM 0.9.1 H1 ABI mismatch
@@ -85,6 +87,8 @@ and the crash-during-account-validation timing (5802 CU, before any
 CPI logs).
 
 ## Revised effort estimate
+
+> **Superseded (Day 61):** no LiteSVM patching was needed, so this estimate is moot. The fault came from our local build of Sanctum on solana-program 1.14.20 (tested: init's `create_account` CPI, platform-tools v1.37/v1.39); the deployed binary runs it. See [phase5-day61-h1-was-the-build.md](phase5-day61-h1-was-the-build.md).
 
 The Day 47 estimate was "1-2 weeks LiteSVM-internals patching". Day 55
 experiment 1 sharpens this **upward**: since H1 isn't a feature toggle,

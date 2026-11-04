@@ -8,7 +8,10 @@ audit_maturity = 0.30
 # `status` field semantics (Day 49 addition):
 #   "ready"      — toolchain-reachable + not yet tested at fuzz depth
 #   "exhausted"  — toolchain-reachable but already tested clean (no marginal yield)
-#   "gated"      — depth-gated by toolchain (Day 47 H1: Anchor 0.x ↔ LiteSVM 0.9.1)
+#   "gated"      — blocked: no usable binary (the source does not build and the deployed one has not been made to fit), or nothing to write a harness from (no source or IDL).
+#                  Day 61: H1 was our source build of an old solana-program, not
+#                  LiteSVM, so neither Anchor 0.x nor a failed source build alone
+#                  counts as gated; try the deployed binary first.
 #   "unverified" — Anchor version / build chain not yet confirmed (default)
 #
 # Verified by direct evidence in this repo. Unverified entries should
@@ -22,8 +25,8 @@ change_velocity = 0.80
 permissionless_surface = 0.85
 complexity = 0.85
 audit_maturity = 0.75
-status = "gated"
-note = "Anchor 0.29 — Phase 4 Day 22-27 klend depth gate; Day 47 H1 dig confirmed ABI mismatch"
+status = "unverified"
+note = "Anchor 0.29, solana-program 1.17.18 (repr(C) AccountInfo, so the Day 61 H1 cause does not apply). The harness targets the source build; the mainnet binary rejects its init_reserve account list (AccountNotEnoughKeys). Setup-gated until init_reserve matches the deployed program."
 
 [[targets]]
 name = "Raydium"
@@ -52,8 +55,8 @@ change_velocity = 0.65
 permissionless_surface = 0.70
 complexity = 0.80
 audit_maturity = 0.90
-status = "gated"
-note = "Build-gated (Day 51 verification): solana-program=1.10.31 + solitaire framework. Fails with stdsimd error on default cargo-build-sbf; fails with rayon-core/Stderr::lock API mismatch even on v1.39 platform-tools workaround. Would need even older toolchain. Plus phase2-target-ranking notes narrow solinv-fit (signature/consensus surface)."
+status = "unverified"
+note = "Source does not build; the deployed binary has not been tried (Day 61). Day 51 verification: solana-program=1.10.31 + solitaire framework. Fails with stdsimd error on default cargo-build-sbf; fails with rayon-core/Stderr::lock API mismatch even on v1.39 platform-tools workaround. Building from source would need an even older toolchain. Plus phase2-target-ranking notes narrow solinv-fit (signature/consensus surface)."
 
 [[targets]]
 name = "Meteora"
@@ -63,7 +66,7 @@ permissionless_surface = 0.85
 complexity = 0.90
 audit_maturity = 0.65
 status = "unverified"
-note = "DAMM v2 (MeteoraAg/damm-v2) is Anchor 0.31 + Pinocchio (token ops) on Solana 2.3.13. Day 51 build smoke: BUILDS CLEAN with default cargo-build-sbf (no v1.39 workaround needed, unlike klend/Sanctum/Marinade in 0.27-0.29). Runtime H1 status still requires in-harness smoke (~1-2 days harness work) to fully resolve — could promote to ready or to gated."
+note = "DAMM v2 (MeteoraAg/damm-v2) is Anchor 0.31 + Pinocchio (token ops) on Solana 2.3.13. Day 51 build smoke: BUILDS CLEAN with default cargo-build-sbf (no v1.39 workaround needed, unlike our klend and Sanctum builds). Not yet smoked in a harness; Day 61 suggests starting from the mainnet binary."
 
 [[targets]]
 name = "Jito"
@@ -82,8 +85,8 @@ change_velocity = 0.50
 permissionless_surface = 0.60
 complexity = 0.65
 audit_maturity = 0.85
-status = "gated"
-note = "marinade-finance/liquid-staking-program uses Anchor 0.27 — older than confirmed-gated klend (0.29) and Sanctum (0.28). H1 family confirmed by extrapolation; no build smoke needed."
+status = "unverified"
+note = "marinade-finance/liquid-staking-program uses Anchor 0.27. Previously marked gated by extrapolation from Sanctum/klend; Day 61 withdrew that (H1 was our build). Not tested; check its solana-program version and try the mainnet binary."
 
 [[targets]]
 name = "Project0-Marginfi"

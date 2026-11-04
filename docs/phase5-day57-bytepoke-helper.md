@@ -1,11 +1,15 @@
 # Phase 5 Day 57 — bytepoke helper API in solinv-fuzz (toolchain-fork pivot)
 
+> **Correction (2026-11-04):** the H1 diagnosis below is wrong. The failure came from building an old solana-program (1.14) with new platform-tools, not from LiteSVM; the mainnet binary runs fine. See [phase5-day61-h1-was-the-build.md](phase5-day61-h1-was-the-build.md).
+
 Date: 2026-06-09
 Prior: [phase5-day56-gateA-result.md](phase5-day56-gateA-result.md)
 Decision (Day 57): **Path 1 (byte-poke helper) over Path 2 (LiteSVM
 CPI-init shim)** per Day 56 §"Revised Gate B" recommendation.
 
 ## Decision
+
+> **Superseded (Day 61):** the reason given below (init unreachable on Anchor 0.x under LiteSVM) is withdrawn; it held only for our local build of Sanctum. The helper remains useful for pre-writing deep state. See [phase5-day61-h1-was-the-build.md](phase5-day61-h1-was-the-build.md).
 
 Day 55 set up `litesvm-fork/` as a working baseline (vanilla v0.9.1).
 Day 56 Gate A then discovered the depth-gate is **bounded to the

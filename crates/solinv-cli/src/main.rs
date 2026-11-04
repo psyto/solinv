@@ -232,7 +232,7 @@ struct TargetInput {
     /// Toolchain reachability flag. One of:
     ///  - `"ready"`      — reachable + fresh + not yet exhausted
     ///  - `"exhausted"`  — reachable but tested clean already (no marginal value)
-    ///  - `"gated"`      — depth-gated by toolchain (e.g. a source build that fails where the deployed binary would not)
+    ///  - `"gated"`      — blocked: no usable binary (the source does not build and the deployed one has not been made to fit), or nothing to write a harness from (no source or IDL)
     ///  - `"unverified"` — reachability not yet confirmed (default if omitted)
     #[serde(default = "default_status")]
     status: String,
@@ -562,7 +562,13 @@ fn main() -> Result<()> {
                                 dir.display()
                             );
                         }
-                        print!("{}", idl.report_with(|ix, path| kinds.get(ix, path)));
+                        print!(
+                            "{}",
+                            idl.report_with_bound(
+                                |ix, path| kinds.get(ix, path),
+                                |ix, path| !kinds.unbound(ix, path)
+                            )
+                        );
                     }
                     None => print!("{}", idl.report()),
                 },

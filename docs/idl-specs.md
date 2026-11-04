@@ -100,7 +100,13 @@ handlers' `Context<..>` (composites by dotted path), and marks each slot
 literals are stripped first; `T` is given only for Anchor's typed
 wrappers (`Account`, `AccountLoader`, `InterfaceAccount`, `Signer`,
 `Program`, `Interface`, `Sysvar`, `SystemAccount`), `U` for
-`UncheckedAccount` and `AccountInfo`; any other type — type aliases
+`UncheckedAccount` and `AccountInfo`, and `t` for a typed data account
+(`Account`, `AccountLoader`, `InterfaceAccount`) whose identity no
+`seeds`, `address`, `has_one`, `associated_token::*` or `.key()`
+comparison fixes (on it, or on
+another slot naming it) and that `init` does not create — the summary
+lists the writable ones as `account-swap` candidates; a key check in
+the handler body is not read; any other type — type aliases
 included, since what an alias names depends on module scope and
 imports — a struct name defined twice, or a field type split over
 lines leaves the slot unplaced, and the report counts it as not found. When

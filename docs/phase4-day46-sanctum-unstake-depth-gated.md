@@ -1,5 +1,7 @@
 # Phase 4 Day 46 — Sanctum unstake depth-gated finding
 
+> **Correction (2026-11-04):** the depth gate below came from building an old solana-program (1.14) with new platform-tools, not from LiteSVM; the mainnet binary runs `create_pool` fine. See [phase5-day61-h1-was-the-build.md](phase5-day61-h1-was-the-build.md).
+
 Date: 2026-05-26
 Spec: Phase 4 protocol-variety stopping rule (2 protocol-size negatives close the axis).
 Inventory: [docs/sanctum-unstake-ix-inventory.md](sanctum-unstake-ix-inventory.md)
@@ -147,6 +149,8 @@ current capability doesn't surface findings on this class of
 target.
 
 ## User decision point — Day 47
+
+> **Superseded (Day 61):** the options below assume a LiteSVM/SPL Token gate. There was none: our local build of Sanctum (solana-program 1.14.20) faulted in init's System Program `create_account` CPI, and Sanctum's deployed binary runs that init on LiteSVM. Other Anchor 0.x programs were not tested. See [phase5-day61-h1-was-the-build.md](phase5-day61-h1-was-the-build.md).
 
 Strict reading wants:
 - 1-3 days digging into LiteSVM + SPL Token CPI (option A1)

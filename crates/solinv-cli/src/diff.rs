@@ -38,11 +38,36 @@ pub struct Change {
 
 pub fn diff(base: &SourceKinds, head: &SourceKinds) -> Vec<Change> {
     let mut out = Vec::new();
+    let head_slots = head.slots();
+    let in_ix = |ix: &str| -> Vec<(&String, &Slot)> {
+        head_slots.iter().filter(|((i, _), _)| i == ix).map(|((_, p), s)| (p, *s)).collect()
+    };
+
     for ((ix, path), b) in base.slots() {
-        let Some(h) = head.slot(ix, path) else { continue };
-        let mut push = |message: String| {
+        let siblings = in_ix(ix);
+        let Some(h) = head.slot(ix, path) else {
+            // The instruction is still there but this slot is not: renamed
+            // or removed. Its checks cannot be compared, so say which.
+            let checks = checks_of(b);
+            if let (Some((_, any)), false) = (siblings.first(), checks.is_empty()) {
+                out.push(Change {
+                    severity: Severity::Warning,
+                    ix: ix.clone(),
+                    path: path.clone(),
+                    message: format!(
+                        "slot removed or renamed; its checks ({}) are not compared — \
+                         confirm the replacement keeps them",
+                        checks.join(", ")
+                    ),
+                    file: any.file.clone(),
+                    line: any.line,
+                });
+            }
+            continue;
+        };
+        let mut push = |severity: Severity, message: String| {
             out.push(Change {
-                severity: Severity::Regression,
+                severity,
                 ix: ix.clone(),
                 path: path.clone(),
                 message,
@@ -52,51 +77,76 @@ pub fn diff(base: &SourceKinds, head: &SourceKinds) -> Vec<Change> {
         };
         // A Signer loosened is reported as the signature it loses, below.
         if b.kind == Some(SlotKind::Typed) && h.kind == Some(SlotKind::Unchecked) && b.ty != "Signer" {
-            push(format!(
-                "was {}, now {}: Anchor no longer checks its owner and type",
-                b.ty, h.ty
-            ));
+            push(
+                Severity::Regression,
+                format!("was {}, now {}: Anchor no longer checks its owner and type", b.ty, h.ty),
+            );
+        } else if b.kind == Some(SlotKind::Typed)
+            && h.kind == Some(SlotKind::Typed)
+            && b.full_ty != h.full_ty
+        {
+            push(
+                Severity::Warning,
+                format!(
+                    "type changed from {} to {}: confirm it still validates what the old one did",
+                    b.full_ty, h.full_ty
+                ),
+            );
+        }
+        if !b.optional && h.optional {
+            push(Severity::Warning, "now optional: the instruction runs without it".into());
         }
         if signs(b) && !signs(h) {
-            push(format!("was {}, now {}: no longer required to sign", label(b), label(h)));
+            push(
+                Severity::Regression,
+                format!("was {}, now {}: no longer required to sign", label(b), label(h)),
+            );
         }
         let (ba, ha) = (&b.attrs, &h.attrs);
         if ba.seeds && !ha.seeds {
-            push("`seeds` constraint removed: any address is accepted".into());
+            push(Severity::Regression, "`seeds` constraint removed: any address is accepted".into());
         }
         if ba.address && !ha.address {
-            push("`address` constraint removed".into());
+            push(Severity::Regression, "`address` constraint removed".into());
         }
         if ba.owner && !ha.owner {
-            push("`owner` constraint removed".into());
+            push(Severity::Regression, "`owner` constraint removed".into());
         }
-        for target in &ba.has_one {
-            if !ha.has_one.contains(target) {
-                push(format!("`has_one = {target}` removed: it no longer has to match `{target}`"));
+        for target in ba.has_one.iter().filter(|t| !ha.has_one.contains(t)) {
+            match siblings.iter().find(|(_, s)| s.attrs.has_one.contains(target)) {
+                Some((other, _)) => push(
+                    Severity::Warning,
+                    format!("`has_one = {target}` moved to `{other}`: confirm it checks the same account"),
+                ),
+                None => push(
+                    Severity::Regression,
+                    format!("`has_one = {target}` removed: it no longer has to match `{target}`"),
+                ),
             }
         }
-        if ha.constraints < ba.constraints {
-            push(format!(
-                "{} of its `constraint = …` checks removed",
-                ba.constraints - ha.constraints
-            ));
+        for expr in ba.constraints.iter().filter(|e| !ha.constraints.contains(e)) {
+            match siblings.iter().find(|(_, s)| s.attrs.constraints.contains(expr)) {
+                Some((other, _)) => push(
+                    Severity::Warning,
+                    format!("`constraint = {expr}` moved to `{other}`"),
+                ),
+                None => push(Severity::Regression, format!("`constraint = {expr}` removed")),
+            }
         }
     }
 
     // New instructions with the shape of a missing authority check.
     let base_ixs: BTreeSet<&str> = base.slots().iter().map(|((ix, _), _)| ix.as_str()).collect();
-    let head_slots = head.slots();
     let head_ixs: BTreeSet<&str> = head_slots.iter().map(|((ix, _), _)| ix.as_str()).collect();
     for ix in head_ixs.difference(&base_ixs) {
-        let slots: Vec<&(&(String, String), &Slot)> =
-            head_slots.iter().filter(|((i, _), _)| i == ix).collect();
+        let slots = in_ix(ix);
         let signed = slots.iter().any(|(_, s)| signs(s));
         let written = slots.iter().find(|(_, s)| s.attrs.mutable);
-        if let (false, Some(((_, path), s))) = (signed, written) {
+        if let (false, Some((path, s))) = (signed, written) {
             out.push(Change {
                 severity: Severity::Warning,
                 ix: ix.to_string(),
-                path: path.clone(),
+                path: path.to_string(),
                 message: "new instruction with no signer writes this account: \
                           permissionless by design, or a missing authority check?"
                     .into(),
@@ -107,6 +157,26 @@ pub fn diff(base: &SourceKinds, head: &SourceKinds) -> Vec<Change> {
     }
     out.sort_by(|a, b| (a.severity, &a.ix, &a.path).cmp(&(b.severity, &b.ix, &b.path)));
     out
+}
+
+/// What a slot checks, for naming what a removed slot took with it.
+fn checks_of(s: &Slot) -> Vec<String> {
+    let mut c = Vec::new();
+    if s.kind == Some(SlotKind::Typed) && s.ty != "Signer" {
+        c.push(format!("type {}", s.full_ty));
+    }
+    if signs(s) {
+        c.push("signer".into());
+    }
+    let a = &s.attrs;
+    for (on, name) in [(a.seeds, "seeds"), (a.address, "address"), (a.owner, "owner")] {
+        if on {
+            c.push(name.into());
+        }
+    }
+    c.extend(a.has_one.iter().map(|t| format!("has_one = {t}")));
+    c.extend(a.constraints.iter().map(|e| format!("constraint = {e}")));
+    c
 }
 
 fn signs(s: &Slot) -> bool {
@@ -147,11 +217,10 @@ pub fn render_github(changes: &[Change]) -> String {
             Severity::Warning => "warning",
         };
         out += &format!(
-            "::{level} file={},line={},title=solinv: {}.{}::{}\n",
-            c.file,
+            "::{level} file={},line={},title={}::{}\n",
+            escape_property(&c.file),
             c.line,
-            c.ix,
-            c.path,
+            escape_property(&format!("solinv: {}.{}", c.ix, c.path)),
             escape(&c.message)
         );
     }
@@ -160,6 +229,11 @@ pub fn render_github(changes: &[Change]) -> String {
 
 fn escape(s: &str) -> String {
     s.replace('%', "%25").replace('\r', "%0D").replace('\n', "%0A")
+}
+
+/// Workflow-command properties also reserve `:` and `,`.
+fn escape_property(s: &str) -> String {
+    escape(s).replace(':', "%3A").replace(',', "%2C")
 }
 
 #[cfg(test)]
@@ -207,7 +281,7 @@ pub struct Withdraw<'info> {
                 ("depositor", "was Signer, now AccountInfo: no longer required to sign"),
                 ("vault", "was Account, now UncheckedAccount: Anchor no longer checks its owner and type"),
                 ("vault", "`has_one = depositor` removed: it no longer has to match `depositor`"),
-                ("vault", "1 of its `constraint = …` checks removed"),
+                ("vault", "`constraint = vault.amount > 0` removed"),
             ]
         );
         let vault = changes.iter().find(|c| c.path == "vault").unwrap();
@@ -216,7 +290,87 @@ pub struct Withdraw<'info> {
         assert_eq!((vault.file.as_str(), vault.line), ("programs/x/src/lib.rs", 10));
         assert_eq!(head.lines().nth(9).unwrap().trim(), "pub vault: UncheckedAccount<'info>,");
         assert!(render_github(&changes)
-            .starts_with("::error file=programs/x/src/lib.rs,line=12,title=solinv: withdraw.depositor::"));
+            .starts_with("::error file=programs/x/src/lib.rs,line=12,title=solinv%3A withdraw.depositor::"));
+    }
+
+    /// Codex r10: each of these used to pass silently or misfire.
+    #[test]
+    fn renamed_slots_type_swaps_swapped_constraints_and_moved_checks() {
+        let base = r#"
+pub fn act(ctx: Context<Act>) -> Result<()> {}
+#[derive(Accounts)]
+pub struct Act<'info> {
+    #[account(
+        constraint = vault.authority == authority.key(),
+        constraint = vault.amount >= 1,
+        has_one = config,
+    )]
+    pub vault: Account<'info, Vault>,
+    #[account(signer)]
+    pub authority: Account<'info, Config>,
+    #[account(has_one = admin)]
+    pub config: Account<'info, Config>,
+    pub old: Account<'info, Pool>,
+}
+"#;
+        let head = r#"
+pub fn act(ctx: Context<Act>) -> Result<()> {}
+#[derive(Accounts)]
+pub struct Act<'info> {
+    #[account(
+        constraint = vault.amount >= 1,
+        constraint = vault.amount <= 9,
+    )]
+    pub vault: Account<'info, Vault>,
+    pub authority: Signer<'info>,
+    #[account(has_one = admin, has_one = config)]
+    pub config: Account<'info, Config>,
+    pub renamed: UncheckedAccount<'info>,
+}
+"#;
+        let changes = diff(&kinds(base), &kinds(head));
+        let got: Vec<(Severity, &str, &str)> =
+            changes.iter().map(|c| (c.severity, c.path.as_str(), c.message.as_str())).collect();
+        assert!(got.contains(&(
+            Severity::Regression,
+            "vault",
+            "`constraint = vault.authority == authority.key()` removed"
+        )));
+        assert!(got.iter().any(|(s, p, m)| *s == Severity::Warning
+            && *p == "authority"
+            && m.starts_with("type changed from Account<'info,Config> to Signer<'info>")));
+        assert!(got.contains(&(
+            Severity::Warning,
+            "vault",
+            "`has_one = config` moved to `config`: confirm it checks the same account"
+        )));
+        assert!(got.iter().any(|(s, p, m)| *s == Severity::Warning
+            && *p == "old"
+            && m.contains("type Account<'info,Pool>")));
+        // Signer type still signs: no signer regression.
+        assert!(!got.iter().any(|(_, p, m)| *p == "authority" && m.contains("sign")));
+    }
+
+    #[test]
+    fn reformatting_and_error_codes_are_not_changes() {
+        let head = BASE.replace(
+            "constraint = vault.amount > 0 @ E::Empty,",
+            "constraint = vault.amount\n            > 0 @ E::NewName,",
+        );
+        assert!(diff(&kinds(BASE), &kinds(&head)).is_empty());
+    }
+
+    #[test]
+    fn annotation_properties_are_escaped() {
+        let c = Change {
+            severity: Severity::Regression,
+            ix: "a".into(),
+            path: "b".into(),
+            message: "m".into(),
+            file: "dir,x/f%:.rs".into(),
+            line: 1,
+        };
+        assert_eq!(render_github(&[c]), "::error file=dir%2Cx/f%25%3A.rs,line=1,title=solinv%3A a.b::m\n");
     }
 
     #[test]

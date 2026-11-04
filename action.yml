@@ -33,6 +33,17 @@ runs:
           echo "::error title=solinv::set solinv-rev (no action ref to default to)"
           exit 1
         fi
+        # A branch or tag moves; install and cache by the commit it names
+        # now, so a moved tag never restores an old binary.
+        if ! [[ "$rev" =~ ^[0-9a-f]{7,40}$ ]]; then
+          sha=$(git ls-remote https://github.com/psyto/solinv "$rev" "refs/tags/$rev^{}" \
+                | awk 'END { print $1 }')
+          if [ -z "$sha" ]; then
+            echo "::error title=solinv::cannot resolve solinv ref '$rev'"
+            exit 1
+          fi
+          rev="$sha"
+        fi
         echo "rev=$rev" >> "$GITHUB_OUTPUT"
 
     - name: Cache the solinv binary

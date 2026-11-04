@@ -34,7 +34,8 @@ pub struct Attrs {
     pub address: bool,
     pub owner: bool,
     pub has_one: Vec<String>,
-    pub constraints: usize,
+    /// Each `constraint = <expr>`, whitespace collapsed, error dropped.
+    pub constraints: Vec<String>,
 }
 
 /// One account slot as the source declares it.
@@ -44,6 +45,11 @@ pub struct Slot {
     pub kind: Option<SlotKind>,
     /// The type's name under `Box<` / `Option<`: `Account`, `Signer`, …
     pub ty: String,
+    /// The whole type, whitespace and `Box<…>` removed: tells
+    /// `Account<'info, Config>` from `Account<'info, Vault>`.
+    pub full_ty: String,
+    /// Wrapped in `Option<…>`: the account may be left out.
+    pub optional: bool,
     pub attrs: Attrs,
     /// Where the field is declared, for annotations.
     pub file: String,
@@ -59,6 +65,8 @@ struct RawField {
     name: String,
     field: Field,
     ty: String,
+    full_ty: String,
+    optional: bool,
     attrs: Attrs,
     file: String,
     line: usize,
@@ -156,6 +164,8 @@ impl SourceKinds {
                     name: c[1].to_string(),
                     field: classify(&c[2], &names),
                     ty: base_ident(&c[2]),
+                    full_ty: full_type(&c[2]),
+                    optional: c[2].trim().trim_start_matches("Box<").trim().starts_with("Option<"),
                     attrs,
                     file: file.to_string(),
                     line: src[..at].matches('\n').count() + 1,
@@ -175,22 +185,94 @@ impl SourceKinds {
     }
 }
 
-/// The constraints in the attribute text preceding a field.
+/// The constraints in the `#[account(...)]` attribute(s) preceding a
+/// field, read item by item at the top level — a `signer` or `seeds`
+/// inside a constraint's expression is part of that expression.
 fn read_attrs(text: &str) -> Attrs {
-    let has = |re: &str| Regex::new(re).unwrap().is_match(text);
-    Attrs {
-        mutable: has(r"\bmut\b"),
-        signer: has(r"\bsigner\b"),
-        seeds: has(r"\bseeds\s*="),
-        address: has(r"\baddress\s*="),
-        owner: has(r"\bowner\s*="),
-        has_one: Regex::new(r"\bhas_one\s*=\s*([A-Za-z_]\w*)")
-            .unwrap()
-            .captures_iter(text)
-            .map(|c| c[1].to_string())
-            .collect(),
-        constraints: Regex::new(r"\bconstraint\s*=").unwrap().find_iter(text).count(),
+    let mut a = Attrs::default();
+    for item in account_items(text) {
+        let (key, value) = match item.split_once('=') {
+            // `==` inside an expression is not a key/value split
+            Some((k, v)) if !v.starts_with('=') && !k.ends_with(['!', '<', '>']) => {
+                (k.trim(), Some(v.trim()))
+            }
+            _ => (item.as_str(), None),
+        };
+        let bare = key.split_whitespace().next().unwrap_or("");
+        match (bare, value) {
+            ("mut" | "init" | "init_if_needed", _) => a.mutable = true,
+            ("signer", _) => a.signer = true,
+            ("seeds", Some(_)) => a.seeds = true,
+            ("address", Some(_)) => a.address = true,
+            ("owner", Some(_)) => a.owner = true,
+            ("has_one", Some(v)) => {
+                let target: String =
+                    v.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+                a.has_one.push(target);
+            }
+            ("constraint", Some(v)) => a.constraints.push(normalise_expr(v)),
+            _ => {}
+        }
     }
+    a
+}
+
+/// Top-level comma-separated items of every `#[account(...)]` in `text`.
+fn account_items(text: &str) -> Vec<String> {
+    let mut items = Vec::new();
+    let mut rest = text;
+    while let Some(i) = rest.find("#[account(") {
+        let body = &rest[i + "#[account(".len()..];
+        let (mut depth, mut start, mut end) = (0i32, 0usize, body.len());
+        for (j, ch) in body.char_indices() {
+            match ch {
+                '(' | '[' | '{' => depth += 1,
+                ')' | ']' | '}' if depth == 0 => {
+                    end = j;
+                    break;
+                }
+                ')' | ']' | '}' => depth -= 1,
+                ',' if depth == 0 => {
+                    items.push(body[start..j].trim().to_string());
+                    start = j + 1;
+                }
+                _ => {}
+            }
+        }
+        let last = body[start..end].trim();
+        if !last.is_empty() {
+            items.push(last.to_string());
+        }
+        rest = &body[end..];
+    }
+    items
+}
+
+/// A constraint's expression with its `@ Error` dropped and whitespace
+/// collapsed, so reformatting does not read as a change.
+fn normalise_expr(v: &str) -> String {
+    let (mut depth, mut cut) = (0i32, v.len());
+    for (j, ch) in v.char_indices() {
+        match ch {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth -= 1,
+            '@' if depth == 0 => {
+                cut = j;
+                break;
+            }
+            _ => {}
+        }
+    }
+    v[..cut].split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn full_type(ty: &str) -> String {
+    let compact: String = ty.chars().filter(|c| !c.is_whitespace()).collect();
+    let mut t = compact.as_str();
+    while let Some(inner) = t.strip_prefix("Box<").and_then(|r| r.strip_suffix('>')) {
+        t = inner;
+    }
+    t.to_string()
 }
 
 fn walk(
@@ -217,7 +299,15 @@ fn walk(
         };
         out.insert(
             (ix.to_string(), path),
-            Slot { kind, ty: f.ty.clone(), attrs: f.attrs.clone(), file: f.file.clone(), line: f.line },
+            Slot {
+                kind,
+                ty: f.ty.clone(),
+                full_ty: f.full_ty.clone(),
+                optional: f.optional,
+                attrs: f.attrs.clone(),
+                file: f.file.clone(),
+                line: f.line,
+            },
         );
     }
 }
@@ -484,6 +574,38 @@ pub struct F<'info> {
 }
 "#;
         assert_eq!(SourceKinds::parse(src).get("f", "state"), None);
+    }
+
+    #[test]
+    fn attribute_items_not_words_in_expressions() {
+        let src = r#"
+pub fn f(ctx: Context<F>) -> Result<()> {}
+#[derive(Accounts)]
+pub struct F<'info> {
+    #[account(
+        mut,
+        has_one = authority @ E::Auth,
+        constraint = {
+            let signer = is_ok(seeds, owner);
+            signer
+        } @ E::Bad,
+        constraint = vault.amount
+            >= min,
+    )]
+    pub vault: Box<Account<'info, Vault>>,
+    pub maybe: Option<Account<'info, Config>>,
+}
+"#;
+        let k = SourceKinds::parse(src);
+        let v = k.slot("f", "vault").unwrap();
+        assert!(v.attrs.mutable && !v.attrs.signer && !v.attrs.seeds && !v.attrs.owner);
+        assert_eq!(v.attrs.has_one, vec!["authority"]);
+        assert_eq!(
+            v.attrs.constraints,
+            vec!["{ let signer = is_ok(seeds, owner); signer }", "vault.amount >= min"]
+        );
+        assert_eq!(v.full_ty, "Account<'info,Vault>");
+        assert!(!v.optional && k.slot("f", "maybe").unwrap().optional);
     }
 
     #[test]

@@ -232,7 +232,7 @@ struct TargetInput {
     /// Toolchain reachability flag. One of:
     ///  - `"ready"`      — reachable + fresh + not yet exhausted
     ///  - `"exhausted"`  — reachable but tested clean already (no marginal value)
-    ///  - `"gated"`      — depth-gated by toolchain (e.g. Anchor 0.x ↔ LiteSVM 0.9.1 H1)
+    ///  - `"gated"`      — depth-gated by toolchain (e.g. a source build that fails where the deployed binary would not)
     ///  - `"unverified"` — reachability not yet confirmed (default if omitted)
     #[serde(default = "default_status")]
     status: String,

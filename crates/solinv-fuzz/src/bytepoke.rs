@@ -1,8 +1,10 @@
 //! # bytepoke — Anchor account pre-construction helpers
 //!
-//! Reusable primitives for the byte-poke pattern that unblocks Anchor
-//! 0.x post-init reachability under LiteSVM 0.9.1 (per
-//! `docs/phase5-day56-gateA-result.md`). The pattern:
+//! Reusable primitives for the byte-poke pattern: pre-write deep
+//! account state instead of reaching it through the program's own
+//! instructions. (It was first adopted to get past Anchor 0.x `init`
+//! failures; those turned out to come from our local builds, not
+//! LiteSVM — see `docs/phase5-day61-h1-was-the-build.md`.) The pattern:
 //!
 //! 1. Hand-construct a byte buffer matching an Anchor account's
 //!    `#[repr(C)]` layout (8-byte discriminator + body).
@@ -37,8 +39,9 @@
 //!
 //! - The target is **Native** (no Anchor discriminator) — write raw bytes
 //!   directly.
-//! - The target is **Anchor 1.0+** — Anchor's own init ix works under
-//!   LiteSVM 0.9.1; only the 0.x init→CPI path is broken (H1).
+//! - The program's own init works — it does for any deployed binary,
+//!   Anchor 0.x included (load the mainnet .so, not a local rebuild on
+//!   solana-program < 1.16; see docs/phase5-day61-h1-was-the-build.md).
 //! - The harness wants **end-to-end coverage from setup-to-attack** —
 //!   byte-poke skips the program's own init path, so init-side bugs
 //!   (wrong discriminator, missing seeds, signer-skip in init) won't

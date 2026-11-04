@@ -88,6 +88,8 @@ CPI logs).
 
 ## Revised effort estimate
 
+> **Superseded (Day 61):** no LiteSVM patching was needed, so this estimate is moot. The fault came from our local build of Sanctum on solana-program 1.14.20 (tested: init's `create_account` CPI, platform-tools v1.37/v1.39); the deployed binary runs it. See [phase5-day61-h1-was-the-build.md](phase5-day61-h1-was-the-build.md).
+
 The Day 47 estimate was "1-2 weeks LiteSVM-internals patching". Day 55
 experiment 1 sharpens this **upward**: since H1 isn't a feature toggle,
 the fix likely requires either:

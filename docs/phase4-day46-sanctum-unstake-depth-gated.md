@@ -150,6 +150,8 @@ target.
 
 ## User decision point — Day 47
 
+> **Superseded (Day 61):** the options below assume a LiteSVM/SPL Token gate. There was none: our local build of Sanctum (solana-program 1.14.20) faulted in init's System Program `create_account` CPI, and Sanctum's deployed binary runs that init on LiteSVM. Other Anchor 0.x programs were not tested. See [phase5-day61-h1-was-the-build.md](phase5-day61-h1-was-the-build.md).
+
 Strict reading wants:
 - 1-3 days digging into LiteSVM + SPL Token CPI (option A1)
 - OR move to a different N=2 target whose surface doesn't need

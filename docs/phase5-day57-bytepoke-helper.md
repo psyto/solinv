@@ -9,6 +9,8 @@ CPI-init shim)** per Day 56 §"Revised Gate B" recommendation.
 
 ## Decision
 
+> **Superseded (Day 61):** the reason given below (init unreachable on Anchor 0.x under LiteSVM) is withdrawn; it held only for our local build of Sanctum. The helper remains useful for pre-writing deep state. See [phase5-day61-h1-was-the-build.md](phase5-day61-h1-was-the-build.md).
+
 Day 55 set up `litesvm-fork/` as a working baseline (vanilla v0.9.1).
 Day 56 Gate A then discovered the depth-gate is **bounded to the
 init→CPI path**, not a fundamental ABI mismatch — so Anchor 0.x

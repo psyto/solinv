@@ -131,6 +131,8 @@ Day 56 already validated).
 
 ## Decision needed (Day 57)
 
+> **Superseded (Day 61):** the choice below (byte-poke vs a LiteSVM fork) rested on the withdrawn H1 diagnosis. For Sanctum, using its deployed binary removed the need for either. See [phase5-day61-h1-was-the-build.md](phase5-day61-h1-was-the-build.md).
+
 The Gate A finding reshapes the toolchain-fork plan. User should weigh:
 
 1. **Byte-poke helper path** (recommended) — build the

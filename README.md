@@ -110,7 +110,7 @@ jobs:
 
 It installs solinv at that commit, compares the program's source with the pull request's base,
 and fails the job when a check is removed. The first run compiles solinv (about 2 minutes on
-`ubuntu-latest` for the demo pull request); later runs restore it from the cache. No Solana
+`ubuntu-latest` for the demo pull request); later runs restore it from the cache (the whole job took 7 seconds on a re-run). No Solana
 toolchain, no build of your program.
 
 The CLI (not on crates.io yet; pin a commit):

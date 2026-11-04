@@ -8,9 +8,10 @@ audit_maturity = 0.30
 # `status` field semantics (Day 49 addition):
 #   "ready"      — toolchain-reachable + not yet tested at fuzz depth
 #   "exhausted"  — toolchain-reachable but already tested clean (no marginal yield)
-#   "gated"      — blocked by the build chain (e.g. Wormhole: the source does not build).
+#   "gated"      — blocked: no usable binary (the source does not build and the deployed one has not been made to fit), or nothing to write a harness from (no source or IDL).
 #                  Day 61: H1 was our source build of an old solana-program, not
-#                  LiteSVM, so Anchor 0.x alone no longer counts as gated.
+#                  LiteSVM, so neither Anchor 0.x nor a failed source build alone
+#                  counts as gated; try the deployed binary first.
 #   "unverified" — Anchor version / build chain not yet confirmed (default)
 #
 # Verified by direct evidence in this repo. Unverified entries should
@@ -54,8 +55,8 @@ change_velocity = 0.65
 permissionless_surface = 0.70
 complexity = 0.80
 audit_maturity = 0.90
-status = "gated"
-note = "Build-gated (Day 51 verification): solana-program=1.10.31 + solitaire framework. Fails with stdsimd error on default cargo-build-sbf; fails with rayon-core/Stderr::lock API mismatch even on v1.39 platform-tools workaround. Would need even older toolchain. Plus phase2-target-ranking notes narrow solinv-fit (signature/consensus surface)."
+status = "unverified"
+note = "Source does not build; the deployed binary has not been tried (Day 61). Day 51 verification: solana-program=1.10.31 + solitaire framework. Fails with stdsimd error on default cargo-build-sbf; fails with rayon-core/Stderr::lock API mismatch even on v1.39 platform-tools workaround. Building from source would need an even older toolchain. Plus phase2-target-ranking notes narrow solinv-fit (signature/consensus surface)."
 
 [[targets]]
 name = "Meteora"

@@ -132,6 +132,8 @@ impl SourceKinds {
             .iter()
             .map(|(f, t)| (f.clone(), strip_comments_and_strings(t)))
             .collect();
+        let exprs: HashMap<&str, String> =
+            files.iter().map(|(f, t)| (f.as_str(), strip_comments(t))).collect();
 
         // (struct name, file, file text, body offset in it, body)
         let mut bodies: Vec<(String, &str, &str, usize, &str)> = Vec::new();
@@ -153,11 +155,12 @@ impl SourceKinds {
             if dup(name) {
                 continue;
             }
+            let expr_body = &exprs[*file][*open..*open + body.len()];
             let mut prev = 0;
             let mut fields = Vec::new();
             for c in field.captures_iter(body) {
                 let m = c.get(0).unwrap();
-                let attrs = read_attrs(&body[prev..m.start()]);
+                let attrs = read_attrs(&body[prev..m.start()], &expr_body[prev..m.start()]);
                 prev = m.end();
                 let at = open + c.get(1).unwrap().start();
                 fields.push(RawField {
@@ -187,17 +190,17 @@ impl SourceKinds {
 
 /// The constraints in the `#[account(...)]` attribute(s) preceding a
 /// field, read item by item at the top level — a `signer` or `seeds`
-/// inside a constraint's expression is part of that expression.
-fn read_attrs(text: &str) -> Attrs {
+/// inside a constraint's expression is part of that expression. `text`
+/// has comments and literals blanked and decides the structure;
+/// `expr`, the same bytes with only comments blanked, supplies the
+/// constraint expressions.
+fn read_attrs(text: &str, expr: &str) -> Attrs {
     let mut a = Attrs::default();
-    for item in account_items(text) {
-        let (key, value) = match item.split_once('=') {
-            // `==` inside an expression is not a key/value split
-            Some((k, v)) if !v.starts_with('=') && !k.ends_with(['!', '<', '>']) => {
-                (k.trim(), Some(v.trim()))
-            }
-            _ => (item.as_str(), None),
-        };
+    for r in account_items(text) {
+        let item = &text[r.clone()];
+        let eq = assignment(item);
+        let key = eq.map_or(item, |e| &item[..e]).trim();
+        let value = eq.map(|e| item[e + 1..].trim());
         let bare = key.split_whitespace().next().unwrap_or("");
         match (bare, value) {
             ("mut" | "init" | "init_if_needed", _) => a.mutable = true,
@@ -210,20 +213,38 @@ fn read_attrs(text: &str) -> Attrs {
                     v.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
                 a.has_one.push(target);
             }
-            ("constraint", Some(v)) => a.constraints.push(normalise_expr(v)),
+            ("constraint", Some(_)) => {
+                let raw = &expr[r.start + eq.unwrap() + 1..r.end];
+                a.constraints.push(normalise_expr(raw));
+            }
             _ => {}
         }
     }
     a
 }
 
-/// Top-level comma-separated items of every `#[account(...)]` in `text`.
-fn account_items(text: &str) -> Vec<String> {
+/// Offset of an item's `key = value` sign: the first `=` that is not
+/// part of `==`, `!=`, `<=` or `>=`.
+fn assignment(item: &str) -> Option<usize> {
+    let b = item.as_bytes();
+    (0..b.len()).find(|&i| {
+        b[i] == b'='
+            && b.get(i + 1) != Some(&b'=')
+            && !matches!(i.checked_sub(1).map(|p| b[p]), Some(b'=' | b'!' | b'<' | b'>'))
+    })
+}
+
+/// Byte ranges of the top-level comma-separated items of every
+/// `#[account(...)]` in `text`. `::<…>` nests, so a turbofish's commas
+/// do not split an expression.
+fn account_items(text: &str) -> Vec<std::ops::Range<usize>> {
     let mut items = Vec::new();
-    let mut rest = text;
-    while let Some(i) = rest.find("#[account(") {
-        let body = &rest[i + "#[account(".len()..];
-        let (mut depth, mut start, mut end) = (0i32, 0usize, body.len());
+    let mut from = 0;
+    while let Some(i) = text[from..].find("#[account(") {
+        let base = from + i + "#[account(".len();
+        let body = &text[base..];
+        let b = body.as_bytes();
+        let (mut depth, mut angle, mut start, mut end) = (0i32, 0i32, 0usize, body.len());
         for (j, ch) in body.char_indices() {
             match ch {
                 '(' | '[' | '{' => depth += 1,
@@ -232,18 +253,19 @@ fn account_items(text: &str) -> Vec<String> {
                     break;
                 }
                 ')' | ']' | '}' => depth -= 1,
-                ',' if depth == 0 => {
-                    items.push(body[start..j].trim().to_string());
+                '<' if j >= 2 && &b[j - 2..j] == b"::" => angle += 1,
+                '>' if angle > 0 => angle -= 1,
+                ',' if depth == 0 && angle == 0 => {
+                    items.push(base + start..base + j);
                     start = j + 1;
                 }
                 _ => {}
             }
         }
-        let last = body[start..end].trim();
-        if !last.is_empty() {
-            items.push(last.to_string());
+        if !body[start..end].trim().is_empty() {
+            items.push(base + start..base + end);
         }
-        rest = &body[end..];
+        from = base + end;
     }
     items
 }
@@ -358,12 +380,27 @@ fn classify(ty: &str, accounts_structs: &[String]) -> Field {
 /// Blank out comments and string literals, keeping line structure, so
 /// text inside them is never read as a struct or a field.
 fn strip_comments_and_strings(src: &str) -> String {
+    strip(src, false)
+}
+
+/// Blank out comments only: the text constraint expressions are read
+/// from, so a changed string literal in one is still a change.
+fn strip_comments(src: &str) -> String {
+    strip(src, true)
+}
+
+/// Both strippers blank byte for byte, so offsets in their outputs and
+/// in `src` agree.
+fn strip(src: &str, keep_strings: bool) -> String {
     let b = src.as_bytes();
     let mut out = String::with_capacity(src.len());
     let mut i = 0;
     let blank = |out: &mut String, s: &str| {
         for ch in s.chars() {
-            out.push(if ch == '\n' { '\n' } else { ' ' });
+            let fill = if ch == '\n' { '\n' } else { ' ' };
+            for _ in 0..ch.len_utf8() {
+                out.push(fill);
+            }
         }
     };
     while i < b.len() {
@@ -389,7 +426,11 @@ fn strip_comments_and_strings(src: &str) -> String {
         } else {
             0
         };
-        if skip > 0 {
+        let is_comment = rest.starts_with("//") || rest.starts_with("/*");
+        if skip > 0 && keep_strings && !is_comment {
+            out.push_str(&src[i..i + skip]);
+            i += skip;
+        } else if skip > 0 {
             blank(&mut out, &src[i..i + skip]);
             i += skip;
         } else {
@@ -606,6 +647,27 @@ pub struct F<'info> {
         );
         assert_eq!(v.full_ty, "Account<'info,Vault>");
         assert!(!v.optional && k.slot("f", "maybe").unwrap().optional);
+    }
+
+    #[test]
+    fn constraint_literals_and_turbofish_commas_are_kept() {
+        let src = r#"
+pub fn f(ctx: Context<F>) -> Result<()> {}
+#[derive(Accounts)]
+pub struct F<'info> {
+    #[account(
+        constraint = role == "admin" // a comment, with a comma
+            @ E::Role,
+        constraint = check::<Policy, Admin>(x),
+    )]
+    pub vault: Account<'info, Vault>,
+}
+"#;
+        let k = SourceKinds::parse(src);
+        assert_eq!(
+            k.slot("f", "vault").unwrap().attrs.constraints,
+            vec![r#"role == "admin""#, "check::<Policy, Admin>(x)"]
+        );
     }
 
     #[test]

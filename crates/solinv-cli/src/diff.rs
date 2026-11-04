@@ -179,8 +179,9 @@ fn checks_of(s: &Slot) -> Vec<String> {
     c
 }
 
+/// Required to sign: an `Option<Signer>` may be left out, so it does not.
 fn signs(s: &Slot) -> bool {
-    s.ty == "Signer" || s.attrs.signer
+    (s.ty == "Signer" || s.attrs.signer) && !s.optional
 }
 
 fn label(s: &Slot) -> String {
@@ -358,6 +359,28 @@ pub struct Act<'info> {
             "constraint = vault.amount\n            > 0 @ E::NewName,",
         );
         assert!(diff(&kinds(BASE), &kinds(&head)).is_empty());
+    }
+
+    #[test]
+    fn changed_literal_in_a_constraint_and_an_optional_signer() {
+        let base = BASE.replace("vault.amount > 0", "vault.role == \"admin\"");
+        let head = BASE.replace("vault.amount > 0", "vault.role == \"attacker\"");
+        let changes = diff(&kinds(&base), &kinds(&head));
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].message, "`constraint = vault.role == \"admin\"` removed");
+
+        let new_ix = BASE.to_string()
+            + r#"
+pub fn sweep(ctx: Context<Sweep>) -> Result<()> {}
+#[derive(Accounts)]
+pub struct Sweep<'info> {
+    pub admin: Option<Signer<'info>>,
+    #[account(mut)]
+    pub vault: Account<'info, Vault>,
+}
+"#;
+        let changes = diff(&kinds(BASE), &kinds(&new_ix));
+        assert!(changes.iter().any(|c| c.ix == "sweep" && c.severity == Severity::Warning));
     }
 
     #[test]

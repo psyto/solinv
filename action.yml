@@ -46,9 +46,11 @@ runs:
         fi
         echo "rev=$rev" >> "$GITHUB_OUTPUT"
 
-    - name: Cache the solinv binary
+    # Restore and save separately: actions/cache saves only when the job
+    # succeeds, and this job's purpose is to fail on a removed check.
+    - name: Restore the solinv binary
       id: cache
-      uses: actions/cache@v4
+      uses: actions/cache/restore@v4
       with:
         path: ${{ runner.temp }}/solinv-bin
         key: solinv-cli-${{ runner.os }}-${{ steps.rev.outputs.rev }}
@@ -61,6 +63,13 @@ runs:
       run: |
         cargo install --locked --git https://github.com/psyto/solinv --rev "$REV" \
           solinv-cli --root "$RUNNER_TEMP/solinv-bin"
+
+    - name: Save the solinv binary
+      if: steps.cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: ${{ runner.temp }}/solinv-bin
+        key: solinv-cli-${{ runner.os }}-${{ steps.rev.outputs.rev }}
 
     - name: Check out the base version
       shell: bash

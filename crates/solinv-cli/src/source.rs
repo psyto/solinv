@@ -214,8 +214,8 @@ fn read_attrs(text: &str, expr: &str) -> Attrs {
                 a.has_one.push(target);
             }
             ("constraint", Some(_)) => {
-                let raw = &expr[r.start + eq.unwrap() + 1..r.end];
-                a.constraints.push(normalise_expr(raw));
+                let at = r.start + eq.unwrap() + 1..r.end;
+                a.constraints.push(normalise_expr(&text[at.clone()], &expr[at]));
             }
             _ => {}
         }
@@ -235,8 +235,9 @@ fn assignment(item: &str) -> Option<usize> {
 }
 
 /// Byte ranges of the top-level comma-separated items of every
-/// `#[account(...)]` in `text`. `::<…>` nests, so a turbofish's commas
-/// do not split an expression.
+/// `#[account(...)]` in `text`. `::<…>` nests, and so does a `<`
+/// directly inside it (not inside its `{…}` or `(…)`, where `<` compares),
+/// so a turbofish's commas do not split an expression.
 fn account_items(text: &str) -> Vec<std::ops::Range<usize>> {
     let mut items = Vec::new();
     let mut from = 0;
@@ -244,7 +245,9 @@ fn account_items(text: &str) -> Vec<std::ops::Range<usize>> {
         let base = from + i + "#[account(".len();
         let body = &text[base..];
         let b = body.as_bytes();
-        let (mut depth, mut angle, mut start, mut end) = (0i32, 0i32, 0usize, body.len());
+        let (mut depth, mut start, mut end) = (0i32, 0usize, body.len());
+        // The bracket depth at which each open `<` of a turbofish sits.
+        let mut angles: Vec<i32> = Vec::new();
         for (j, ch) in body.char_indices() {
             match ch {
                 '(' | '[' | '{' => depth += 1,
@@ -253,9 +256,13 @@ fn account_items(text: &str) -> Vec<std::ops::Range<usize>> {
                     break;
                 }
                 ')' | ']' | '}' => depth -= 1,
-                '<' if j >= 2 && &b[j - 2..j] == b"::" => angle += 1,
-                '>' if angle > 0 => angle -= 1,
-                ',' if depth == 0 && angle == 0 => {
+                '<' if angles.last() == Some(&depth) || (j >= 2 && &b[j - 2..j] == b"::") => {
+                    angles.push(depth)
+                }
+                '>' if angles.last() == Some(&depth) && (j == 0 || b[j - 1] != b'-') => {
+                    angles.pop();
+                }
+                ',' if depth == 0 && angles.is_empty() => {
                     items.push(base + start..base + j);
                     start = j + 1;
                 }
@@ -271,10 +278,12 @@ fn account_items(text: &str) -> Vec<std::ops::Range<usize>> {
 }
 
 /// A constraint's expression with its `@ Error` dropped and whitespace
-/// collapsed, so reformatting does not read as a change.
-fn normalise_expr(v: &str) -> String {
+/// collapsed, so reformatting does not read as a change. `blanked` is
+/// the same bytes with literals blanked and finds the `@`, so an `@` or
+/// bracket inside a string is part of the expression.
+fn normalise_expr(blanked: &str, v: &str) -> String {
     let (mut depth, mut cut) = (0i32, v.len());
-    for (j, ch) in v.char_indices() {
+    for (j, ch) in blanked.char_indices() {
         match ch {
             '(' | '[' | '{' => depth += 1,
             ')' | ']' | '}' => depth -= 1,
@@ -659,6 +668,10 @@ pub struct F<'info> {
         constraint = role == "admin" // a comment, with a comma
             @ E::Role,
         constraint = check::<Policy, Admin>(x),
+        constraint = name == "team@alpha(" @ E::Name,
+        constraint = check::<Result<Admin, User>, Policy>(y),
+        constraint = check::<{ N < 3 }, Policy>(z),
+        signer,
     )]
     pub vault: Account<'info, Vault>,
 }
@@ -666,8 +679,15 @@ pub struct F<'info> {
         let k = SourceKinds::parse(src);
         assert_eq!(
             k.slot("f", "vault").unwrap().attrs.constraints,
-            vec![r#"role == "admin""#, "check::<Policy, Admin>(x)"]
+            vec![
+                r#"role == "admin""#,
+                "check::<Policy, Admin>(x)",
+                r#"name == "team@alpha(""#,
+                "check::<Result<Admin, User>, Policy>(y)",
+                "check::<{ N < 3 }, Policy>(z)",
+            ]
         );
+        assert!(k.slot("f", "vault").unwrap().attrs.signer);
     }
 
     /// strip() blanks byte for byte: non-ASCII text in a comment or a

@@ -748,7 +748,7 @@ program execution. Different program classes have different reachability:
 | Anchor 0.31 + Solana 2.x | ⚠️ builds clean, runtime untested | Meteora DAMM v2, Jito workspace SDK |
 | Anchor 0.28 | ✅ for Sanctum unstake's deployed binary (`solana program dump`): `init` and later instructions run. Our local build of it (solana-program 1.14.20, platform-tools v1.37/v1.39) faulted on the `init` CPI, on a real validator too. Other 0.28 programs untested | Sanctum unstake |
 | Anchor 0.27, 0.29 | ⚠️ untested with the deployed binary (klend's harness targets its source build) | klend |
-| Pre-Anchor / `solana-program 1.10` | ⛔ build-gated (toolchain too old) | Wormhole bridge |
+| Pre-Anchor / `solana-program 1.10` | ⚠️ the source does not build with any toolchain we tried; the deployed binary is untested | Wormhole bridge |
 
 **Fuzz the binary the protocol deployed.** `solana program dump -u m <program id> out.so`
 gets it. An earlier diagnosis blamed LiteSVM for Anchor 0.x `init` failures; the

@@ -153,6 +153,23 @@ Both install lines above were checked from GitHub at that rev, not from a local 
 Trying it on a program of your own for the first time? [`docs/try-solinv.md`](docs/try-solinv.md) is a
 one-page walk-through, with what to time and what to send back.
 
+### Where we use it ourselves
+
+Both installed from the pins above, the same way as for anyone else:
+
+| Repo | What runs | Measured |
+|---|---|---|
+| [fabrknt/veil](https://github.com/fabrknt/veil/blob/main/.github/workflows/solinv.yml) | the action on 5 Anchor 0.30 programs, one matrix job each | A throwaway pull request that dropped a `has_one` failed only that program's job, with the annotation on the line ([fabrknt/veil#2](https://github.com/fabrknt/veil/pull/2)) |
+| [psyto/princeps-solana](https://github.com/psyto/princeps-solana/tree/main/fuzz/psol-vault) | a fuzz harness for a native (Pinocchio) vault: signer-skip, owner-skip, account-swap, 3 minutes per pull request | Deleting one check at a time: 4 of 5 caught; 0 findings on the current code. The miss needs two accounts swapped together ([#4](https://github.com/psyto/solinv/issues/4)) |
+
+What using it ourselves turned up: the `t` mark for typed accounts not tied to the instruction
+([#3](https://github.com/psyto/solinv/issues/3); in veil it surrounds four real holes the earlier map showed as `T`),
+a signer-skip false positive ([#5](https://github.com/psyto/solinv/issues/5)), matrix jobs that
+race on the action's cache so each one recompiles ([#6](https://github.com/psyto/solinv/issues/6)),
+and two setup gaps in the docs ([#7](https://github.com/psyto/solinv/issues/7)). Upstream:
+crucible's `--timeout` overran by 18 minutes in CI ([crucible#25](https://github.com/asymmetric-research/crucible/issues/25)),
+and it exits 0 on findings, so CI has to look for `[FUZZ_FINDING]` itself ([crucible#26](https://github.com/asymmetric-research/crucible/issues/26)).
+
 ## How it compares
 
 - **Anchor's own checks** enforce what is declared. solinv watches the declarations: it notices

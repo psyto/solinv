@@ -8,7 +8,10 @@ validated a `mint` field, so a chain of fake accounts passed;
 [Crema](https://halborn.com/explained-the-crema-finance-hack-july-2022/) (Jul 2022, ~$8.8M) let a
 fake tick account past its owner check. In Anchor each of those checks is one type or one
 `#[account(...)]` line, enforced only while it is written down — and a refactor that loosens
-`Account<'info, Vault>` to `UncheckedAccount` or deletes a `has_one` fails no test.
+`Account<'info, Vault>` to `UncheckedAccount` or deletes a `has_one` fails no test. As more
+programs are written and refactored by AI coding agents, that kind of change gets more common and
+easier to miss: it compiles, the tests the agent wrote pass, and a one-line deletion is easy to skim
+past in a large generated diff.
 
 **solinv tells you when that happens, on the pull request, before it merges** — and maps where a
 program's hand-written account checks are, and fuzzes them with the attack each check exists to

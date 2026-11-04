@@ -95,7 +95,7 @@ Fix the init→CPI path so Anchor's `init` works directly.
 
 ## Revised Gate B (the toolchain fork decision)
 
-> **Superseded (Day 61):** the recommendation below (byte-poke as *the* Anchor 0.x integration path) no longer holds. `init` runs once you use the deployed binary; byte-poke stays useful for reaching deep state quickly, not as the only way past init. See [phase5-day61-h1-was-the-build.md](phase5-day61-h1-was-the-build.md).
+> **Superseded (Day 61):** the recommendation below (byte-poke as *the* Anchor 0.x integration path) no longer holds. Sanctum's deployed binary runs the setup instructions this doc could not reach (smoke-test each target's own binary rather than assuming the same); byte-poke stays useful for reaching deep state quickly, not as the only way past init. See [phase5-day61-h1-was-the-build.md](phase5-day61-h1-was-the-build.md).
 
 Gate A passes "bounded" → the fork is feasible in principle. But Gate
 A *also* revealed that the fork is **not strictly necessary** for

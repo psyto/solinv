@@ -39,9 +39,11 @@
 //!
 //! - The target is **Native** (no Anchor discriminator) — write raw bytes
 //!   directly.
-//! - The program's own init works — it does for any deployed binary,
-//!   Anchor 0.x included (load the mainnet .so, not a local rebuild on
-//!   solana-program < 1.16; see docs/phase5-day61-h1-was-the-build.md).
+//! - The program's own init works. Try the mainnet .so before deciding it
+//!   doesn't: Sanctum unstake (Anchor 0.28) faulted in init only when
+//!   rebuilt locally on solana-program < 1.16, and its deployed binary ran
+//!   init fine (docs/phase5-day61-h1-was-the-build.md). Smoke-test each
+//!   target's own binary; that is one program, not a rule for Anchor 0.x.
 //! - The harness wants **end-to-end coverage from setup-to-attack** —
 //!   byte-poke skips the program's own init path, so init-side bugs
 //!   (wrong discriminator, missing seeds, signer-skip in init) won't

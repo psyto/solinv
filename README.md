@@ -751,8 +751,9 @@ program execution. Different program classes have different reachability:
 | Pre-Anchor / `solana-program 1.10` | ⚠️ the source does not build with any toolchain we tried; the deployed binary is untested | Wormhole bridge |
 
 **Fuzz the binary the protocol deployed.** `solana program dump -u m <program id> out.so`
-gets it. An earlier diagnosis blamed LiteSVM for Anchor 0.x `init` failures; the
-real cause was rebuilding a solana-program 1.14 program with new platform-tools
+gets it. An earlier diagnosis blamed LiteSVM for Sanctum unstake's (Anchor 0.28)
+`init` failure; the real cause was our rebuild of its solana-program 1.14 source
+with new platform-tools
 (see [`docs/phase5-day61-h1-was-the-build.md`](docs/phase5-day61-h1-was-the-build.md)).
 
 The `solinv-fuzz::bytepoke` module (Anchor discriminator + sighash helpers,

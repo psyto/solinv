@@ -346,18 +346,25 @@ enum Kind {
 
 /// `h` declares a check of `kind` that `b` did not. For a key check the
 /// declaration must tie `h` to something else the check names (`others`:
-/// the check's words but `h`'s own name): a `has_one` on one of them, a
-/// `constraint` comparing a key with one of them, or `seeds` / `address` /
-/// a program type fixing `h` itself.
+/// the check's other account names): a `has_one` on one of them, a
+/// `constraint` comparing a key with one of them, or `seeds` / `address`
+/// built from one of them; a check against a constant only is covered by
+/// `seeds` / `address` / a program type fixing `h` itself.
 fn gained(kind: Kind, b: &Slot, h: &Slot, others: &BTreeSet<&str>) -> bool {
     let (ba, ha) = (&b.attrs, &h.attrs);
     let typed = b.kind == Some(SlotKind::Unchecked) && h.kind == Some(SlotKind::Typed);
     match kind {
         Kind::Signer => signs(h) && !signs(b),
-        Kind::Key => {
+        // Against a constant only, a declaration fixing `h` itself does it;
+        // against another account, the declaration must name that account.
+        Kind::Key if others.is_empty() => {
             (typed && matches!(h.ty.as_str(), "Program" | "Sysvar"))
                 || (ha.seeds && !ba.seeds)
                 || (ha.address && !ba.address)
+        }
+        Kind::Key => {
+            (ha.seeds && !ba.seeds && ha.seed_names.iter().any(|n| others.contains(n.as_str())))
+                || (ha.address && !ba.address && ha.address_names.iter().any(|n| others.contains(n.as_str())))
                 || ha.has_one.iter().any(|t| !ba.has_one.contains(t) && others.contains(t.as_str()))
                 || ha.constraints.iter().any(|e| {
                     !ba.constraints.contains(e)
@@ -931,6 +938,16 @@ pub struct Act<'info> {
             .replace("    require_keys_eq!(ctx.accounts.vault.authority, ctx.accounts.authority.key(), E::Owner);\n", "")
             .replace("pub authority: AccountInfo<'info>", "pub authority: Signer<'info>");
         assert!(same(&signer).iter().any(|c| c.severity == Severity::Regression), "{:?}", same(&signer));
+
+        // A fixed address on the vault does not tie it to `authority`.
+        let addressed = base
+            .replace("    require_keys_eq!(ctx.accounts.vault.authority, ctx.accounts.authority.key(), E::Owner);\n", "")
+            .replace("#[account(mut)]\n    pub vault", "#[account(mut, address = VAULT)]\n    pub vault");
+        assert!(same(&addressed).iter().any(|c| c.severity == Severity::Regression), "{:?}", same(&addressed));
+        // Operands of `==` read the same both ways round.
+        let req = base.replace("require!(ctx.accounts.pool.open, E::Closed)", "require!(ctx.accounts.pool.key() == ctx.accounts.vault.pool, E::P)");
+        let swapped = req.replace("require!(ctx.accounts.pool.key() == ctx.accounts.vault.pool, E::P)", "require!(ctx.accounts.vault.pool == ctx.accounts.pool.key(), E::P)");
+        assert!(diff(&kinds(&req), &kinds(&swapped)).is_empty(), "{:?}", diff(&kinds(&req), &kinds(&swapped)));
 
         // A declaration that ties nothing the check named does not excuse it.
         let check = "    require_keys_eq!(ctx.accounts.vault.authority, ctx.accounts.authority.key(), E::Owner);\n";

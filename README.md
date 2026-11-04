@@ -20,6 +20,12 @@ past in a large generated diff.
 program's hand-written account checks are, and fuzzes them with the attack each check exists to
 stop. Apache-2.0.
 
+**Try it without installing:** paste a pull request or a program address into
+[solinv check](https://solinv-check.meowna-server.workers.dev). It runs `solinv diff` in the browser
+(solinv-static built to WebAssembly, at 8bcb011), and for a deployed program it rebuilds the IDL
+from its upgrade history and diffs each upgrade. To fail every pull request in CI, or to fuzz the
+checks, install it (below).
+
 ## Pick a tool
 
 | I want to… | Use |
@@ -114,7 +120,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: psyto/solinv@8bcb011bd5d3ace5748d291a823c30ae018fc79e
+      - uses: psyto/solinv@737823fcab83c1853c7b35c2825262eeefe56c3b
         with:
           program-src: programs/my_program/src
 ```
@@ -131,15 +137,15 @@ program works too, but each job compiles solinv: they race to save the same cach
 The CLI (not on crates.io yet; pin a commit):
 
 ```bash
-cargo install --git https://github.com/psyto/solinv --rev 8bcb011bd5d3 solinv-cli
+cargo install --git https://github.com/psyto/solinv --rev 737823fcab83 solinv-cli
 ```
 
 In your Crucible fuzz harness:
 
 ```toml
 [dependencies]
-solinv-fuzz = { git = "https://github.com/psyto/solinv", rev = "8bcb011bd5d3ace5748d291a823c30ae018fc79e" }
-solinv-core = { git = "https://github.com/psyto/solinv", rev = "8bcb011bd5d3ace5748d291a823c30ae018fc79e" }
+solinv-fuzz = { git = "https://github.com/psyto/solinv", rev = "737823fcab83c1853c7b35c2825262eeefe56c3b" }
+solinv-core = { git = "https://github.com/psyto/solinv", rev = "737823fcab83c1853c7b35c2825262eeefe56c3b" }
 crucible-test-context = { git = "https://github.com/asymmetric-research/crucible", tag = "v0.1.0" }
 ```
 ```rust

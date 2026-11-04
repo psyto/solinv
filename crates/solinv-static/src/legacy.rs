@@ -22,8 +22,14 @@
 //! Reported upstream: otter-sec/anchor#5255 (seed quotes) and #5256
 //! (relations). Drop the differences here once they are fixed there.
 //!
-//! A `const` seed of any other type is dropped with its PDA, as
-//! `anchor idl convert` does, and the slot reads as having no seeds.
+//! `const` seeds convert to the bytes Anchor derives from: a string's UTF-8,
+//! a byte array as is, an integer little-endian at its width, a public key's
+//! 32 bytes. A type this does not convert is kept as a marked seed, not
+//! dropped: dropping it would drop the PDA, and a later loss of those seeds
+//! would go unseen (`anchor idl convert` fails on such a seed instead).
+//!
+//! A legacy IDL has no fixed `address` on any slot; [`Idl::legacy`] tells
+//! the IDL diff not to read that absence as a removal.
 
 use crate::idl::{Idl, IdlAccount, IdlAccountItem, IdlAccountType, IdlArg, IdlInstruction, IdlPda, IdlSeed};
 use heck::ToSnakeCase;
@@ -120,25 +126,94 @@ fn snake_path(path: &str) -> String {
     path.split('.').map(|s| s.to_snake_case()).collect::<Vec<_>>().join(".")
 }
 
-fn seed(s: LegacySeed) -> Option<IdlSeed> {
-    Some(match s {
-        LegacySeed::Const { ty, value } => match (ty.as_str(), value) {
-            (Some("string"), serde_json::Value::String(v)) => IdlSeed::Const { value: v.into_bytes() },
+/// Marks a `const` seed whose legacy type this reader does not convert. It keeps the PDA (the
+/// slot still has seeds). The IDL diff reads the mark only on a side converted from legacy
+/// (`Idl::legacy`), so a current IDL that happens to hold these bytes is not mistaken for it,
+/// and an unconverted seed never equals a real one. Anchor's converter fails on these instead.
+pub(crate) const UNCONVERTED: &[u8] = b"\0solinv:unconverted-const-seed:";
+
+fn base58(s: &str) -> Option<Vec<u8>> {
+    const ALPHABET: &[u8] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+    let mut out: Vec<u8> = Vec::new(); // little-endian base-256
+    for c in s.bytes() {
+        let mut carry = ALPHABET.iter().position(|&a| a == c)? as u32;
+        for b in out.iter_mut() {
+            carry += (*b as u32) * 58;
+            *b = carry as u8;
+            carry >>= 8;
+        }
+        while carry > 0 {
+            out.push(carry as u8);
+            carry >>= 8;
+        }
+    }
+    out.extend(s.bytes().take_while(|&c| c == b'1').map(|_| 0));
+    out.reverse();
+    Some(out)
+}
+
+/// The bytes a legacy `const` seed contributes, as Anchor derives them: a string's UTF-8, a byte
+/// array as is, an integer little-endian at its width, a public key's 32 bytes.
+fn const_bytes(ty: &serde_json::Value, value: &serde_json::Value) -> Option<Vec<u8>> {
+    use serde_json::Value;
+    // Up to 128 bits. JSON keeps integers past u64 as strings (or loses them as floats), so a
+    // numeric string is read too.
+    let int = |width: usize, signed: bool| -> Option<Vec<u8>> {
+        let text = match value {
+            Value::Number(n) => n.to_string(),
+            Value::String(v) => v.clone(),
             _ => return None,
+        };
+        let bits = width * 8;
+        if signed {
+            let v: i128 = text.parse().ok()?;
+            let fits = bits == 128 || (v >= -(1i128 << (bits - 1)) && v < (1i128 << (bits - 1)));
+            fits.then(|| v.to_le_bytes()[..width].to_vec())
+        } else {
+            let v: u128 = text.parse().ok()?;
+            let fits = bits == 128 || v < (1u128 << bits);
+            fits.then(|| v.to_le_bytes()[..width].to_vec())
+        }
+    };
+    match (ty, value) {
+        (Value::String(t), Value::String(v)) if t == "string" => Some(v.clone().into_bytes()),
+        (Value::String(t), Value::String(v)) if t == "publicKey" || t == "pubkey" => base58(v).filter(|b| b.len() == 32),
+        (Value::String(t), _) => match t.as_str() {
+            "u8" => int(1, false),
+            "u16" => int(2, false),
+            "u32" => int(4, false),
+            "u64" => int(8, false),
+            "u128" => int(16, false),
+            "i8" => int(1, true),
+            "i16" => int(2, true),
+            "i32" => int(4, true),
+            "i64" => int(8, true),
+            "i128" => int(16, true),
+            "bytes" => bytes_of(value),
+            _ => None,
+        },
+        // `{"array": ["u8", N]}`
+        (Value::Object(o), _) if o.get("array").and_then(|a| a.get(0)).and_then(Value::as_str) == Some("u8") => bytes_of(value),
+        _ => None,
+    }
+}
+
+fn bytes_of(value: &serde_json::Value) -> Option<Vec<u8>> {
+    value.as_array()?.iter().map(|b| b.as_u64().filter(|&b| b <= 255).map(|b| b as u8)).collect()
+}
+
+fn seed(s: LegacySeed) -> IdlSeed {
+    match s {
+        LegacySeed::Const { ty, value } => IdlSeed::Const {
+            value: const_bytes(&ty, &value).unwrap_or_else(|| [UNCONVERTED, format!("{ty}={value}").as_bytes()].concat()),
         },
         LegacySeed::Account { path, account } => IdlSeed::Account { path: snake_path(&path), account },
         LegacySeed::Arg { path } => IdlSeed::Arg { path: snake_path(&path) },
-    })
+    }
 }
 
-fn pda(p: LegacyPda) -> Option<IdlPda> {
-    Some(IdlPda {
-        seeds: p.seeds.into_iter().map(seed).collect::<Option<_>>()?,
-        program: match p.program_id {
-            Some(s) => Some(seed(s)?),
-            None => None,
-        },
-    })
+fn pda(p: LegacyPda) -> IdlPda {
+    IdlPda { seeds: p.seeds.into_iter().map(seed).collect(), program: p.program_id.map(seed) }
 }
 
 /// One struct level: convert each item, then move each `has_one` from the
@@ -178,7 +253,7 @@ fn item(i: LegacyAccountItem) -> IdlAccountItem {
             signer: a.is_signer,
             optional: a.is_optional.unwrap_or_default(),
             address: None,
-            pda: a.pda.and_then(pda),
+            pda: a.pda.map(pda),
             relations: Vec::new(), // set by `items`, on the slot the has_one names
         }),
     }
@@ -187,6 +262,7 @@ fn item(i: LegacyAccountItem) -> IdlAccountItem {
 pub(crate) fn convert(json: &str) -> Result<Idl, serde_json::Error> {
     let l: Legacy = serde_json::from_str(json)?;
     Ok(Idl {
+        legacy: true,
         address: l.metadata.and_then(|m| m.address).unwrap_or_default(),
         instructions: l
             .instructions
@@ -236,6 +312,33 @@ mod tests {
     }"#;
 
     #[test]
+    fn const_seeds_convert_to_the_bytes_anchor_derives_from() {
+        use serde_json::json;
+        let b = |ty, v| super::const_bytes(&ty, &v);
+        assert_eq!(b(json!("string"), json!("vault")), Some(b"vault".to_vec()));
+        assert_eq!(b(json!({"array": ["u8", 2]}), json!([118, 49])), Some(vec![118, 49]));
+        assert_eq!(b(json!("bytes"), json!([1, 2, 3])), Some(vec![1, 2, 3]));
+        assert_eq!(b(json!("u16"), json!(258)), Some(vec![2, 1]));
+        assert_eq!(b(json!("u8"), json!(256)), None, "out of range");
+        assert_eq!(b(json!("i8"), json!(-1)), Some(vec![255]));
+        assert_eq!(b(json!("u64"), json!(1)), Some(vec![1, 0, 0, 0, 0, 0, 0, 0]));
+        assert_eq!(b(json!("u128"), json!(1)), Some([vec![1], vec![0; 15]].concat()));
+        assert_eq!(b(json!("u128"), json!("340282366920938463463374607431768211455")), Some(vec![255; 16]));
+        assert_eq!(b(json!("i128"), json!(-1)), Some(vec![255; 16]));
+        assert_eq!(b(json!("publicKey"), json!("11111111111111111111111111111111")), Some(vec![0; 32]));
+        assert_eq!(b(json!({"defined": "Thing"}), json!(1)), None);
+    }
+
+    #[test]
+    fn an_unconverted_const_seed_keeps_the_pda() {
+        let legacy = r#"{"version":"0.1.0","name":"d","instructions":[{"name":"a","accounts":[
+            {"name":"vault","isMut":true,"isSigner":false,"pda":{"seeds":[{"kind":"const","type":{"defined":"Thing"},"value":1}]}}],"args":[]}]}"#;
+        let (idl, _) = Idl::from_json_any(legacy).unwrap();
+        let seeds = &idl.instructions[0].flat_accounts()[0].account.pda.as_ref().unwrap().seeds;
+        assert!(matches!(&seeds[0], IdlSeed::Const { value } if value.starts_with(super::UNCONVERTED)));
+    }
+
+    #[test]
     fn current_format_is_not_read_as_legacy() {
         let current = r#"{"instructions":[{"name":"a","discriminator":[0,0,0,0,0,0,0,0],"accounts":[]}]}"#;
         assert!(!Idl::from_json_any(current).unwrap().1);
@@ -267,8 +370,10 @@ mod tests {
         assert!(matches!(&seeds[0], IdlSeed::Const { value } if value == b"vault"), "UTF-8 bytes, no quotes");
         assert!(matches!(&seeds[1], IdlSeed::Account { path, .. } if path == "bank"));
         assert!(matches!(&seeds[2], IdlSeed::Arg { path } if path == "bank_seed"));
-        // A non-string const seed drops the PDA, as `anchor idl convert` does.
-        assert!(flat[3].account.pda.is_none());
+        // A byte-array const seed is its bytes (anchor idl convert would fail here).
+        let fee = &flat[3].account.pda.as_ref().unwrap().seeds;
+        assert!(matches!(&fee[0], IdlSeed::Const { value } if value == &[1, 2]));
+        assert!(idl.legacy);
         assert!(matches!(&ix.accounts[4], IdlAccountItem::Composite { name, .. } if name == "inner"));
     }
 }

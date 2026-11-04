@@ -87,8 +87,13 @@ impl Renames {
         }
     }
 
-    fn seed_key(&self, prefix: &str, s: &IdlSeed) -> String {
+    /// `legacy`: the seed's IDL was converted from the legacy format, the only place an
+    /// unconverted-seed mark can come from.
+    fn seed_key(&self, prefix: &str, s: &IdlSeed, legacy: bool) -> String {
         match s {
+            IdlSeed::Const { value } if legacy && value.starts_with(crate::legacy::UNCONVERTED) => {
+                format!("unconverted:{value:?}")
+            }
             IdlSeed::Const { value } => format!("const:{value:?}"),
             // `account` names the account's type, which does not change the
             // derivation (and the legacy format writes it where the current
@@ -99,13 +104,16 @@ impl Renames {
     }
 }
 
-fn head_seed_key(s: &IdlSeed) -> String {
-    Renames { paths: BTreeMap::new(), guessed: Vec::new() }.seed_key("", s)
-}
-
-fn same_seeds(r: &Renames, prefix: &str, base: &IdlPda, head: &IdlPda) -> bool {
-    let b = (base.seeds.iter().map(|s| r.seed_key(prefix, s)).collect::<Vec<_>>(), base.program.as_ref().map(|s| r.seed_key(prefix, s)));
-    let h = (head.seeds.iter().map(head_seed_key).collect::<Vec<_>>(), head.program.as_ref().map(head_seed_key));
+fn same_seeds(r: &Renames, prefix: &str, base: &IdlPda, head: &IdlPda, legacy: (bool, bool)) -> bool {
+    let none = Renames { paths: BTreeMap::new(), guessed: Vec::new() };
+    let b = (
+        base.seeds.iter().map(|s| r.seed_key(prefix, s, legacy.0)).collect::<Vec<_>>(),
+        base.program.as_ref().map(|s| r.seed_key(prefix, s, legacy.0)),
+    );
+    let h = (
+        head.seeds.iter().map(|s| none.seed_key("", s, legacy.1)).collect::<Vec<_>>(),
+        head.program.as_ref().map(|s| none.seed_key("", s, legacy.1)),
+    );
     b == h
 }
 
@@ -196,7 +204,9 @@ fn signers(ix: &IdlInstruction) -> usize {
 /// finding is a warning — a wrong guess must not fail a build.
 /// `resolved`: head was built with account resolution, so its seeds,
 /// addresses and relations can be compared at all.
-fn diff_ix(b: &IdlInstruction, h: &IdlInstruction, guessed: bool, resolved: bool, out: &mut Vec<Change>) {
+/// `legacy`: (base, head) converted from the legacy format.
+fn diff_ix(b: &IdlInstruction, h: &IdlInstruction, guessed: bool, resolved: bool, legacy: (bool, bool), out: &mut Vec<Change>) {
+    let addresses = !legacy.0 && !legacy.1;
     let (bs, hs) = (flat(b), flat(h));
     let head: BTreeMap<&str, &IdlAccount> = hs.iter().map(|(p, a)| (p.as_str(), *a)).collect();
     let r = renames(&bs, &hs);
@@ -246,7 +256,7 @@ fn diff_ix(b: &IdlInstruction, h: &IdlInstruction, guessed: bool, resolved: bool
         match (&ba.pda, &ha.pda) {
             _ if !resolved => {}
             (Some(_), None) => removed.push("seeds removed".to_string()),
-            (Some(x), Some(y)) if !same_seeds(&r, prefix, x, y) => out.push(change(
+            (Some(x), Some(y)) if !same_seeds(&r, prefix, x, y, legacy) => out.push(change(
                 Severity::Warning,
                 &h.name,
                 &at,
@@ -255,7 +265,7 @@ fn diff_ix(b: &IdlInstruction, h: &IdlInstruction, guessed: bool, resolved: bool
             _ => {}
         }
         match (&ba.address, &ha.address) {
-            _ if !resolved => {}
+            _ if !resolved || !addresses => {}
             (Some(_), None) => removed.push("fixed address removed".to_string()),
             (Some(x), Some(y)) if x != y => out.push(change(
                 Severity::Warning,
@@ -338,28 +348,27 @@ fn renamed_ix<'a>(b: &IdlInstruction, candidates: &[&'a IdlInstruction]) -> Opti
         .map(|(_, _, h)| h)
 }
 
-/// Anchor writes seeds, addresses and relations only when the IDL is built
-/// with account resolution, and with it every fixed-address slot
-/// (`system_program`, a sysvar) carries its `address`. A head with none of
-/// the three anywhere, for a slot that had an address in base and is still
-/// there, changed its build, not (necessarily) those checks. Signer,
-/// optional and writable do not depend on it.
+/// Anchor writes seeds, addresses and relations only when the IDL is built with account
+/// resolution, and then every fixed-address slot (`system_program`, a sysvar) carries its
+/// `address`. So a base with a fixed address anywhere (or, legacy, with seeds or relations) was
+/// built with it, and a head with none of the three anywhere was built without it: it changed
+/// its build, not (necessarily) those checks. They are not compared, and one warning says so.
+/// Judged on the whole IDL, so renaming or dropping one slot cannot dodge it; a base with no
+/// fixed address at all proves nothing, so a small IDL that loses its only has_one is still
+/// compared slot by slot.
 fn built_without_resolution(base: &Idl, head: &Idl) -> bool {
-    let any = head.instructions.iter().any(|ix| {
-        ix.flat_accounts().iter().any(|f| f.account.address.is_some() || f.account.pda.is_some() || !f.account.relations.is_empty())
-    });
-    if any {
-        return false;
-    }
-    base.instructions.iter().any(|b| {
-        let Some(h) = head.instructions.iter().find(|h| h.name == b.name) else { return false };
-        let kept: BTreeSet<String> = h.flat_accounts().iter().map(|f| f.path()).collect();
-        b.flat_accounts().iter().any(|f| f.account.address.is_some() && kept.contains(&f.path()))
-    })
+    let any = |idl: &Idl, f: &dyn Fn(&crate::idl::IdlAccount) -> bool| {
+        idl.instructions.iter().any(|ix| ix.flat_accounts().iter().any(|s| f(s.account)))
+    };
+    let base_resolved = any(base, &|a| a.address.is_some())
+        || (base.legacy && any(base, &|a| a.pda.is_some() || !a.relations.is_empty()));
+    let head_resolved = any(head, &|a| a.address.is_some() || a.pda.is_some() || !a.relations.is_empty());
+    base_resolved && !head_resolved
 }
 
 pub fn diff_idl(base: &Idl, head: &Idl) -> Vec<Change> {
     let resolved = !built_without_resolution(base, head);
+    let legacy = (base.legacy, head.legacy);
     let mut out = Vec::new();
     if !resolved {
         out.push(change(
@@ -415,10 +424,10 @@ pub fn diff_idl(base: &Idl, head: &Idl) -> Vec<Change> {
     }
     for h in &head.instructions {
         if let Some(b) = base.instructions.iter().find(|b| b.name == h.name) {
-            diff_ix(b, h, false, resolved, &mut out);
+            diff_ix(b, h, false, resolved, legacy, &mut out);
         } else if let Some(b) = renamed_to.get(h.name.as_str()) {
             let before = out.len();
-            diff_ix(b, h, true, resolved, &mut out);
+            diff_ix(b, h, true, resolved, legacy, &mut out);
             for c in &mut out[before..] {
                 c.message = format!("{} (compared with `{}`, which this may replace)", c.message, b.name);
             }
@@ -652,6 +661,37 @@ mod tests {
     }
 
     #[test]
+    fn renaming_the_address_slot_does_not_dodge_the_resolution_check() {
+        let base = idl(r#"{"name":"vault","writable":true,"pda":{"seeds":[{"kind":"const","value":[118]}]}},{"name":"authority","signer":true,"relations":["vault"]},{"name":"system_program","address":"11111111111111111111111111111111"}"#);
+        let head = idl(r#"{"name":"vault","writable":true},{"name":"authority","signer":true},{"name":"program"}"#);
+        let m = messages(&diff_idl(&base, &head));
+        assert!(m.iter().all(|m| !m.starts_with("Regression")), "{m:?}");
+        assert!(m[0].contains("without account resolution"), "{m:?}");
+    }
+
+    #[test]
+    fn a_legacy_head_has_no_addresses_to_lose() {
+        let base = idl(r#"{"name":"vault","writable":true,"pda":{"seeds":[{"kind":"const","value":[118]}]}},{"name":"authority","signer":true,"relations":["vault"]},{"name":"system_program","address":"11111111111111111111111111111111"}"#);
+        let legacy = r#"{"version":"0.1.0","name":"d","instructions":[{"name":"withdraw","accounts":[
+            {"name":"vault","isMut":true,"isSigner":false,"pda":{"seeds":[{"kind":"const","type":"string","value":"v"}]},"relations":["authority"]},
+            {"name":"authority","isMut":false,"isSigner":true},{"name":"systemProgram","isMut":false,"isSigner":false}],"args":[]}]}"#;
+        let (head, _) = Idl::from_json_any(legacy).unwrap();
+        let m = messages(&diff_idl(&base, &head));
+        assert!(m.iter().all(|m| !m.contains("fixed address removed")), "{m:?}");
+    }
+
+    #[test]
+    fn a_lost_byte_array_seed_in_a_legacy_base_is_reported() {
+        let legacy = r#"{"version":"0.1.0","name":"d","instructions":[{"name":"withdraw","accounts":[
+            {"name":"vault","isMut":true,"isSigner":false,"pda":{"seeds":[{"kind":"const","type":{"array":["u8",2]},"value":[118,49]}]}},
+            {"name":"authority","isMut":false,"isSigner":true},{"name":"cfg","isMut":false,"isSigner":false,"pda":{"seeds":[{"kind":"const","type":"string","value":"c"}]}}],"args":[]}]}"#;
+        let (base, _) = Idl::from_json_any(legacy).unwrap();
+        let head = idl(r#"{"name":"vault","writable":true},{"name":"authority","signer":true},{"name":"cfg","pda":{"seeds":[{"kind":"const","value":[99]}]}}"#);
+        let m = messages(&diff_idl(&base, &head));
+        assert_eq!(m, vec!["Regression withdraw.vault seeds removed".to_string()]);
+    }
+
+    #[test]
     fn legacy_has_one_compares_cleanly_against_the_current_format() {
         let legacy = r#"{"version":"0.1.0","name":"d","instructions":[{"name":"withdraw","accounts":[
             {"name":"vault","isMut":true,"isSigner":false,"relations":["authority"]},
@@ -659,9 +699,17 @@ mod tests {
         let (base, _) = Idl::from_json_any(legacy).unwrap();
         let same = idl(r#"{"name":"vault","writable":true},{"name":"authority","signer":true,"relations":["vault"]}"#);
         assert!(diff_idl(&base, &same).is_empty(), "{:?}", messages(&diff_idl(&base, &same)));
+        // With its only has_one gone the head declares nothing resolution writes, so a drop
+        // and a build without resolution look the same: one visible warning, not silence.
         let dropped = idl(r#"{"name":"vault","writable":true},{"name":"authority","signer":true}"#);
+        let m = messages(&diff_idl(&base, &dropped));
+        assert_eq!(m.len(), 1, "{m:?}");
+        assert!(m[0].contains("without account resolution"), "{m:?}");
+        // With seeds left elsewhere it is plainly a drop.
+        let base2 = Idl::from_json_any(&legacy.replace(r#""isSigner":true}"#, r#""isSigner":true},{"name":"cfg","isMut":false,"isSigner":false,"pda":{"seeds":[{"kind":"const","type":"string","value":"c"}]}}"#)).unwrap().0;
+        let dropped2 = idl(r#"{"name":"vault","writable":true},{"name":"authority","signer":true},{"name":"cfg","pda":{"seeds":[{"kind":"const","value":[99]}]}}"#);
         assert_eq!(
-            messages(&diff_idl(&base, &dropped)),
+            messages(&diff_idl(&base2, &dropped2)),
             vec!["Regression withdraw.authority `vault` no longer declares `has_one = authority`".to_string()]
         );
     }

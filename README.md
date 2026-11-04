@@ -30,7 +30,7 @@ stop. Apache-2.0.
 | fill an `InstructionSpec` from the IDL and fixture state instead of by hand | `solinv_fuzz::Idl` → `.spec()` → `.infer_from_state()` / `.infer_candidates()` |
 | check a signer is really required | `solinv_core::invariants::signer_skip::check` |
 | check an account's owner program / type tag is really checked | `owner_skip::check` / `discriminator_skip::check` |
-| check a PDA can't be forged, or swapped for another user's | `pda_forge::check` / `account_swap::check` / `bump_seed_canonicalization::check` |
+| check a PDA can't be forged, or swapped for another user's | `pda_forge::check` / `account_swap::check` (`check_sets` for slots swapped together) / `bump_seed_canonicalization::check` |
 | check a `require!` guard can't be skipped | `precondition_skip::check` + `InstructionSpec.guards` |
 | catch wrapped arithmetic on named fields | `unchecked_math::check` + `AccountSchema` |
 | cap compute units, or catch re-entry / under-funded `realloc` | `cu_dos` / `cpi_reentrancy` / `realloc_race` |
@@ -182,7 +182,7 @@ Both installed from the pins above, the same way as for anyone else:
 | Repo | What runs | Measured |
 |---|---|---|
 | [fabrknt/veil](https://github.com/fabrknt/veil/blob/main/.github/workflows/solinv.yml) | the action on 5 Anchor 0.30 programs, one matrix job each | A throwaway pull request that dropped a `has_one` failed only that program's job, with the annotation on the line ([fabrknt/veil#2](https://github.com/fabrknt/veil/pull/2)) |
-| [psyto/princeps-solana](https://github.com/psyto/princeps-solana/tree/main/fuzz/psol-vault) | a fuzz harness for a native (Pinocchio) vault: signer-skip, owner-skip, account-swap, 3 minutes per pull request | Deleting one check at a time: 4 of 5 caught; 0 findings on the current code. The miss needs two accounts swapped together ([#4](https://github.com/psyto/solinv/issues/4)) |
+| [psyto/princeps-solana](https://github.com/psyto/princeps-solana/tree/main/fuzz/psol-vault) | a fuzz harness for a native (Pinocchio) vault: signer-skip, owner-skip, account-swap, 3 minutes per pull request | Deleting one check at a time: 4 of 5 caught; 0 findings on the current code. The miss needs two accounts swapped together: `account_swap::check_sets` catches it (measured on a local copy of the harness, [#4](https://github.com/psyto/solinv/issues/4)) |
 
 What using it ourselves turned up: the `t` mark for typed accounts not tied to the instruction
 ([#3](https://github.com/psyto/solinv/issues/3); in veil it surrounds four real holes the earlier map showed as `T`),
@@ -907,7 +907,7 @@ that a type only ever exists at one PDA. A tie to another account
 counts even when that account is itself the caller's choice (the pool
 or sale the instruction acts on): whether a caller can create a matching
 pair depends on who can create the type, which the map does not read —
-`account-swap` with both slots swapped is the test for that. The reader is a line reader,
+`account_swap::check_sets` with both slots swapped is the test for that. The reader is a line reader,
 not a parser: a slot typed by a type alias, a struct name
 defined twice, or a field type split over lines is left unplaced and
 counted as not found — never guessed. On the production programs

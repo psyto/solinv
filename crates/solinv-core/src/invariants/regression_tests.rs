@@ -357,6 +357,65 @@ fn pda_forge_non_detect() {
     assert_not_detected();
 }
 
+/// `transfer_with_seed` debits an account derived from a signing base:
+/// a rogue `from` alone fails the derivation, a rogue `base` alone fails
+/// it too, and only both together succeed — the shape of #4.
+#[test]
+fn account_swap_sets_swap_slots_together() {
+    use account_swap::SwapSet;
+    let seed = "vault";
+    let (base, rogue_base) = (Arc::new(Keypair::new()), Arc::new(Keypair::new()));
+    let derive = |b: &Keypair| Pubkey::create_with_seed(&b.pubkey(), seed, &SYSTEM_PROGRAM_ID).unwrap();
+    let (from, rogue_from, to) = (derive(&base), derive(&rogue_base), Pubkey::new_unique());
+    let ix = solana_system_interface::instruction::transfer_with_seed(
+        &from, &base.pubkey(), seed.to_string(), &SYSTEM_PROGRAM_ID, &to, 1,
+    );
+    let fixture = || {
+        let mut spec = base_transfer_spec(to, vec![base.clone(), rogue_base.clone()]);
+        spec.name = "transfer_with_seed".into();
+        spec.accounts = ix.accounts.clone();
+        spec.data_sample = ix.data.clone();
+        spec.swap_alternates = vec![vec![rogue_from], vec![rogue_base.pubkey()], vec![]];
+        let funded = mk_account(1_000_000, SYSTEM_PROGRAM_ID, Vec::new());
+        base_fixture(
+            spec,
+            &[
+                (from, funded.clone()),
+                (rogue_from, funded.clone()),
+                (base.pubkey(), funded.clone()),
+                (rogue_base.pubkey(), funded),
+            ],
+            1_000_000,
+            Arc::new(Keypair::new()),
+        )
+    };
+
+    // One slot at a time: each swap breaks the derivation.
+    clear_violation_tracking();
+    account_swap::check(&mut fixture());
+    assert_not_detected();
+
+    // Both at once.
+    clear_violation_tracking();
+    let set = SwapSet {
+        ix: "transfer_with_seed".into(),
+        swaps: vec![(0, rogue_from), (1, rogue_base.pubkey())],
+    };
+    account_swap::check_sets(&mut fixture(), &[set.clone()]);
+    assert_detected("together");
+
+    // A set that swaps one slot twice is malformed and skipped.
+    clear_violation_tracking();
+    let twice = SwapSet { swaps: vec![(0, rogue_from), (1, rogue_base.pubkey()), (1, base.pubkey())], ..set.clone() };
+    account_swap::check_sets(&mut fixture(), &[twice]);
+    assert_not_detected();
+
+    // A set for an instruction the fixture lacks is skipped.
+    clear_violation_tracking();
+    account_swap::check_sets(&mut fixture(), &[SwapSet { ix: "other".into(), ..set }]);
+    assert_not_detected();
+}
+
 #[test]
 fn account_swap_non_detect() {
     clear_violation_tracking();

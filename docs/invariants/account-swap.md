@@ -190,6 +190,39 @@ Each ix may swap multiple accounts. For `process_close_position`:
 
 solinv tries each independently, reports independent violations.
 
+### Slots that must be swapped together (`check_sets`)
+
+Some bindings take two accounts to break. A vault that trusts records
+owned by a compliance program the caller passes in rejects a rogue
+program alone (the real record's owner no longer matches) and a rogue
+record alone (its owner is not the trusted program); it accepts both at
+once if the program is not pinned. One-slot swaps cannot see that
+([#4](https://github.com/psyto/solinv/issues/4)). Name the slots in a
+`SwapSet` and call `check_sets` beside `check`:
+
+```rust
+use solinv_core::invariants::account_swap::{self, SwapSet};
+
+account_swap::check(fixture);
+account_swap::check_sets(fixture, &[SwapSet {
+    ix: "withdraw".into(),
+    swaps: vec![(1, forged_record), (2, ROGUE_PROGRAM)],   // (account index, alternate)
+}]);
+```
+
+The fixture creates the alternates: here a copy of a real record, owned
+by the rogue program. Every swap in a set is applied in one attempt;
+the finding names each slot and ends `…, together`. A set that repeats a
+slot index, names a missing account, or names an instruction the fixture
+lacks is skipped without a note. Signers whose slot a swap replaced are
+left out of the transaction; this matters only with sigverify on, where
+an alternate that signs also needs its keypair in `spec.signers`.
+
+Measured on psyto/princeps-solana's psol-vault harness, with the
+compliance-program pin deleted from `withdraw`: one-slot swaps 0
+findings (as before), the set above caught on every execution in a
+60-second run; with the pin in place, 0 findings.
+
 ### State-change detection (same as preceding invariants)
 
 Pre/post program-owned account hash diff. If state changes AND ix

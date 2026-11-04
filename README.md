@@ -49,8 +49,9 @@ REMOVED withdraw.vault (examples/escrow-demo/diff/drop-a-check/lib.rs:153): was 
 REMOVED withdraw.vault (examples/escrow-demo/diff/drop-a-check/lib.rs:153): `has_one = depositor` removed: it no longer has to match `depositor`
 ```
 
-It exits 1, so CI fails. In a pull request the same findings appear as annotations on line 153 —
-[see it on a demo pull request](DEMO_PR_URL).
+It exits 1, so CI fails. In a pull request the same findings appear as annotations on the changed
+line — [the demo pull request](https://github.com/psyto/solinv/pull/2) makes this change to the real program and fails with both,
+on line 146.
 
 Second, the map of a whole program — which instructions have hand-checked accounts:
 
@@ -85,7 +86,7 @@ flagged instructions are the demo program's three planted account-validation bug
 
 | Claim | Evidence |
 |---|---|
-| A removed check fails the PR | The demo above; [the demo pull request](DEMO_PR_URL) |
+| A removed check fails the PR | The demo above; [the demo pull request](https://github.com/psyto/solinv/pull/2) |
 | No noise on code that keeps its checks | Comparing Jito tip-payment, tip-distribution and Raydium cp-swap with themselves: 0 reports. Reformatting a constraint or renaming its error: 0 reports (tested) |
 | The fuzz detectors catch a check that is removed | Mutation test on the clean escrow: of the removed checks the harness reached, 5 of 6 were caught, each by the detector predicted for it — after setting aside 5 mutations that cannot change behaviour, each argued in the [report](examples/escrow-demo/campaigns/escrow-clean-report.md) (5 of 11 before) |
 | …but not every kind yet | On Raydium's native AMM, 0 of 18: its guards compare values computed inside the handler, which a declaration cannot name ([why](#mutation-testing--measuring-detector-power-on-a-real-target)) |
@@ -102,26 +103,28 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: psyto/solinv@ACTION_SHA
+      - uses: psyto/solinv@f5267c8f23c3b21bc8f2b54308bcbd52824da806
         with:
           program-src: programs/my_program/src
 ```
 
-It installs solinv at that commit (cached after the first run, which compiles it), compares the
-program's source with the pull request's base, and fails the job when a check is removed.
+It installs solinv at that commit, compares the program's source with the pull request's base,
+and fails the job when a check is removed. The first run compiles solinv (about 2 minutes on
+`ubuntu-latest` for the demo pull request); later runs restore it from the cache. No Solana
+toolchain, no build of your program.
 
 The CLI (not on crates.io yet; pin a commit):
 
 ```bash
-cargo install --git https://github.com/psyto/solinv --rev 9a5aaa4e1f06 solinv-cli
+cargo install --git https://github.com/psyto/solinv --rev 6ebc1ca651e3 solinv-cli
 ```
 
 In your Crucible fuzz harness:
 
 ```toml
 [dependencies]
-solinv-fuzz = { git = "https://github.com/psyto/solinv", rev = "9a5aaa4e1f067ed97fdc1eac4e9a3cda86ab2e59" }
-solinv-core = { git = "https://github.com/psyto/solinv", rev = "9a5aaa4e1f067ed97fdc1eac4e9a3cda86ab2e59" }
+solinv-fuzz = { git = "https://github.com/psyto/solinv", rev = "6ebc1ca651e362df67e75ab9836692fc0940697c" }
+solinv-core = { git = "https://github.com/psyto/solinv", rev = "6ebc1ca651e362df67e75ab9836692fc0940697c" }
 crucible-test-context = { git = "https://github.com/asymmetric-research/crucible", tag = "v0.1.0" }
 ```
 ```rust
@@ -233,6 +236,15 @@ declaration as a library:
     Expectations the IDL does not make are kept apart as
     *candidates*: leads to confirm, not facts. See
     [start from your IDL](#start-from-your-idl).
+11. **The checks a change removes** — `solinv diff` compares two
+    versions of a program's source slot by slot (no build): a typed
+    account loosened to `UncheckedAccount`, a signer no longer
+    required, a `seeds` / `address` / `owner` / `has_one` /
+    `constraint` deleted (constraints compared by expression), plus
+    warnings for moved checks, type changes, optional accounts and new
+    unsigned writers. `action.yml` runs it on pull requests with
+    annotations on the line. Design and limits:
+    [`docs/diff.md`](docs/diff.md).
 
 Engine performance is **not** the wedge — solinv runs on Crucible and
 inherits its sBPF coverage and libafl scheduling.
@@ -769,11 +781,13 @@ solinv/
 │   ├── solinv-disclose/   # Divergence findings as checkable evidence
 │   │                      #   (serde+sha2 only, no Crucible/Solana);
 │   │                      #   platform formatters pending
-│   └── solinv-cli/        # `solinv` binary — idl (+ source.rs: declared account
-│                          #   types for --src), mutate, score (+ scaffolds:
+│   └── solinv-cli/        # `solinv` binary — idl, diff (+ source.rs: declared
+│                          #   account types and #[account] constraints; diff.rs:
+│                          #   what a change removes), mutate, score (+ scaffolds:
 │                          #   init, check, fuzz, corpus, disclose)
 ├── examples/
 │   ├── escrow-demo/             # planted-bug acceptance fixture (7 invariants)
+│   │   ├── diff/drop-a-check/   # escrow-clean with one check dropped (diff quickstart)
 │   │   └── idl/                 # IDLs of both programs, for `--features idl_specs`
 │   ├── raydium-amm-fuzz/        # Native production AMM (validated clean)
 │   ├── slumlord-fuzz/           # Native flash-loan (validated clean)
@@ -785,12 +799,14 @@ solinv/
 │   ├── invariants/                  # per-invariant 8-section specs
 │   │   └── field-schema.md          # named fields + relation invariants
 │   ├── idl-specs.md                 # IDL → spec: facts vs candidates, limits
+│   ├── diff.md                      # what `solinv diff` reports, and its limits
 │   ├── mutation-testing.md          # operator catalog + scoring rationale
 │   ├── differential-equivalence.md  # oracle rationale + report format
 │   ├── disclosure-template-*.md     # Immunefi / Sherlock / generic templates
 │   ├── research-*.md                # research deliverables
 │   ├── harness-pattern-raw-call.md  # reusable Anchor-version-independent harness
 │   └── (implementation logs)        # Day-by-day audit trail of engineering decisions
+├── action.yml                       # GitHub Action: solinv diff on pull requests
 ├── scripts/                         # bandit allocation, metrics, mutation campaigns,
 │                                    #   idl-specs-parity.sh (hand vs IDL specs)
 └── logs/                            # per-campaign fuzz logs (gitignored)
@@ -1010,7 +1026,7 @@ thing" drift after a negative result.
 
 ```bash
 cargo check --workspace               # verify scaffold (~5s)
-cargo test  --workspace               # all crates (262 tests)
+cargo test  --workspace               # all crates (272 tests)
 cargo test  -p solinv-core            # invariant regression tests
 cargo test  -p solinv-fuzz            # bytepoke + differential oracle + schema + idl
 cargo test  -p solinv-mutate          # operators + mutants + scoring (no Solana deps)
@@ -1025,6 +1041,8 @@ CLI surface:
 ```
 solinv idl <idl.json>                        # account-validation map + unsigned writers
 solinv idl <idl.json> --src <program src>    # + U/T: unchecked vs typed, from source
+solinv diff --base-src <before> --head-src <after>  # checks a change removes; exit 1 if any
+solinv diff … --format github                # the same, as Actions annotations
 solinv idl <idl.json> --rust <ix|all>        # SpecBuilder stub to paste into a fixture
 solinv init                                  # scaffold a solinv harness (not yet implemented)
 solinv check <target>                        # run invariant checks

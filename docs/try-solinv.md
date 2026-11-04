@@ -24,7 +24,7 @@ Keep a clock running: note the time you start each step.
 ## Step 1 — install (about 1–2 minutes)
 
 ```bash
-cargo install --git https://github.com/psyto/solinv --rev 9a5aaa4e1f06 solinv-cli
+cargo install --git https://github.com/psyto/solinv --rev 6ebc1ca651e3 solinv-cli
 solinv --help
 ```
 
@@ -59,6 +59,15 @@ unsafe_withdraw   ! no signer, writes an unconstrained slot
 
 For each flagged instruction, note whether it is meant to be callable by anyone. On the audited programs we tried, every one was — that is a fine answer.
 
+Also try the pull-request check on two commits of your own history (a minute, no build):
+
+```bash
+git worktree add /tmp/before <an older commit>
+solinv diff --base-src /tmp/before/programs/<program>/src --head-src programs/<program>/src
+```
+
+It names any account check removed between them. Note what it reported, and whether any of it was noise.
+
 ## Step 3 (optional) — fuzz one instruction (15–45 minutes)
 
 Pick one instruction from step 2, ideally one with a `U` slot. Most of the time goes into setup: creating the accounts that must exist before the instruction can run.
@@ -70,7 +79,9 @@ Pick one instruction from step 2, ideally one with a `U` slot. Most of the time 
    cargo install --path ~/src/crucible/crates/crucible-fuzz-cli
    cargo build-sbf          # writes target/deploy/<program>.so
    ```
-2. Start the harness from solinv's template: copy `Cargo.toml` and `src/main.rs` from [examples/escrow-demo/fuzz/escrow_clean](https://github.com/psyto/solinv/tree/9a5aaa4e1f06/examples/escrow-demo/fuzz/escrow_clean) into `fuzz/<program>/`. Delete its `escrow-clean` dependency and the `use escrow_clean::ID;` line, and point the `solinv-fuzz` / `solinv-core` path dependencies at `{ git = "https://github.com/psyto/solinv", rev = "9a5aaa4e1f06" }`.
+
+   If the program is already deployed, fuzzing the deployed binary is usually better: `solana program dump -u m <program id> <program>.so`. Rebuilding an old program (solana-program below 1.16, e.g. most Anchor 0.27–0.28 programs) with current platform-tools makes every CPI fail with "Access violation … 0xffffffffffffffff", on a real validator too ([why](https://github.com/psyto/solinv/blob/main/docs/phase5-day61-h1-was-the-build.md)).
+2. Start the harness from solinv's template: copy `Cargo.toml` and `src/main.rs` from [examples/escrow-demo/fuzz/escrow_clean](https://github.com/psyto/solinv/tree/6ebc1ca651e3/examples/escrow-demo/fuzz/escrow_clean) into `fuzz/<program>/`. Delete its `escrow-clean` dependency and the `use escrow_clean::ID;` line, and point the `solinv-fuzz` / `solinv-core` path dependencies at `{ git = "https://github.com/psyto/solinv", rev = "6ebc1ca651e3" }`.
 3. Print the spec stub and paste it into `instructions()`:
 
    ```bash
@@ -96,6 +107,7 @@ Fill in what applies and send it to whoever shared this page; a step you skipped
 | Step 1: minutes, and any error |  |
 | Step 2: minutes; how many `U` slots; which instructions were flagged |  |
 | Step 2: were the flagged instructions meant to be callable by anyone? |  |
+| `solinv diff` on your history: anything reported, and was any of it noise? |  |
 | Step 3: minutes to a first result, or where you stopped and why (paste the error) |  |
 | Step 3: findings or `[SOLINV_CANDIDATES]` lines worth a second look |  |
 | What took longest, or confused you |  |

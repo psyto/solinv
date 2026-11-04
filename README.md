@@ -1,14 +1,24 @@
-# solinv — Solana bug-class detectors for your fuzz harness
+# solinv — catch the Anchor account check a change drops
 
-**Point it at an Anchor IDL and it tells you which instructions to check first; add one line per
-detector to a [Crucible](https://github.com/asymmetric-research/crucible) harness and it checks
-signer, owner, discriminator, PDA and context validation for you** — the account checks every
-Solana review looks for, without hand-writing a `fuzz_assert!` for each. Apache-2.0.
+Some of Solana's largest losses came down to one account nobody checked:
+[Wormhole](https://www.certik.com/blog/wormhole-bridge-exploit-incident-analysis) (Feb 2022,
+~$320M) never verified that the instructions sysvar was the real one;
+[Cashio](https://halborn.com/explained-the-cashio-hack-march-2022/) (Mar 2022, ~$48M) never
+validated a `mint` field, so a chain of fake accounts passed;
+[Crema](https://halborn.com/explained-the-crema-finance-hack-july-2022/) (Jul 2022, ~$8.8M) let a
+fake tick account past its owner check. In Anchor each of those checks is one type or one
+`#[account(...)]` line, enforced only while it is written down — and a refactor that loosens
+`Account<'info, Vault>` to `UncheckedAccount` or deletes a `has_one` fails no test.
+
+**solinv tells you when that happens, on the pull request, before it merges** — and maps where a
+program's hand-written account checks are, and fuzzes them with the attack each check exists to
+stop. Apache-2.0.
 
 ## Pick a tool
 
 | I want to… | Use |
 |---|---|
+| fail a pull request that removes an account check, with a note on the line | the `psyto/solinv` GitHub Action, or `solinv diff --base-src <before> --head-src <after>` |
 | see which instructions need a hand-checked account, before writing any harness | `solinv idl target/idl/<program>.json --src programs/<program>/src` |
 | get a paste-ready spec for one instruction | `solinv idl <idl> --rust <ix>` |
 | fill an `InstructionSpec` from the IDL and fixture state instead of by hand | `solinv_fuzz::Idl` → `.spec()` → `.infer_from_state()` / `.infer_candidates()` |
@@ -23,11 +33,29 @@ Solana review looks for, without hand-writing a `fuzz_assert!` for each. Apache-
 
 ## Quickstart
 
-One command from a fresh clone; it reads an IDL and the program's source, and needs no Solana
-toolchain:
+From a fresh clone, no Solana toolchain. First, a change that drops a check — the demo vault
+loosened to `UncheckedAccount` and its `has_one` deleted
+([the file](examples/escrow-demo/diff/drop-a-check/lib.rs)):
 
 ```bash
 git clone https://github.com/psyto/solinv && cd solinv
+cargo run -q -p solinv-cli -- diff \
+    --base-src examples/escrow-demo/programs/escrow-clean/src \
+    --head-src examples/escrow-demo/diff/drop-a-check
+```
+```
+solinv diff: 2 removed check(s), 0 warning(s)
+REMOVED withdraw.vault (examples/escrow-demo/diff/drop-a-check/lib.rs:153): was Account, now UncheckedAccount: Anchor no longer checks its owner and type
+REMOVED withdraw.vault (examples/escrow-demo/diff/drop-a-check/lib.rs:153): `has_one = depositor` removed: it no longer has to match `depositor`
+```
+
+It exits 1, so CI fails. In a pull request the same findings appear as annotations on the changed
+line — [the demo pull request](https://github.com/psyto/solinv/pull/2) makes this change to the real program and fails with both,
+on line 146.
+
+Second, the map of a whole program — which instructions have hand-checked accounts:
+
+```bash
 cargo run -q -p solinv-cli -- idl examples/escrow-demo/idl/escrow.json \
     --src examples/escrow-demo/programs/escrow/src
 ```
@@ -54,20 +82,49 @@ a typed account Anchor checks. Without `--src` the IDL alone cannot tell them ap
 flagged instructions are the demo program's three planted account-validation bugs. To fuzz them, see
 [fuzz the planted-bug demo](#quickstart--escrow-demo) (needs the Crucible CLI and `cargo build-sbf`).
 
+## Does it work?
+
+| Claim | Evidence |
+|---|---|
+| A removed check fails the PR | The demo above; [the demo pull request](https://github.com/psyto/solinv/pull/2) |
+| No noise on code that keeps its checks | Comparing Jito tip-payment, tip-distribution and Raydium cp-swap with themselves: 0 reports. Reformatting a constraint or renaming its error: 0 reports (tested) |
+| The fuzz detectors catch a check that is removed | Mutation test on the clean escrow: of the removed checks the harness reached, 5 of 6 were caught, each by the detector predicted for it — after setting aside 5 mutations that cannot change behaviour, each argued in the [report](examples/escrow-demo/campaigns/escrow-clean-report.md) (5 of 11 before) |
+| …but not every kind yet | On Raydium's native AMM, 0 of 18: its guards compare values computed inside the handler, which a declaration cannot name ([why](#mutation-testing--measuring-detector-power-on-a-real-target)) |
+| It is quiet on audited code | Three production programs fuzzed to a first result: 0 findings, the expected answer ([details](docs/idl-specs.md#measured-on-production-programs)) |
+
 ## Use it in your own project
+
+On every pull request (`.github/workflows/solinv.yml`):
+
+```yaml
+on: pull_request
+jobs:
+  account-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: psyto/solinv@f5267c8f23c3b21bc8f2b54308bcbd52824da806
+        with:
+          program-src: programs/my_program/src
+```
+
+It installs solinv at that commit, compares the program's source with the pull request's base,
+and fails the job when a check is removed. The first run compiles solinv (about 2 minutes on
+`ubuntu-latest` for the demo pull request); later runs restore it from the cache. No Solana
+toolchain, no build of your program.
 
 The CLI (not on crates.io yet; pin a commit):
 
 ```bash
-cargo install --git https://github.com/psyto/solinv --rev 9a5aaa4e1f06 solinv-cli
+cargo install --git https://github.com/psyto/solinv --rev 6ebc1ca651e3 solinv-cli
 ```
 
 In your Crucible fuzz harness:
 
 ```toml
 [dependencies]
-solinv-fuzz = { git = "https://github.com/psyto/solinv", rev = "9a5aaa4e1f067ed97fdc1eac4e9a3cda86ab2e59" }
-solinv-core = { git = "https://github.com/psyto/solinv", rev = "9a5aaa4e1f067ed97fdc1eac4e9a3cda86ab2e59" }
+solinv-fuzz = { git = "https://github.com/psyto/solinv", rev = "6ebc1ca651e362df67e75ab9836692fc0940697c" }
+solinv-core = { git = "https://github.com/psyto/solinv", rev = "6ebc1ca651e362df67e75ab9836692fc0940697c" }
 crucible-test-context = { git = "https://github.com/asymmetric-research/crucible", tag = "v0.1.0" }
 ```
 ```rust
@@ -89,6 +146,15 @@ Both install lines above were checked from GitHub at that rev, not from a local 
 
 Trying it on a program of your own for the first time? [`docs/try-solinv.md`](docs/try-solinv.md) is a
 one-page walk-through, with what to time and what to send back.
+
+## How it compares
+
+- **Anchor's own checks** enforce what is declared. solinv watches the declarations: it notices
+  when one disappears, and maps where nothing is declared and the check is hand-written.
+- **Linters and static analyzers** flag patterns in one version. `solinv diff` compares two
+  versions and names what changed; the fuzz detectors send the attack and report only if it lands.
+- **An audit** checks the code once. solinv keeps the audited checks in place afterwards; it does
+  not replace one.
 
 ## How light it is
 
@@ -141,9 +207,8 @@ declaration as a library:
    below.
 5. **Bytepoke helper API** — `solinv-fuzz::bytepoke` provides
    reusable Anchor-discriminator + sighash + byte-offset writers +
-   `AnchorAccountBuilder` so adopting solinv on an Anchor 0.x program
-   (where the LiteSVM/Anchor ABI mismatch blocks init paths) takes
-   minutes instead of hours.
+   `AnchorAccountBuilder`, for pre-writing deep account state directly
+   instead of reaching it through the program's own instructions.
 6. **Disclosure templates** — Immunefi / Sherlock / direct-to-protocol
    markdown templates with field-by-field guidance + a worked example
    from solinv's own planted-bug detection.
@@ -171,6 +236,15 @@ declaration as a library:
     Expectations the IDL does not make are kept apart as
     *candidates*: leads to confirm, not facts. See
     [start from your IDL](#start-from-your-idl).
+11. **The checks a change removes** — `solinv diff` compares two
+    versions of a program's source slot by slot (no build): a typed
+    account loosened to `UncheckedAccount`, a signer no longer
+    required, a `seeds` / `address` / `owner` / `has_one` /
+    `constraint` deleted (constraints compared by expression), plus
+    warnings for moved checks, type changes, optional accounts and new
+    unsigned writers. `action.yml` runs it on pull requests with
+    annotations on the line. Design and limits:
+    [`docs/diff.md`](docs/diff.md).
 
 Engine performance is **not** the wedge — solinv runs on Crucible and
 inherits its sBPF coverage and libafl scheduling.
@@ -707,28 +781,32 @@ solinv/
 │   ├── solinv-disclose/   # Divergence findings as checkable evidence
 │   │                      #   (serde+sha2 only, no Crucible/Solana);
 │   │                      #   platform formatters pending
-│   └── solinv-cli/        # `solinv` binary — idl (+ source.rs: declared account
-│                          #   types for --src), mutate, score (+ scaffolds:
+│   └── solinv-cli/        # `solinv` binary — idl, diff (+ source.rs: declared
+│                          #   account types and #[account] constraints; diff.rs:
+│                          #   what a change removes), mutate, score (+ scaffolds:
 │                          #   init, check, fuzz, corpus, disclose)
 ├── examples/
 │   ├── escrow-demo/             # planted-bug acceptance fixture (7 invariants)
+│   │   ├── diff/drop-a-check/   # escrow-clean with one check dropped (diff quickstart)
 │   │   └── idl/                 # IDLs of both programs, for `--features idl_specs`
 │   ├── raydium-amm-fuzz/        # Native production AMM (validated clean)
 │   ├── slumlord-fuzz/           # Native flash-loan (validated clean)
-│   ├── klend-fuzz/              # Anchor 0.29 (depth-gated, unblocks after fork)
-│   ├── sanctum-unstake-fuzz/    # Anchor 0.28 (depth-gated, unblocks after fork)
+│   ├── klend-fuzz/              # Anchor 0.29 (gated on ReserveConfig setup)
+│   ├── sanctum-unstake-fuzz/    # Anchor 0.28 (mainnet binary, init reachable)
 │   ├── targets.phase4.toml      # target-scoring config (10 protocols)
 │   └── target-scoring.example.toml  # config schema reference
 ├── docs/
 │   ├── invariants/                  # per-invariant 8-section specs
 │   │   └── field-schema.md          # named fields + relation invariants
 │   ├── idl-specs.md                 # IDL → spec: facts vs candidates, limits
+│   ├── diff.md                      # what `solinv diff` reports, and its limits
 │   ├── mutation-testing.md          # operator catalog + scoring rationale
 │   ├── differential-equivalence.md  # oracle rationale + report format
 │   ├── disclosure-template-*.md     # Immunefi / Sherlock / generic templates
 │   ├── research-*.md                # research deliverables
 │   ├── harness-pattern-raw-call.md  # reusable Anchor-version-independent harness
 │   └── (implementation logs)        # Day-by-day audit trail of engineering decisions
+├── action.yml                       # GitHub Action: solinv diff on pull requests
 ├── scripts/                         # bandit allocation, metrics, mutation campaigns,
 │                                    #   idl-specs-parity.sh (hand vs IDL specs)
 └── logs/                            # per-campaign fuzz logs (gitignored)
@@ -948,7 +1026,7 @@ thing" drift after a negative result.
 
 ```bash
 cargo check --workspace               # verify scaffold (~5s)
-cargo test  --workspace               # all crates (262 tests)
+cargo test  --workspace               # all crates (272 tests)
 cargo test  -p solinv-core            # invariant regression tests
 cargo test  -p solinv-fuzz            # bytepoke + differential oracle + schema + idl
 cargo test  -p solinv-mutate          # operators + mutants + scoring (no Solana deps)
@@ -963,6 +1041,8 @@ CLI surface:
 ```
 solinv idl <idl.json>                        # account-validation map + unsigned writers
 solinv idl <idl.json> --src <program src>    # + U/T: unchecked vs typed, from source
+solinv diff --base-src <before> --head-src <after>  # checks a change removes; exit 1 if any
+solinv diff … --format github                # the same, as Actions annotations
 solinv idl <idl.json> --rust <ix|all>        # SpecBuilder stub to paste into a fixture
 solinv init                                  # scaffold a solinv harness (not yet implemented)
 solinv check <target>                        # run invariant checks

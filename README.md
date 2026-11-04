@@ -6,8 +6,11 @@ Some of Solana's largest losses came down to one account nobody checked:
 [Cashio](https://halborn.com/explained-the-cashio-hack-march-2022/) (Mar 2022, ~$48M) never
 validated a `mint` field, so a chain of fake accounts passed;
 [Crema](https://halborn.com/explained-the-crema-finance-hack-july-2022/) (Jul 2022, ~$8.8M) let a
-fake tick account past its owner check. In Anchor each of those checks is one type or one
-`#[account(...)]` line, enforced only while it is written down — and a refactor that loosens
+fake tick account past its owner check. Those checks were missing from the start, and spotting a
+check that was never written is a reviewer's job: solinv would not have caught them (we checked
+Cashio's real source, see [#8](https://github.com/psyto/solinv/issues/8)). solinv covers the other
+half: a check that *was* written down and a later change removes. In Anchor that is one type or one
+`#[account(...)]` line, enforced only while it is there — and a refactor that loosens
 `Account<'info, Vault>` to `UncheckedAccount` or deletes a `has_one` fails no test. As more
 programs are written and refactored by AI coding agents, that kind of change gets more common and
 easier to miss: it compiles, the tests the agent wrote pass, and a one-line deletion is easy to skim

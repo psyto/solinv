@@ -140,6 +140,35 @@ fn signer_skip_detect_pair() {
     assert_not_detected();
 }
 
+/// A key that stays signed — it is the fee payer, or signs at another
+/// account — cannot test its slot's signer check (#5).
+#[test]
+fn signer_skip_skips_the_fee_payer() {
+    clear_violation_tracking();
+    let fee_payer = Arc::new(Keypair::new());
+    let to = Pubkey::new_unique();
+    let mut spec = base_transfer_spec(to, vec![fee_payer.clone()]);
+    spec.signer_indices = vec![0];
+    let mut fixture = base_fixture(spec, &[], 1_000_000, fee_payer);
+    signer_skip::check(&mut fixture);
+    assert_not_detected();
+}
+
+#[test]
+fn signer_skip_skips_a_key_that_signs_at_another_account() {
+    clear_violation_tracking();
+    let to = Pubkey::new_unique();
+    let payer = Arc::new(Keypair::new());
+    let from = Arc::new(Keypair::new());
+    let mut spec = base_transfer_spec(to, vec![from.clone()]);
+    spec.accounts.push(solana_instruction::AccountMeta::new_readonly(from.pubkey(), true));
+    spec.signer_indices = vec![0, 2];
+    let from_acct = mk_account(1_000_000, SYSTEM_PROGRAM_ID, Vec::new());
+    let mut fixture = base_fixture(spec, &[(from.pubkey(), from_acct)], 1_000_000, payer);
+    signer_skip::check(&mut fixture);
+    assert_not_detected();
+}
+
 #[test]
 #[ignore = "Needs a purposely vulnerable fixture where swapped accounts still drive state changes"]
 fn owner_skip_detect_pair() {

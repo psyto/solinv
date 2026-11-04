@@ -80,7 +80,7 @@ Pick one instruction from step 2, ideally one with a `U` slot. Most of the time 
    cargo build-sbf          # writes target/deploy/<program>.so
    ```
 
-   If the program is already deployed, fuzzing the deployed binary is usually better: `solana program dump -u m <program id> <program>.so`. Rebuilding a program whose Cargo.lock has solana-program below 1.16 (check it) with current platform-tools made its CPIs fail in our tests with "Access violation … 0xffffffffffffffff", on a real validator too ([why](https://github.com/psyto/solinv/blob/main/docs/phase5-day61-h1-was-the-build.md)).
+   If the program is already deployed, fuzzing the deployed binary is usually better: `solana program dump -u m <program id> <program>.so`. Rebuilding a program whose Cargo.lock has solana-program below 1.16 (check it) with current platform-tools can break its CPIs: in our tests the `init` CPI (System Program `create_account`) failed with "Access violation … 0xffffffffffffffff", on a real validator too ([why](https://github.com/psyto/solinv/blob/main/docs/phase5-day61-h1-was-the-build.md)).
 2. Start the harness from solinv's template: copy `Cargo.toml` and `src/main.rs` from [examples/escrow-demo/fuzz/escrow_clean](https://github.com/psyto/solinv/tree/6ebc1ca651e3/examples/escrow-demo/fuzz/escrow_clean) into `fuzz/<program>/`. Delete its `escrow-clean` dependency and the `use escrow_clean::ID;` line, and point the `solinv-fuzz` / `solinv-core` path dependencies at `{ git = "https://github.com/psyto/solinv", rev = "6ebc1ca651e3" }`.
 3. Print the spec stub and paste it into `instructions()`:
 

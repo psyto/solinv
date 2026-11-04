@@ -65,7 +65,7 @@ permissionless_surface = 0.85
 complexity = 0.90
 audit_maturity = 0.65
 status = "unverified"
-note = "DAMM v2 (MeteoraAg/damm-v2) is Anchor 0.31 + Pinocchio (token ops) on Solana 2.3.13. Day 51 build smoke: BUILDS CLEAN with default cargo-build-sbf (no v1.39 workaround needed, unlike klend/Sanctum/Marinade in 0.27-0.29). Not yet smoked in a harness; Day 61 suggests starting from the mainnet binary."
+note = "DAMM v2 (MeteoraAg/damm-v2) is Anchor 0.31 + Pinocchio (token ops) on Solana 2.3.13. Day 51 build smoke: BUILDS CLEAN with default cargo-build-sbf (no v1.39 workaround needed, unlike our klend and Sanctum builds). Not yet smoked in a harness; Day 61 suggests starting from the mainnet binary."
 
 [[targets]]
 name = "Jito"

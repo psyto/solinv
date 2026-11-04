@@ -130,6 +130,8 @@ Out of scope.
 
 ## Decision implication for Phase 4 §"Stopping rule"
 
+> **Superseded (Day 61):** this section's conclusion (solinv cannot exercise Anchor 0.x programs) is withdrawn. Sanctum's deployed binary runs `init` and later instructions on LiteSVM; klend's gate was an account-list mismatch in its harness. See [phase5-day61-h1-was-the-build.md](phase5-day61-h1-was-the-build.md).
+
 The strict reading of the stopping rule wanted N=2 = 0 violations
 across the attack surface. H1 confirmed makes that *unreachable*
 on Sanctum unstake at the current toolchain — it's not "0 because
@@ -163,6 +165,8 @@ programs at all**. That's a much sharper limitation, and the
 binding pivot decision applies more strongly.
 
 ## Recommendation update
+
+> **Superseded (Day 61):** the premise below ("H1 isn't fixable", "needs upstream changes to Anchor or LiteSVM") is withdrawn; nothing upstream needed to change. See [phase5-day61-h1-was-the-build.md](phase5-day61-h1-was-the-build.md).
 
 Same recommendation as Day 46 §"User decision point — Day 47":
 **option B — pivot binding now**. The A1 dig confirmed H1, and H1

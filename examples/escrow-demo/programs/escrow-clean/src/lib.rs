@@ -142,9 +142,8 @@ pub struct Withdraw<'info> {
         mut,
         seeds = [b"vault", depositor.key().as_ref()],
         bump,
-        has_one = depositor,
     )]
-    pub vault: Account<'info, Vault>,
+    pub vault: UncheckedAccount<'info>,
     #[account(mut)]
     pub depositor: Signer<'info>,
 }

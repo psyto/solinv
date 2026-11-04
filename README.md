@@ -20,6 +20,12 @@ past in a large generated diff.
 program's hand-written account checks are, and fuzzes them with the attack each check exists to
 stop. Apache-2.0.
 
+**Try it without installing:** paste a pull request or a program address into
+[solinv check](https://solinv-check.meowna-server.workers.dev). It runs `solinv diff` in the browser
+(solinv-static built to WebAssembly, at 8bcb011), and for a deployed program it rebuilds the IDL
+from its upgrade history and diffs each upgrade. To fail every pull request in CI, or to fuzz the
+checks, install it (below).
+
 ## Pick a tool
 
 | I want to… | Use |

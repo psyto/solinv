@@ -22,9 +22,9 @@ stop. Apache-2.0.
 
 **Try it without installing:** paste a pull request or a program address into
 [solinv check](https://solinv-check.meowna-server.workers.dev). It runs `solinv diff` in the browser
-(solinv-static built to WebAssembly, at c098640), and for a deployed program it rebuilds the IDL
-from its upgrade history and diffs each upgrade. To fail every pull request in CI, or to fuzz the
-checks, install it (below).
+(solinv-static built to WebAssembly, at c098640), and for a deployed program it reads its IDL
+(Anchor's IDL account, or the Program Metadata program) and, for an Anchor IDL account, diffs every
+upgrade in its history. To fail every pull request in CI, or to fuzz the checks, install it (below).
 
 ## Pick a tool
 
@@ -122,7 +122,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: psyto/solinv@c0986406529e5e245b27cc5abd2e68df587de002
+      - uses: psyto/solinv@b27736a9b816403c4495ce617c0c977ba914d8eb
         with:
           program-src: programs/my_program/src
 ```
@@ -139,15 +139,15 @@ program works too, but each job compiles solinv: they race to save the same cach
 The CLI (not on crates.io yet; pin a commit):
 
 ```bash
-cargo install --git https://github.com/psyto/solinv --rev c0986406529e solinv-cli
+cargo install --git https://github.com/psyto/solinv --rev b27736a9b816 solinv-cli
 ```
 
 In your Crucible fuzz harness:
 
 ```toml
 [dependencies]
-solinv-fuzz = { git = "https://github.com/psyto/solinv", rev = "c0986406529e5e245b27cc5abd2e68df587de002" }
-solinv-core = { git = "https://github.com/psyto/solinv", rev = "c0986406529e5e245b27cc5abd2e68df587de002" }
+solinv-fuzz = { git = "https://github.com/psyto/solinv", rev = "b27736a9b816403c4495ce617c0c977ba914d8eb" }
+solinv-core = { git = "https://github.com/psyto/solinv", rev = "b27736a9b816403c4495ce617c0c977ba914d8eb" }
 crucible-test-context = { git = "https://github.com/asymmetric-research/crucible", tag = "v0.1.0" }
 ```
 ```rust
@@ -194,13 +194,19 @@ All installed from the pins above, the same way as for anyone else:
 | [fabrknt/veil](https://github.com/fabrknt/veil/blob/main/.github/workflows/solinv.yml) | the action on 5 Anchor 0.30 programs, one matrix job each | A throwaway pull request that dropped a `has_one` failed only that program's job, with the annotation on the line ([fabrknt/veil#2](https://github.com/fabrknt/veil/pull/2)) |
 | [psyto/princeps-solana](https://github.com/psyto/princeps-solana/tree/main/fuzz/psol-vault) | a fuzz harness for a native (Pinocchio) vault: signer-skip, owner-skip, account-swap, 3 minutes per pull request | Deleting one check at a time: 6 of 6 caught; 0 findings on the current code. Two of them — the compliance-program pin in `deposit` and `withdraw` — need two accounts swapped together, which `account_swap::check_sets` does ([#4](https://github.com/psyto/solinv/issues/4), [psyto/princeps-solana#3](https://github.com/psyto/princeps-solana/pull/3)) |
 | [psyto/openhl-solana](https://github.com/psyto/openhl-solana/tree/main/fuzz/vault) | a fuzz harness for the native trading vault of the Solana Internals course, Chapter 12, which ends with it as an exercise ([§12.7](https://github.com/psyto/openhl-solana/blob/main/docs/chapter-12-vault/DRAFT.en.md)) | Its first run found a real hole: withdraw did not check that the share belonged to the vault, so shares minted cheaply in one vault drained another. Deleting the 9 account checks one at a time: 5 caught; the other 4 are refused anyway by the runtime's owner rule or by SPL Token, and the chapter explains each |
+| [solinv check](https://solinv-check.meowna-server.workers.dev) | solinv-static (source, diff, idl, idl_diff, legacy) built to WebAssembly from the c098640 pin; `diff_idls` on every upgrade of a program's on-chain IDL | marginfi's IDL (10 versions since 2024-03): 3 of 9 upgrades drop a declared `has_one` (2, 8 and 2 findings); in the source the check moved into a `constraint` that also admits delegated and receivership signers |
 
 What using it ourselves turned up: the `t` mark for typed accounts not tied to the instruction
 ([#3](https://github.com/psyto/solinv/issues/3); in veil it surrounds four real holes the earlier map showed as `T`),
 a signer-skip false positive ([#5](https://github.com/psyto/solinv/issues/5)), matrix jobs that
 race on the action's cache so each one recompiles ([#6](https://github.com/psyto/solinv/issues/6)),
 two setup gaps in the docs ([#7](https://github.com/psyto/solinv/issues/7)), and `check_sets`
-skipping a set whose accounts are missing without saying so ([#13](https://github.com/psyto/solinv/issues/13)). Upstream:
+skipping a set whose accounts are missing without saying so ([#13](https://github.com/psyto/solinv/issues/13)). Building
+solinv check turned up two bugs in `anchor idl convert`'s legacy-IDL conversion — string seeds keep
+their quotes ([otter-sec/anchor#5255](https://github.com/otter-sec/anchor/issues/5255)), and
+`has_one` relations land on the wrong account ([#5256](https://github.com/otter-sec/anchor/issues/5256))
+— and Codex reviewing `idl_diff` against real IDLs found five ways a loosened check could go silent
+or read as a false REMOVED (fixed in ef3bb11). Upstream:
 crucible's `--timeout` overran by 18 minutes in CI ([crucible#25](https://github.com/asymmetric-research/crucible/issues/25)),
 and it exits 0 on findings, so CI has to look for `[FUZZ_FINDING]` itself ([crucible#26](https://github.com/asymmetric-research/crucible/issues/26)).
 

@@ -57,17 +57,43 @@ was gone from `main` until an audit added it back.
   Drift and stakenet titled such changes "allow whitelisted signer", "permissionless …", "Relax
   Constrant". These are intentional; they are what a reviewer should be shown.
 
-## Noise, and what was fixed
+## Noise: how many removals are real
 
-Of 847 removals reported (Drift aside), 563 were declared checks and 284 handler checks. We read
-by hand the 7 removed-then-restored pairs and the 19 signer, `owner` and `close` reports; the rest are not classified one by
-one. Three kinds of false removal came out of that reading and are fixed (35ff76d):
+Of 847 removals reported (Drift aside), 563 were declared checks and 284 handler checks.
+
+**A random sample of 40 declared-check removals** (fixed seed), each read against its diff:
+
+| Reading | Count |
+|---|---|
+| A real loosening, nothing equivalent added | 3 |
+| A loosening the PR says is deliberate ("allow … during pause", "allow delegate …") | 2 |
+| The same check written another way, moved, or a type whose loader now checks it | 29 |
+| The account or instruction restructured (retired placeholder, two accounts merged) | 6 |
+| solinv misread the source | 0 |
+
+So about **1 report in 8 is a real loosening** on real pull requests (5 of 40; with a sample this
+small, anywhere from about 1 in 25 to 1 in 4). The rest are true in the narrow sense — that
+declaration is gone — but the guarantee survives elsewhere. A team putting this in CI should
+expect most failures to be resolved by a reviewer saying "moved", which is what `--no-fail` and
+the warning severity exist for, and what the next round of solinv work should cut down. The
+commonest kinds:
+
+- One relation written three ways: `has_one = f` on the holder, `address = X.load()?.f` on `f`,
+  `constraint = X.load()?.f == f.key()`. Moving between them reads as a removal (11 of 40, often
+  with an account renamed at the same time).
+- A global gate replaced by a per-instruction one on the same account (`is_operational()` →
+  `is_ix_enabled(IxGate::…)`; 5 of 40).
+- A typed account made `UncheckedAccount` with its owner, discriminator and field checks moved
+  into a function the handler calls (orca's sparse swap; 5 of 40).
+- An account retired as a `/// CHECK: Deprecated … kept for compatibility` placeholder (5 of 40).
+
+Two kinds of false removal found while reading are fixed:
 
 - `#[account(signer)] AccountInfo` → `init` (no seeds) kept its signature: Anchor makes a non-PDA
-  `init` account sign (Marinade's anchor-0.27 upgrade).
-- `owner` / `seeds` replaced by an `address`, or the reverse, is now a warning (stakenet).
-- `x::id()` and `x::ID` compare as the same (cp-swap's anchor-0.31 upgrade).
+  `init` / `init_if_needed` account sign (Marinade's anchor-0.27 upgrade).
+- `owner` / `seeds` replaced by an `address` built from another account or a constant, or the
+  reverse, is now a warning (stakenet's `address = get_validator_list(&config)?`). An address the
+  caller passes, or a typed account in place of `owner`, is still a removal.
 
-Kinds still reported as removals, as designed: a constraint rewritten into an equivalent or
-stronger expression (raydium-clmm strengthened one), a check moved into a helper function the
-handler calls, and conditions rewritten in the handler.
+`x::id()` rewritten as `x::ID` (cp-swap's anchor-0.31 upgrade) is still a removal: Rust does not
+make the two the same.

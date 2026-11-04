@@ -43,6 +43,8 @@ pub struct Attrs {
     /// `init` (not `init_if_needed`, which also accepts an existing
     /// account): the account is created here.
     pub init: bool,
+    /// `init_if_needed`: like `init`, a non-PDA one must sign.
+    pub init_if_needed: bool,
     /// `associated_token::authority`: the account is the one associated
     /// token account of that authority and mint. `token::authority` and
     /// `token::mint` are not: one authority can own many token accounts.
@@ -561,7 +563,11 @@ fn read_attrs(text: &str, expr: &str) -> Attrs {
                 a.mutable = true;
                 a.init = true;
             }
-            ("mut" | "init_if_needed", _) => a.mutable = true,
+            ("init_if_needed", _) => {
+                a.mutable = true;
+                a.init_if_needed = true;
+            }
+            ("mut", _) => a.mutable = true,
             ("signer", _) => a.signer = true,
             ("seeds", Some(_)) => a.seeds = true,
             ("address", Some(_)) => a.address = true,
@@ -641,8 +647,7 @@ fn account_items(text: &str) -> Vec<std::ops::Range<usize>> {
 /// the same bytes with literals blanked and finds the `@`, so an `@` or
 /// bracket inside a string is part of the expression.
 fn normalise_expr(blanked: &str, v: &str) -> String {
-    // `x::id()` and `x::ID` name the same program id.
-    v[..error_cut(blanked)].split_whitespace().collect::<Vec<_>>().join(" ").replace("::id()", "::ID")
+    v[..error_cut(blanked)].split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// The clauses every passing evaluation of `v` must satisfy: `v` split
@@ -854,7 +859,7 @@ fn read_body(blanked: &str, expr: &str) -> Vec<BodyCheck> {
     };
     let norm = |t: &str| -> String {
         let t: String = t.chars().filter(|c| !c.is_whitespace()).collect();
-        commuted(&t.replace("ctx.accounts.", "").replace("::id()", "::ID"))
+        commuted(&t.replace("ctx.accounts.", ""))
     };
     let check = |text: String, src: &str, ties: bool| BodyCheck {
         refs: account

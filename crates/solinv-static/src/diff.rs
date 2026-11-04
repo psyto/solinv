@@ -174,27 +174,34 @@ pub fn diff(base: &SourceKinds, head: &SourceKinds) -> Vec<Change> {
             );
         }
         let (ba, ha) = (&b.attrs, &h.attrs);
-        // `seeds` and `address` each fix the account; one replacing the
-        // other is a change to look at, not a check gone. `owner` is
-        // implied by a fixed address or a typed account.
-        let typed_now = b.kind != Some(SlotKind::Typed) && h.kind == Some(SlotKind::Typed);
+        // `seeds` and `address` each fix the account, when built from other
+        // accounts or constants rather than an instruction argument: one
+        // replacing the other is a change to look at, not a check gone.
+        // `owner` is implied by such a fixed address.
+        let slot_or_const = |names: &[String]| {
+            names.iter().any(|n| n == "::" || head.slot(ix, &sibling(path, n)).is_some_and(|_| sibling(path, n) != *path))
+        };
+        let fixed_address = ha.address && !ba.address && slot_or_const(&ha.address_names);
+        let fixed_seeds = ha.seeds
+            && !ba.seeds
+            && (ha.seed_names.iter().all(|n| n == "::") || slot_or_const(&ha.seed_names));
         if ba.seeds && !ha.seeds {
-            match ha.address && !ba.address {
+            match fixed_address {
                 true => push(Severity::Warning, "`seeds` replaced by `address`: confirm it names the same account".into()),
                 false => push(Severity::Regression, "`seeds` constraint removed: any address is accepted".into()),
             }
         }
         if ba.address && !ha.address {
-            match ha.seeds && !ba.seeds {
+            match fixed_seeds {
                 true => push(Severity::Warning, "`address` replaced by `seeds`: confirm it names the same account".into()),
                 false => push(Severity::Regression, "`address` constraint removed".into()),
             }
         }
         if ba.owner && !ha.owner {
-            match (ha.address && !ba.address) || typed_now {
+            match fixed_address {
                 true => push(
                     Severity::Warning,
-                    "`owner` constraint replaced by a fixed address or a typed account: confirm the owner is still the one expected".into(),
+                    "`owner` constraint replaced by a fixed address: confirm that account has the owner expected".into(),
                 ),
                 false => push(Severity::Regression, "`owner` constraint removed".into()),
             }
@@ -423,12 +430,18 @@ fn checks_of(s: &Slot) -> Vec<String> {
     c
 }
 
+/// `n` as named in an attribute of the slot at `path`: a sibling.
+fn sibling(path: &str, n: &str) -> String {
+    format!("{}{n}", path.rfind('.').map_or("", |i| &path[..=i]))
+}
+
 /// Required to sign: an `Option<Signer>` may be left out, so it does not.
-/// A non-PDA `init` account signs too: Anchor adds the signer constraint,
+/// A non-PDA `init` / `init_if_needed` account signs too: Anchor adds the signer constraint,
 /// since it is created at a fresh keypair's address.
 fn signs(s: &Slot) -> bool {
     let a = &s.attrs;
-    (s.ty == "Signer" || a.signer || (a.init && !a.seeds && !a.token_authority)) && !s.optional
+    (s.ty == "Signer" || a.signer || ((a.init || a.init_if_needed) && !a.seeds && !a.token_authority))
+        && !s.optional
 }
 
 fn label(s: &Slot) -> String {
@@ -1008,6 +1021,9 @@ pub struct Split<'info> {
             "#[account(init, payer = payer, space = 200)]\n    pub split_stake: Account<'info, StakeAccount>",
         );
         assert!(!diff(&kinds(base), &kinds(&init)).iter().any(|c| c.message.contains("sign")));
+        let gone = init.replace("#[account(init, payer = payer, space = 200)]\n    pub split_stake: Account<'info, StakeAccount>", "pub split_stake: AccountInfo<'info>");
+        let if_needed = init.replace("init, payer", "init_if_needed, payer");
+        assert!(diff(&kinds(&if_needed), &kinds(&gone)).iter().any(|c| c.message.contains("no longer required to sign")));
         let pda = init.replace("init, payer", "init, seeds = [b\"s\"], bump, payer");
         assert!(diff(&kinds(base), &kinds(&pda)).iter().any(|c| c.message.contains("no longer required to sign")));
     }
@@ -1026,6 +1042,7 @@ pub struct Act<'info> {
     pub vault: Account<'info, Vault>,
     #[account(constraint = owner.key() == crate::admin::id())]
     pub owner: Signer<'info>,
+    pub config: Account<'info, Config>,
 }
 "#;
         let head = base
@@ -1033,7 +1050,17 @@ pub struct Act<'info> {
             .replace("seeds = [b\"v\"], bump", "address = VAULT")
             .replace("crate::admin::id()", "crate::admin::ID");
         let c = diff(&kinds(base), &kinds(&head));
-        assert!(c.iter().all(|c| c.severity == Severity::Warning), "{c:?}");
-        assert_eq!(c.len(), 2, "id() vs ID is no change: {c:?}");
+        let warn = |c: &[Change], slot: &str| c.iter().any(|c| c.slot() == slot && c.severity == Severity::Warning);
+        assert!(warn(&c, "act.list") && warn(&c, "act.vault"), "{c:?}");
+        // Rust does not make `id()` and `ID` the same: still a change.
+        assert!(c.iter().any(|c| c.slot() == "act.owner" && c.severity == Severity::Regression), "{c:?}");
+
+        // An address the caller passes, or a typed account in place of
+        // `owner`, fixes nothing: removals.
+        let arg = base.replace("seeds = [b\"v\"], bump", "address = target");
+        assert!(diff(&kinds(base), &kinds(&arg)).iter().any(|c| c.slot() == "act.vault" && c.severity == Severity::Regression));
+        let typed = base
+            .replace("#[account(owner = spl_stake_pool::id())]\n    pub list: AccountInfo<'info>", "pub list: Account<'info, Local>");
+        assert!(diff(&kinds(base), &kinds(&typed)).iter().any(|c| c.slot() == "act.list" && c.severity == Severity::Regression));
     }
 }

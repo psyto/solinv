@@ -108,7 +108,7 @@ jobs:
   account-checks:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: psyto/solinv@f5267c8f23c3b21bc8f2b54308bcbd52824da806
         with:
           program-src: programs/my_program/src
@@ -118,6 +118,10 @@ It installs solinv at that commit, compares the program's source with the pull r
 and fails the job when a check is removed. The first run compiles solinv (about 2 minutes on
 `ubuntu-latest` for the demo pull request); later runs restore it from the cache (the whole job took 7 seconds on a re-run). No Solana
 toolchain, no build of your program.
+
+Several programs in one repository: give `program-src` one path per line. One job then installs
+solinv once and compares each program in turn, failing if any lost a check. A matrix with a job per
+program works too, but each job compiles solinv: they race to save the same cache entry.
 
 The CLI (not on crates.io yet; pin a commit):
 
@@ -148,6 +152,19 @@ let spec = Idl::from_json(include_str!("../idl/my_program.json"))?
 Return the specs from `HasInstructionSet::instructions()` and call the detectors from an
 `#[invariant_test]`, e.g. `solinv_core::invariants::signer_skip::check(fixture)`. Full walk-through:
 [start from your IDL](#start-from-your-idl) and [integration](#integration--adopting-solinv-on-your-own-program).
+
+To fail CI on a finding, read the log, not the exit code: `crucible run` exits 0 when it reports one
+([crucible#26](https://github.com/asymmetric-research/crucible/issues/26)), and checks `--timeout` only
+every 1000 iterations ([crucible#25](https://github.com/asymmetric-research/crucible/issues/25)).
+
+```bash
+timeout -s INT -k 30 180 crucible run <program> invariant_all \
+    --binary-in target/release/invariant_test --timeout 180 > fuzz.log 2>&1 || true
+if grep '^\[FUZZ_FINDING\] \[' fuzz.log; then exit 1; fi   # solinv's findings start `[<detector>:…]`
+```
+
+[princeps-solana's workflow](https://github.com/psyto/princeps-solana/blob/main/.github/workflows/fuzz-vault.yml)
+is a complete example, separating a crash of `crucible` itself from the timeout.
 Both install lines above were checked from GitHub at that rev, not from a local clone.
 
 Trying it on a program of your own for the first time? [`docs/try-solinv.md`](docs/try-solinv.md) is a
@@ -848,7 +865,11 @@ Reads the Anchor 0.30+ IDL format. A legacy (pre-0.30) IDL is rejected
 with the fix: convert it with
 `anchor idl convert <path> -p <program id> -o <out>` (`-p` is needed
 when the IDL has no `metadata.address`; klend's does not). Shank IDLs
-from native programs are not supported. `solinv idl` needs no fixture. It lists every
+from native programs are not supported. Building an IDL on Anchor 0.30
+with current Rust needs a `proc-macro2` pin
+([anchor#3661](https://github.com/otter-sec/anchor/issues/3661)); the
+steps are in [`docs/try-solinv.md`](docs/try-solinv.md#step-2--map-your-program-about-5-minutes).
+`solinv idl` needs no fixture. It lists every
 instruction's slots as the IDL declares them and names the instructions
 with **no signer that write a slot the IDL leaves unconstrained** —
 either deliberately permissionless, or missing an authority check. On

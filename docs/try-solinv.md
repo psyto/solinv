@@ -41,6 +41,15 @@ solinv idl target/idl/<program>.json --src programs/<program>/src
 
 If you would rather not build, an IDL already in the repo works too, but it may lack PDA seeds and fixed addresses if it was generated without resolution.
 
+On Anchor 0.30, building the IDL with current Rust fails in `anchor-syn` with `no method named source_file found for struct proc_macro2::Span` ([anchor#3661](https://github.com/otter-sec/anchor/issues/3661); fixed in 0.31.1). What worked for us on 0.30.1, from the workspace root:
+
+```bash
+cargo update -p proc-macro2 --precise 1.0.94
+cd programs/<program> && RUSTUP_TOOLCHAIN=nightly-2025-04-15 anchor idl build -o ../../target/idl/<program>.json
+```
+
+If the program uses token accounts, its `idl-build` feature also needs `anchor-spl/idl-build`.
+
 How to read it (an excerpt from solinv's own planted-bug demo):
 
 ```
@@ -95,6 +104,8 @@ Pick one instruction from step 2, ideally one with a `U` slot. Most of the time 
    cargo build --release --features invariant_all
    crucible run <program> invariant_all --binary-in target/release/invariant_test --timeout 60
    ```
+
+`crucible run` exits 0 even when it reports a finding ([crucible#26](https://github.com/asymmetric-research/crucible/issues/26)), so look for lines starting `[FUZZ_FINDING] [` — solinv's detectors start their message with `[<detector>:…]` — rather than at the exit code. It also checks `--timeout` only every 1000 iterations, so a slow harness can run well past it ([crucible#25](https://github.com/asymmetric-research/crucible/issues/25)); `timeout 90 crucible run …` stops it from outside.
 
 Reading the result: 0 findings is the usual answer for audited code, but only counts if the untampered instruction succeeds — send it once from `setup()` and check. Lines starting `[SOLINV_CANDIDATES]` name checks solinv inferred from your fixture's state; a finding on one of those is a lead to confirm against what the program intends, not a confirmed bug. The [README](https://github.com/psyto/solinv#start-from-your-idl) walks through each piece.
 

@@ -213,9 +213,37 @@ pub fn render_text(changes: &[Change]) -> String {
             Severity::Regression => "REMOVED",
             Severity::Warning => "WARNING",
         };
-        out += &format!("{tag} {}.{} ({}:{}): {}\n", c.ix, c.path, c.file, c.line, c.message);
+        let at = if c.file.is_empty() { String::new() } else { format!(" ({}:{})", c.file, c.line) };
+        out += &format!("{tag} {}{at}: {}\n", c.slot(), c.message);
     }
     out
+}
+
+impl Change {
+    /// `ix.path`, or `ix` for a change to the instruction as a whole.
+    pub fn slot(&self) -> String {
+        if self.path.is_empty() {
+            self.ix.clone()
+        } else {
+            format!("{}.{}", self.ix, self.path)
+        }
+    }
+
+    /// `{severity, ix, path, message, file, line}`; `file` is `""` and
+    /// `line` 0 for a change read from an IDL.
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "severity": match self.severity {
+                Severity::Regression => "regression",
+                Severity::Warning => "warning",
+            },
+            "ix": self.ix,
+            "path": self.path,
+            "message": self.message,
+            "file": self.file,
+            "line": self.line,
+        })
+    }
 }
 
 /// GitHub Actions workflow commands: each change becomes an annotation on
@@ -227,11 +255,15 @@ pub fn render_github(changes: &[Change]) -> String {
             Severity::Regression => "error",
             Severity::Warning => "warning",
         };
+        // A change read from an IDL has no line to point at.
+        let at = if c.file.is_empty() {
+            String::new()
+        } else {
+            format!("file={},line={},", escape_property(&c.file), c.line)
+        };
         out += &format!(
-            "::{level} file={},line={},title={}::{}\n",
-            escape_property(&c.file),
-            c.line,
-            escape_property(&format!("solinv: {}.{}", c.ix, c.path)),
+            "::{level} {at}title={}::{}\n",
+            escape_property(&format!("solinv: {}", c.slot())),
             escape(&c.message)
         );
     }

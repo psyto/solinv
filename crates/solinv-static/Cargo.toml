@@ -10,6 +10,10 @@ publish = false
 # No Solana or Crucible types, so this builds for wasm32 (the browser check).
 [dependencies]
 anyhow.workspace = true
+# Legacy IDL names, as `anchor idl convert` snake_cases them.
+heck = "0.5"
 regex = "1"
 serde.workspace = true
 serde_json.workspace = true
+# Legacy IDL discriminators: sha256("global:<ix>")[..8].
+sha2 = "0.10"

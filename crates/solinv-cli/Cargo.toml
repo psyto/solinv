@@ -16,8 +16,6 @@ clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true
-# `solinv idl --src`: declared account types read from program source
-regex = "1"
 solinv-core = { path = "../solinv-core" }
 solinv-fuzz = { path = "../solinv-fuzz" }
 solinv-static = { path = "../solinv-static" }

@@ -69,6 +69,9 @@ pub struct IdlAccount {
     pub address: Option<String>,
     #[serde(default)]
     pub pda: Option<IdlPda>,
+    /// `has_one` targets, by slot name.
+    #[serde(default)]
+    pub relations: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -308,6 +311,31 @@ impl Idl {
         serde_json::from_str(json).map_err(|e| IdlError::Parse(Self::diagnose(json, e)))
     }
 
+    /// Like [`Idl::from_json`], and also reads a legacy (pre-0.30) IDL by
+    /// converting it the way `anchor idl convert` does (see
+    /// [`crate::legacy`]). The flag says which format it was.
+    pub fn from_json_any(json: &str) -> Result<(Self, bool), IdlError> {
+        match Self::from_json(json) {
+            Ok(idl) => Ok((idl, false)),
+            Err(e) => {
+                let raw: Option<serde_json::Value> = serde_json::from_str(json).ok();
+                let first = |key: &str| raw.as_ref().and_then(|r| r.get(key)).and_then(|v| v.get(0));
+                // Legacy entries carry no discriminator; Shank instructions carry a
+                // `discriminant`. An IDL with no instructions is told by its accounts.
+                let legacy = match first("instructions") {
+                    Some(ix) => ix.get("discriminator").is_none() && ix.get("discriminant").is_none(),
+                    None => first("accounts").is_some_and(|a| a.get("discriminator").is_none()),
+                };
+                if !legacy {
+                    return Err(e);
+                }
+                crate::legacy::convert(json)
+                    .map(|idl| (idl, true))
+                    .map_err(|e| IdlError::Parse(format!("legacy (pre-0.30) Anchor IDL: {e}")))
+            }
+        }
+    }
+
     /// Name the two formats that most often fail to parse, with the fix.
     fn diagnose(json: &str, err: serde_json::Error) -> String {
         let raw: serde_json::Value = match serde_json::from_str(json) {
@@ -389,7 +417,10 @@ impl IdlInstruction {
     /// A `SpecBuilder` call chain for this instruction with every binding
     /// left as a `todo!`, for pasting into a fixture.
     pub fn rust_bindings(&self) -> String {
-        let mut out = format!("idl.spec(\"{}\", program_id)?\n", self.name);
+        let mut out = format!(
+            "// use solinv_fuzz::IdlSpecExt; (or solinv_fuzz::prelude::*) for .spec\nidl.spec(\"{}\", program_id)?\n",
+            self.name
+        );
         let unsigned = self.is_unsigned_writer();
         for flat in self.flat_accounts() {
             let (a, path) = (flat.account, flat.path());

@@ -174,14 +174,30 @@ pub fn diff(base: &SourceKinds, head: &SourceKinds) -> Vec<Change> {
             );
         }
         let (ba, ha) = (&b.attrs, &h.attrs);
+        // `seeds` and `address` each fix the account; one replacing the
+        // other is a change to look at, not a check gone. `owner` is
+        // implied by a fixed address or a typed account.
+        let typed_now = b.kind != Some(SlotKind::Typed) && h.kind == Some(SlotKind::Typed);
         if ba.seeds && !ha.seeds {
-            push(Severity::Regression, "`seeds` constraint removed: any address is accepted".into());
+            match ha.address && !ba.address {
+                true => push(Severity::Warning, "`seeds` replaced by `address`: confirm it names the same account".into()),
+                false => push(Severity::Regression, "`seeds` constraint removed: any address is accepted".into()),
+            }
         }
         if ba.address && !ha.address {
-            push(Severity::Regression, "`address` constraint removed".into());
+            match ha.seeds && !ba.seeds {
+                true => push(Severity::Warning, "`address` replaced by `seeds`: confirm it names the same account".into()),
+                false => push(Severity::Regression, "`address` constraint removed".into()),
+            }
         }
         if ba.owner && !ha.owner {
-            push(Severity::Regression, "`owner` constraint removed".into());
+            match (ha.address && !ba.address) || typed_now {
+                true => push(
+                    Severity::Warning,
+                    "`owner` constraint replaced by a fixed address or a typed account: confirm the owner is still the one expected".into(),
+                ),
+                false => push(Severity::Regression, "`owner` constraint removed".into()),
+            }
         }
         for target in ba.has_one.iter().filter(|t| !ha.has_one.contains(t)) {
             match siblings.iter().find(|(_, s)| s.attrs.has_one.contains(target)) {
@@ -408,8 +424,11 @@ fn checks_of(s: &Slot) -> Vec<String> {
 }
 
 /// Required to sign: an `Option<Signer>` may be left out, so it does not.
+/// A non-PDA `init` account signs too: Anchor adds the signer constraint,
+/// since it is created at a fresh keypair's address.
 fn signs(s: &Slot) -> bool {
-    (s.ty == "Signer" || s.attrs.signer) && !s.optional
+    let a = &s.attrs;
+    (s.ty == "Signer" || a.signer || (a.init && !a.seeds && !a.token_authority)) && !s.optional
 }
 
 fn label(s: &Slot) -> String {
@@ -968,5 +987,53 @@ pub struct Act<'info> {
             .replace("    pub config: Account<'info, Config>,", "    #[account(constraint = config.paused == false)]\n    pub config: Account<'info, Config>,");
         let c = same(&unrelated);
         assert!(c.len() == 1 && c[0].severity == Severity::Regression && c[0].slot() == "act", "{c:?}");
+    }
+
+    /// Marinade's anchor-0.27 upgrade: `#[account(signer)] AccountInfo`
+    /// became an `init` account, which Anchor makes sign anyway.
+    #[test]
+    fn a_non_pda_init_account_still_signs() {
+        let base = r#"
+pub fn split(ctx: Context<Split>) -> Result<()> {}
+#[derive(Accounts)]
+pub struct Split<'info> {
+    #[account(signer, mut)]
+    pub split_stake: AccountInfo<'info>,
+    #[account(mut)]
+    pub payer: Signer<'info>,
+}
+"#;
+        let init = base.replace(
+            "#[account(signer, mut)]\n    pub split_stake: AccountInfo<'info>",
+            "#[account(init, payer = payer, space = 200)]\n    pub split_stake: Account<'info, StakeAccount>",
+        );
+        assert!(!diff(&kinds(base), &kinds(&init)).iter().any(|c| c.message.contains("sign")));
+        let pda = init.replace("init, payer", "init, seeds = [b\"s\"], bump, payer");
+        assert!(diff(&kinds(base), &kinds(&pda)).iter().any(|c| c.message.contains("no longer required to sign")));
+    }
+
+    /// Seen in real histories: equivalent or stronger rewrites of a
+    /// declared check are warnings, not removals.
+    #[test]
+    fn replaced_declared_checks_and_id_spellings() {
+        let base = r#"
+pub fn act(ctx: Context<Act>) -> Result<()> {}
+#[derive(Accounts)]
+pub struct Act<'info> {
+    #[account(owner = spl_stake_pool::id())]
+    pub list: AccountInfo<'info>,
+    #[account(seeds = [b"v"], bump)]
+    pub vault: Account<'info, Vault>,
+    #[account(constraint = owner.key() == crate::admin::id())]
+    pub owner: Signer<'info>,
+}
+"#;
+        let head = base
+            .replace("owner = spl_stake_pool::id()", "address = get_validator_list(&config)?")
+            .replace("seeds = [b\"v\"], bump", "address = VAULT")
+            .replace("crate::admin::id()", "crate::admin::ID");
+        let c = diff(&kinds(base), &kinds(&head));
+        assert!(c.iter().all(|c| c.severity == Severity::Warning), "{c:?}");
+        assert_eq!(c.len(), 2, "id() vs ID is no change: {c:?}");
     }
 }

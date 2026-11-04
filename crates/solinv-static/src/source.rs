@@ -641,7 +641,8 @@ fn account_items(text: &str) -> Vec<std::ops::Range<usize>> {
 /// the same bytes with literals blanked and finds the `@`, so an `@` or
 /// bracket inside a string is part of the expression.
 fn normalise_expr(blanked: &str, v: &str) -> String {
-    v[..error_cut(blanked)].split_whitespace().collect::<Vec<_>>().join(" ")
+    // `x::id()` and `x::ID` name the same program id.
+    v[..error_cut(blanked)].split_whitespace().collect::<Vec<_>>().join(" ").replace("::id()", "::ID")
 }
 
 /// The clauses every passing evaluation of `v` must satisfy: `v` split
@@ -853,7 +854,7 @@ fn read_body(blanked: &str, expr: &str) -> Vec<BodyCheck> {
     };
     let norm = |t: &str| -> String {
         let t: String = t.chars().filter(|c| !c.is_whitespace()).collect();
-        commuted(&t.replace("ctx.accounts.", ""))
+        commuted(&t.replace("ctx.accounts.", "").replace("::id()", "::ID"))
     };
     let check = |text: String, src: &str, ties: bool| BodyCheck {
         refs: account

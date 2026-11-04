@@ -1,5 +1,7 @@
 # Phase 5 Day 55 — toolchain fork: setup + first experiment
 
+> **Correction (2026-11-04):** the H1 diagnosis below is wrong. The failure came from building an old solana-program (1.14) with new platform-tools, not from LiteSVM; the mainnet binary runs fine. See [phase5-day61-h1-was-the-build.md](phase5-day61-h1-was-the-build.md).
+
 Date: 2026-05-28
 Phase: 2.5 (OSS audit-accelerator), toolchain fork stage (Day 55-68 plan)
 Goal: resolve the Anchor 0.x ↔ LiteSVM 0.9.1 H1 ABI mismatch

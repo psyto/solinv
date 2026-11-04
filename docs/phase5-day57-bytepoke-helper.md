@@ -1,5 +1,7 @@
 # Phase 5 Day 57 — bytepoke helper API in solinv-fuzz (toolchain-fork pivot)
 
+> **Correction (2026-11-04):** the H1 diagnosis below is wrong. The failure came from building an old solana-program (1.14) with new platform-tools, not from LiteSVM; the mainnet binary runs fine. See [phase5-day61-h1-was-the-build.md](phase5-day61-h1-was-the-build.md).
+
 Date: 2026-06-09
 Prior: [phase5-day56-gateA-result.md](phase5-day56-gateA-result.md)
 Decision (Day 57): **Path 1 (byte-poke helper) over Path 2 (LiteSVM

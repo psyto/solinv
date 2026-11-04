@@ -21,20 +21,19 @@ combined with Slumlord N=1's clean negative.
 
 ## External program dependency
 
-```bash
-git clone https://github.com/igneous-labs/sanctum-unstake-program.git \
-    ~/src/sanctum-unstake-program
+Use the binary Sanctum deployed on mainnet:
 
-cd ~/src/sanctum-unstake-program/programs/unstake
-SDKROOT=$(xcrun --show-sdk-path) \
-CFLAGS="-isysroot $(xcrun --show-sdk-path)" \
-cargo build-sbf --tools-version v1.39
+```bash
+solana program dump -u m unpXTU2Ndrc7WWNyEhQWe4udTzSibLPi25SXv2xbCHQ unstake.so
+export SANCTUM_UNSTAKE_SO=$PWD/unstake.so
 ```
 
-Produces `~/src/sanctum-unstake-program/target/deploy/unstake.so`
-(~753KB). Same `SDKROOT + platform-tools v1.39` incantation as
-klend Day 17 / Slumlord Day 40 — confirmed reproducible against
-Anchor 0.28 in addition to Native + Anchor 0.29.
+Don't rebuild it from source with current platform-tools. The program
+locks solana-program 1.14.20, whose `AccountInfo` isn't `repr(C)`;
+built with rustc ≥ 1.68 (platform-tools ≥ v1.37) every CPI faults with
+"Access violation … 0xffffffffffffffff", on a real validator too. That
+was the "H1" gate of Days 46–57 — see
+[`docs/phase5-day61-h1-was-the-build.md`](../../docs/phase5-day61-h1-was-the-build.md).
 
 ## Layout
 
@@ -98,3 +97,8 @@ crucible run sanctum_unstake invariant_sanctum_unstake_smoke --release --timeout
 successfully. 0% edge coverage (no real attack surface yet) —
 confirms the skeleton compiles and runs, gates Day 46 work on
 actual InstructionSpec wiring.
+
+Day 61 (2026-11-04), mainnet binary: `setup()` asserts that
+`init_protocol_fee` and `create_pool` both succeed. 10 s smoke:
+0 crashes, 2.8% edges (was 1.4% against the local build), `set_fee`
+reaching Ok.

@@ -1,5 +1,7 @@
 # Phase 5 Day 56 — Gate A result: H1 is CPI-during-init bounded, NOT fundamental
 
+> **Correction (2026-11-04):** the H1 diagnosis below is wrong. The failure came from building an old solana-program (1.14) with new platform-tools, not from LiteSVM; the mainnet binary runs fine. See [phase5-day61-h1-was-the-build.md](phase5-day61-h1-was-the-build.md).
+
 Date: 2026-05-28
 Prior: [phase5-day55-toolchain-fork-setup.md](phase5-day55-toolchain-fork-setup.md)
 Gate A goal: discriminate H1b (fundamental account-layout ABI) vs

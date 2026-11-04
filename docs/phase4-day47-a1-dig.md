@@ -1,5 +1,7 @@
 # Phase 4 Day 47 — A1 dig: SPL Token CPI gate diagnosis
 
+> **Correction (2026-11-04):** the H1 diagnosis below is wrong. The failure came from building an old solana-program (1.14) with new platform-tools, not from LiteSVM; the mainnet binary runs fine. See [phase5-day61-h1-was-the-build.md](phase5-day61-h1-was-the-build.md).
+
 Date: 2026-05-26
 Prior: [phase4-day46-sanctum-unstake-depth-gated.md](phase4-day46-sanctum-unstake-depth-gated.md)
 User pick (Day 47): A1 — dig into the SPL Token CPI gate before

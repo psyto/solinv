@@ -746,22 +746,21 @@ program execution. Different program classes have different reachability:
 | Native (any `solana-program` 1.16+) | ✅ works | Raydium AMM, Slumlord, Save (ex-Solend), Jito restaking |
 | Anchor 1.0+ | ✅ works | escrow-demo |
 | Anchor 0.31 + Solana 2.x | ⚠️ builds clean, runtime untested | Meteora DAMM v2, Jito workspace SDK |
-| Anchor 0.27-0.29 | ⛔ runtime depth-gated (H1 ABI mismatch) | klend, Sanctum unstake, Marinade |
+| Anchor 0.28 | ✅ `init` and later instructions run with the deployed binary (`solana program dump`). A local build on solana-program < 1.16 faulted on CPI with platform-tools v1.37/v1.39, on a real validator too | Sanctum unstake |
+| Anchor 0.27, 0.29 | ⚠️ untested with the deployed binary (klend's harness targets its source build) | klend |
 | Pre-Anchor / `solana-program 1.10` | ⛔ build-gated (toolchain too old) | Wormhole bridge |
 
-**Byte-poke pattern unblocks Anchor 0.x post-init reachability**
-without requiring a LiteSVM fork. The `solinv-fuzz::bytepoke` module
-provides reusable Anchor discriminator + sighash helpers + byte-offset
-writers + an `AnchorAccountBuilder`. Adopting solinv on a
-depth-gated Anchor 0.x program: pre-write the target accounts via
-the byte-poke API (skipping the broken init→CPI path), then fuzz
-the post-init attack surface directly. The klend (Anchor 0.29) and
-sanctum-unstake (Anchor 0.28) example harnesses demonstrate the
-pattern. See
-[`docs/phase4-day47-a1-dig.md`](docs/phase4-day47-a1-dig.md) for the
-H1 diagnosis and
-[`docs/phase5-day57-bytepoke-helper.md`](docs/phase5-day57-bytepoke-helper.md)
-for the helper API + usage.
+**Fuzz the binary the protocol deployed.** `solana program dump -u m <program id> out.so`
+gets it. An earlier diagnosis blamed LiteSVM for Anchor 0.x `init` failures; the
+real cause was rebuilding a solana-program 1.14 program with new platform-tools
+(see [`docs/phase5-day61-h1-was-the-build.md`](docs/phase5-day61-h1-was-the-build.md)).
+
+The `solinv-fuzz::bytepoke` module (Anchor discriminator + sighash helpers,
+byte-offset writers, `AnchorAccountBuilder`) is still there for pre-writing deep
+state directly instead of reaching it through the program's own instructions.
+The klend example uses it.
+See [`docs/phase5-day57-bytepoke-helper.md`](docs/phase5-day57-bytepoke-helper.md)
+for the helper API.
 
 ## Architecture
 
@@ -791,7 +790,7 @@ solinv/
 │   │   └── idl/                 # IDLs of both programs, for `--features idl_specs`
 │   ├── raydium-amm-fuzz/        # Native production AMM (validated clean)
 │   ├── slumlord-fuzz/           # Native flash-loan (validated clean)
-│   ├── klend-fuzz/              # Anchor 0.29 (gated on ReserveConfig setup)
+│   ├── klend-fuzz/              # Anchor 0.29 (source build; ReserveConfig setup incomplete)
 │   ├── sanctum-unstake-fuzz/    # Anchor 0.28 (mainnet binary, init reachable)
 │   ├── targets.phase4.toml      # target-scoring config (10 protocols)
 │   └── target-scoring.example.toml  # config schema reference

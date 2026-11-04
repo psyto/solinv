@@ -546,11 +546,18 @@ impl KlendFixture {
             reserve_collateral_supply,
             user_source_liquidity,
         );
-        ctx.raw_call(init_ix)
+        let outcome = ctx
+            .raw_call(init_ix)
             .fee_payer(&*fee_payer)
             .signers(&[&*user])
             .send()
-            .expect("init_reserve failed — check is_allowed_signer + PDA setup");
+            .expect("init_reserve send");
+        // send() is Ok even when the program fails; check the outcome so a
+        // failed init_reserve stops here instead of fuzzing a missing Reserve.
+        assert!(
+            outcome.is_success(),
+            "init_reserve failed — check is_allowed_signer + PDA setup: {outcome:?}"
+        );
 
         // ---------- Day 27: post-init ReserveConfig byte-poke ----------
         // init_reserve sets status=Hidden (=2) + deposit_limit=0 by Kamino
@@ -751,6 +758,7 @@ impl HasInstructionSet for KlendFixture {
             signers: vec![Arc::clone(&self.user)],
             state_invariants: vec![],
             cu_budget: None,
+            guards: vec![],
             cpi_reentrancy: None,
             realloc_check: None,
             bump_seed_check: None,            };

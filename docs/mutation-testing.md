@@ -34,7 +34,9 @@ null result which the current data cannot separate:
   exactly this list
 - **the targets are unrepresentative** — n=3, all native, all
   high-profile; the thinner tail (Anchor 0.27–0.29: klend, Sanctum,
-  Marinade) is depth-gated and untested
+  Marinade) is untested (it was thought depth-gated by LiteSVM; that
+  turned out to be our local builds — see
+  [phase5-day61-h1-was-the-build.md](phase5-day61-h1-was-the-build.md))
 
 If mutants injected into Raydium die, the detectors work and the target
 was genuinely clean → widen the target set. If they survive, the

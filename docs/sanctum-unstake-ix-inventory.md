@@ -2,10 +2,15 @@
 
 Source: `~/src/sanctum-unstake-program/` (cloned from
 `https://github.com/igneous-labs/sanctum-unstake-program` Day 44).
-Build: `cargo build-sbf --tools-version v1.39` + macOS SDKROOT
-incantation → `~/src/sanctum-unstake-program/target/deploy/unstake.so`
-(753KB — ~6.5× bigger than Slumlord). Anchor 0.28.0.
-On-chain program ID: `6KBz9djJAH3gRHscq9ujMpyZ5bCK9a27o3ybDtJLXowz`.
+Binary: use the deployed one, `solana program dump -u m
+unpXTU2Ndrc7WWNyEhQWe4udTzSibLPi25SXv2xbCHQ unstake.so` (852,640 bytes).
+The Day 44 local build (`cargo build-sbf --tools-version v1.39`, 753KB)
+faults on every CPI because the program locks solana-program 1.14.20 —
+see [phase5-day61-h1-was-the-build.md](phase5-day61-h1-was-the-build.md).
+Anchor 0.28.0.
+Mainnet program ID: `unpXTU2Ndrc7WWNyEhQWe4udTzSibLPi25SXv2xbCHQ`
+(`6KBz9djJAH3gRHscq9ujMpyZ5bCK9a27o3ybDtJLXowz` is the `local-testing`
+feature's ID).
 Mainnet deploy at commit `11aac05b22794e6c2c3366dbb7141f4c61845c24`.
 
 ## Audits

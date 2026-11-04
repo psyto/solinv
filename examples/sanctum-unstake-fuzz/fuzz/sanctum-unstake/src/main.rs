@@ -13,8 +13,6 @@
 //! first attackable InstructionSpec.
 
 use crucible_fuzzer::*;
-use solana_account::Account;
-use solana_rent::Rent;
 use solana_instruction::{AccountMeta, Instruction};
 use solana_keypair::Keypair;
 use solana_pubkey::Pubkey;
@@ -40,7 +38,7 @@ use solinv_fuzz::{
 const SANCTUM_UNSTAKE_PROGRAM_ID_STR: &str = "unpXTU2Ndrc7WWNyEhQWe4udTzSibLPi25SXv2xbCHQ";
 
 const SANCTUM_UNSTAKE_SO_PATH: &str =
-    env!("SANCTUM_UNSTAKE_SO", "set SANCTUM_UNSTAKE_SO to your built sanctum-unstake-program/target/deploy/unstake.so path");
+    env!("SANCTUM_UNSTAKE_SO", "set SANCTUM_UNSTAKE_SO to the mainnet unstake.so — see this example's README");
 
 /// Per `programs/unstake/src/state/protocol_fee.rs` PROTOCOL_FEE_SEED.
 /// The global ProtocolFee PDA is at seeds=[b"protocol-fee"].
@@ -180,20 +178,10 @@ impl SanctumUnstakeFixture {
         let program_id = Pubkey::from_str(SANCTUM_UNSTAKE_PROGRAM_ID_STR)
             .expect("valid base58 program id");
         ctx.add_program(&program_id, SANCTUM_UNSTAKE_SO_PATH)
-            .expect("unstake.so must be built — see docs/sanctum-unstake-ix-inventory.md");
+            .expect("load unstake.so — see examples/sanctum-unstake-fuzz/README.md");
 
         let (protocol_fee_pda, _bump) =
             Pubkey::find_program_address(&[PROTOCOL_FEE_SEED], &program_id);
-
-        // Hypothesis 2 (Day 47 A1): explicitly populate Rent sysvar
-        // before any ix that reads it. Anchor 0.28's init + mint
-        // constraint generates CPI to spl_token::initialize_mint which
-        // expects to read rent. If LiteSVM's default Rent sysvar has
-        // an empty data field, reading it produces an access violation
-        // at near-u64::MAX (signed-overflow on the data offset). This
-        // line is a no-op if LiteSVM already populates Rent on new()
-        // — costs nothing to be defensive.
-        ctx.set_sysvar(&Rent::default());
 
         let fee_payer = Arc::new(Keypair::new());
         let fee_authority = Arc::new(Keypair::new());
@@ -209,18 +197,11 @@ impl SanctumUnstakeFixture {
                 .unwrap();
         }
 
-        // Step 1 — init_protocol_fee. Soft-fails under the current
-        // toolchain (Anchor 0.28 `init` → system CPI trips the H1
-        // access violation; see Day 56 Gate A finding in
-        // docs/phase5-day56-gateA-result.md). Day 56 proved the
-        // PURE account-read path WORKS (set_protocol_fee on a
-        // byte-poked ProtocolFee succeeded cu=6392) — only the
-        // init→CPI path is gated. The Day 57+ direction is the klend
-        // Day 24 byte-poke pattern: pre-create Pool / Fee / ProtocolFee
-        // / LP-mint via write_account with correct discriminators, skip
-        // the program's init ixs entirely, and fuzz the post-init
-        // attack surface (unstake / add_liquidity / remove_liquidity).
-        let _ = ctx
+        // Step 1 — init_protocol_fee. Must succeed: an earlier version
+        // ignored the outcome here and ran for weeks against a program
+        // whose first ix always failed (docs/phase5-day56-gateA-result.md,
+        // corrected in docs/phase5-day61-h1-was-the-build.md).
+        let outcome = ctx
             .raw_call(build_init_protocol_fee_ix(
                 program_id,
                 fee_payer.pubkey(),
@@ -228,7 +209,9 @@ impl SanctumUnstakeFixture {
             ))
             .fee_payer(&*fee_payer)
             .signers(&[&*fee_payer])
-            .send();
+            .send()
+            .expect("init_protocol_fee send");
+        assert!(outcome.is_success(), "init_protocol_fee failed: {outcome:?}");
 
         // Step 2 — create_pool. Fresh keypairs for pool_account and
         // lp_mint per Anchor `#[account(init)]` semantics (signing
@@ -236,28 +219,6 @@ impl SanctumUnstakeFixture {
         // PDAs derived from pool_account.
         let pool_account = Arc::new(Keypair::new());
         let lp_mint = Arc::new(Keypair::new());
-
-        // Day 47 A1 hypothesis 4: pre-create the init-target accounts
-        // as empty SystemProgram-owned placeholders. LiteSVM may not
-        // auto-create AccountInfo placeholders for ix-mentioned-but-
-        // not-existing pubkeys; Anchor's init might try to read account
-        // state before the create_account CPI runs, hitting an
-        // unmapped memory address. Writing empty SystemProgram-owned
-        // accounts is safe — Anchor's init then transitions them to
-        // the program/SPL-Token owner via standard CPI flow.
-        for kp in [&pool_account, &lp_mint] {
-            ctx.write_account(
-                &kp.pubkey(),
-                Account {
-                    lamports: 0,
-                    data: Vec::new(),
-                    owner: SYSTEM_PROGRAM_ID,
-                    executable: false,
-                    rent_epoch: 0,
-                },
-            )
-            .unwrap();
-        }
 
         let (pool_sol_reserves, _bump) = Pubkey::find_program_address(
             &[pool_account.pubkey().as_ref()],
@@ -275,36 +236,9 @@ impl SanctumUnstakeFixture {
         let rent_sysvar =
             Pubkey::from_str("SysvarRent111111111111111111111111111111111").unwrap();
 
-        // KNOWN DEPTH-GATING (Day 46): create_pool fails with an
-        // "Access violation at 0xFFFFFFFFFFFFFFFF" inside Anchor 0.28's
-        // `#[account(init, mint::authority, mint::decimals)]` constraint
-        // — that constraint CPIs to spl_token::initialize_mint, which
-        // doesn't complete cleanly in our LiteSVM setup. SPL Token
-        // program is bundled in LiteSVM (Raydium harness uses it as a
-        // passive AccountMeta without explicit loading), but Anchor's
-        // init-via-CPI path through the mint constraint trips a memory
-        // access we haven't traced. Same depth-gating class as klend
-        // Day 25-27: infrastructure proven (ix builds, sighash is
-        // correct, account ordering matches the IDL), surface gated
-        // by toolchain-level CPI interaction. Documented in
-        // docs/phase4-day46-sanctum-unstake-depth-gated.md.
-        //
-        // setup() continues regardless. The Pool/Fee/LP-mint accounts
-        // remain uninitialized; subsequent SetFee attempts return
-        // AccountNotInitialized (error 3012). solinv invariants still
-        // run against the InstructionSpec metadata but won't see
-        // Success branches → 0 detections expected for the wrong
-        // reason (not "the program is correct", but "the program
-        // never runs").
-        // Day 47 A1-dig outcome (see docs/phase4-day47-a1-dig.md):
-        // Anchor 0.28 ↔ LiteSVM 0.9.1 ABI mismatch confirmed at this
-        // CPI boundary. Three hypotheses tested + falsified (Rent
-        // sysvar populated; placeholder accounts pre-written;
-        // sysvar/loader sanity). Same 5802 CU + identical access-
-        // violation address regardless. Soft-fail and continue
-        // — setup() finishes with init_protocol_fee succeeded +
-        // create_pool depth-gated, matching the klend Day 27 shape.
-        let _ = ctx
+        // Step 3 — create_pool. Must succeed too; the actions below
+        // need an initialized Pool / Fee / LP mint.
+        let outcome = ctx
             .raw_call(build_create_pool_ix(
                 program_id,
                 fee_payer.pubkey(),
@@ -320,7 +254,9 @@ impl SanctumUnstakeFixture {
             ))
             .fee_payer(&*fee_payer)
             .signers(&[&*fee_payer, &*fee_authority, &*pool_account, &*lp_mint])
-            .send();
+            .send()
+            .expect("create_pool send");
+        assert!(outcome.is_success(), "create_pool failed: {outcome:?}");
 
         Self {
             ctx,
@@ -441,6 +377,7 @@ impl HasInstructionSet for SanctumUnstakeFixture {
             signers: vec![Arc::clone(&self.fee_authority)],
             state_invariants: vec![],
             cu_budget: Some(20_000),
+            guards: vec![],
             cpi_reentrancy: None,
             realloc_check: None,
             bump_seed_check: None,            };

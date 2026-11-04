@@ -190,6 +190,7 @@ impl HasInstructionSet for PinoBuggyFixture {
             signers: vec![Arc::clone(&self.user)],
             state_invariants: vec![],
             cu_budget: Some(50_000),
+            guards: vec![],
             cpi_reentrancy: None,
             realloc_check: None,
             bump_seed_check: None,            }]

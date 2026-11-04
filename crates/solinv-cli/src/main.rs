@@ -232,7 +232,7 @@ struct TargetInput {
     /// Toolchain reachability flag. One of:
     ///  - `"ready"`      — reachable + fresh + not yet exhausted
     ///  - `"exhausted"`  — reachable but tested clean already (no marginal value)
-    ///  - `"gated"`      — depth-gated by toolchain (e.g. a source build that fails where the deployed binary would not)
+    ///  - `"gated"`      — blocked by the build chain (e.g. the source does not build and no deployed binary fits)
     ///  - `"unverified"` — reachability not yet confirmed (default if omitted)
     #[serde(default = "default_status")]
     status: String,

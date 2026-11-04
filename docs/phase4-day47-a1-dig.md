@@ -72,6 +72,8 @@ pre-creation doesn't change the outcome.
 
 ### H1 — Anchor 0.28 ↔ LiteSVM 0.9.1 ABI mismatch  (residual diagnosis)
 
+> **Superseded (Day 61):** wrong. The mismatch was between solana-program 1.14's non-`repr(C)` `AccountInfo` and the rustc we built with, not LiteSVM; a real validator fails the same way and the mainnet binary runs on LiteSVM. See [phase5-day61-h1-was-the-build.md](phase5-day61-h1-was-the-build.md).
+
 Anchor 0.28 was released for Solana 1.16-era runtime (≈2023). Its
 proc-macros emit code expecting that runtime's account-data layout,
 sysvar API shapes, BPF loader version, etc. LiteSVM 0.9.1 emulates
@@ -91,6 +93,8 @@ populate-this-thing fix, it's a fundamental compatibility mismatch.
 
 ## Comparable evidence
 
+> **Superseded (Day 61):** the klend paragraph is not supported. klend locks solana-program 1.17.18 (`repr(C)`); its harness failed for a different reason (an `init_reserve` account list that does not match the deployed binary). See [phase5-day61-h1-was-the-build.md](phase5-day61-h1-was-the-build.md).
+
 klend (Anchor 0.29, Day 17-27): same toolchain-level depth gate.
 Day 27 retrospective declared "infrastructure proven, depth gated
 by ReserveConfig setup" — but the deeper truth is that Anchor 0.29
@@ -106,6 +110,8 @@ gated by toolchain mismatch with Crucible v0.1.0's LiteSVM v0.9.1;
 Anchor 1.0+ programs work cleanly.**
 
 ## H1 fix scope estimate
+
+> **Superseded (Day 61):** none of these three paths was needed. Fuzz the deployed binary, or move a source build to solana-program ≥ 1.16. See [phase5-day61-h1-was-the-build.md](phase5-day61-h1-was-the-build.md).
 
 Fixing the underlying ABI mismatch is fundamentally either:
 

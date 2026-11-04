@@ -359,6 +359,7 @@ impl HasInstructionSet for SlumlordFixture {
             signers: vec![],
             state_invariants: vec![],
             cu_budget: Some(20_000),
+            guards: vec![],
             cpi_reentrancy: None,
             realloc_check: None,
             bump_seed_check: None,            };
@@ -399,6 +400,7 @@ impl HasInstructionSet for SlumlordFixture {
                 accounts: vec![0], // slumlord PDA
             }],
             cu_budget: Some(20_000),
+            guards: vec![],
             cpi_reentrancy: None,
             realloc_check: None,
             bump_seed_check: None,            };
@@ -418,6 +420,7 @@ impl HasInstructionSet for SlumlordFixture {
             signers: vec![],
             state_invariants: vec![],
             cu_budget: Some(10_000),
+            guards: vec![],
             cpi_reentrancy: None,
             realloc_check: None,
             bump_seed_check: None,            };

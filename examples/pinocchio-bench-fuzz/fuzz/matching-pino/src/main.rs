@@ -247,6 +247,7 @@ impl HasInstructionSet for MatchingPinoFixture {
             // append). 50K budget gives huge headroom; cu-dos only
             // fires on real pathological executions.
             cu_budget: Some(50_000),
+            guards: vec![],
             cpi_reentrancy: None,
             realloc_check: None,
             bump_seed_check: None,            };

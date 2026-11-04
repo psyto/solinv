@@ -746,7 +746,7 @@ program execution. Different program classes have different reachability:
 | Native (any `solana-program` 1.16+) | ✅ works | Raydium AMM, Slumlord, Save (ex-Solend), Jito restaking |
 | Anchor 1.0+ | ✅ works | escrow-demo |
 | Anchor 0.31 + Solana 2.x | ⚠️ builds clean, runtime untested | Meteora DAMM v2, Jito workspace SDK |
-| Anchor 0.28 | ✅ `init` and later instructions run with the deployed binary (`solana program dump`). A local build on solana-program < 1.16 faulted on CPI with platform-tools v1.37/v1.39, on a real validator too | Sanctum unstake |
+| Anchor 0.28 | ✅ for Sanctum unstake's deployed binary (`solana program dump`): `init` and later instructions run. Our local build of it (solana-program 1.14.20, platform-tools v1.37/v1.39) faulted on the `init` CPI, on a real validator too. Other 0.28 programs untested | Sanctum unstake |
 | Anchor 0.27, 0.29 | ⚠️ untested with the deployed binary (klend's harness targets its source build) | klend |
 | Pre-Anchor / `solana-program 1.10` | ⛔ build-gated (toolchain too old) | Wormhole bridge |
 

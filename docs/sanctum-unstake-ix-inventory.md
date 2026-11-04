@@ -5,7 +5,7 @@ Source: `~/src/sanctum-unstake-program/` (cloned from
 Binary: use the deployed one, `solana program dump -u m
 unpXTU2Ndrc7WWNyEhQWe4udTzSibLPi25SXv2xbCHQ unstake.so` (852,640 bytes).
 The Day 44 local build (`cargo build-sbf --tools-version v1.39`, 753KB)
-faults on every CPI because the program locks solana-program 1.14.20 —
+faults on the `init` CPI because the program locks solana-program 1.14.20 —
 see [phase5-day61-h1-was-the-build.md](phase5-day61-h1-was-the-build.md).
 Anchor 0.28.0.
 Mainnet program ID: `unpXTU2Ndrc7WWNyEhQWe4udTzSibLPi25SXv2xbCHQ`

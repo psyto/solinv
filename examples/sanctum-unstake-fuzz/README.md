@@ -30,8 +30,9 @@ export SANCTUM_UNSTAKE_SO=$PWD/unstake.so
 
 Don't rebuild it from source with current platform-tools. The program
 locks solana-program 1.14.20, whose `AccountInfo` isn't `repr(C)`;
-built with rustc ≥ 1.68 (platform-tools ≥ v1.37) every CPI faults with
-"Access violation … 0xffffffffffffffff", on a real validator too. That
+built with rustc ≥ 1.68 (we tried platform-tools v1.37 and v1.39) the
+`init` CPI faulted with "Access violation … 0xffffffffffffffff", on a
+real validator too. That
 was the "H1" gate of Days 46–57 — see
 [`docs/phase5-day61-h1-was-the-build.md`](../../docs/phase5-day61-h1-was-the-build.md).
 

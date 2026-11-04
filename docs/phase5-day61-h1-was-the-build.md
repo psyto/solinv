@@ -38,8 +38,14 @@ instruction (no SPL Token), plus the real Sanctum binary:
 | Sanctum unstake, built locally (v1.39) | FAIL, 6903 CU | FAIL, 6849 CU | FAIL, 6849 CU |
 | Sanctum unstake, mainnet binary | **OK, 10296 CU** | **OK, 10242 CU** | not run |
 
-A real validator fails the same way at the same CU, so there was nothing to
-fix in LiteSVM, and the toolchain fork of Day 55 could never have helped.
+A real validator fails the same way at the same CU, so LiteSVM is ruled out
+as the cause, and the Day 55 toolchain fork did not touch it. (A runtime
+shim that tolerated the reordered layout could in principle hide the fault,
+but it would no longer be testing what mainnet runs.)
+
+Scope: every row is one `init`-style instruction whose CPI is a System
+Program `create_account`. We did not test other CPIs, other Anchor 0.28
+programs, or platform-tools versions other than v1.37 and v1.39.
 
 ## What changes
 

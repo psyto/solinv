@@ -114,7 +114,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: psyto/solinv@4a800dc3fb1cb91cff8254aafb30cef7b71f732c
+      - uses: psyto/solinv@8bcb011bd5d3ace5748d291a823c30ae018fc79e
         with:
           program-src: programs/my_program/src
 ```
@@ -131,18 +131,20 @@ program works too, but each job compiles solinv: they race to save the same cach
 The CLI (not on crates.io yet; pin a commit):
 
 ```bash
-cargo install --git https://github.com/psyto/solinv --rev 4a800dc3fb1c solinv-cli
+cargo install --git https://github.com/psyto/solinv --rev 8bcb011bd5d3 solinv-cli
 ```
 
 In your Crucible fuzz harness:
 
 ```toml
 [dependencies]
-solinv-fuzz = { git = "https://github.com/psyto/solinv", rev = "4a800dc3fb1cb91cff8254aafb30cef7b71f732c" }
-solinv-core = { git = "https://github.com/psyto/solinv", rev = "4a800dc3fb1cb91cff8254aafb30cef7b71f732c" }
+solinv-fuzz = { git = "https://github.com/psyto/solinv", rev = "8bcb011bd5d3ace5748d291a823c30ae018fc79e" }
+solinv-core = { git = "https://github.com/psyto/solinv", rev = "8bcb011bd5d3ace5748d291a823c30ae018fc79e" }
 crucible-test-context = { git = "https://github.com/asymmetric-research/crucible", tag = "v0.1.0" }
 ```
 ```rust
+use solinv_fuzz::{Idl, IdlSpecExt};   // `spec()` comes from IdlSpecExt (or `use solinv_fuzz::prelude::*`)
+
 let spec = Idl::from_json(include_str!("../idl/my_program.json"))?
     .spec("deposit", program_id)?
     .account("vault", vault)
@@ -823,13 +825,16 @@ solinv/
 │   │                      #   no Crucible/Solana)
 │   ├── solinv-cheat/      # LiteSVM cheatcode wrappers
 │   ├── solinv-corpus/     # Yellowstone gRPC seeder (scaffold)
+│   ├── solinv-static/     # no Solana deps (builds to WASM): the IDL report,
+│   │                      #   source.rs (declared account types, #[account]
+│   │                      #   constraints, vipers validate()), diff.rs (what a
+│   │                      #   change removes), idl_diff.rs (the same from IDLs)
 │   ├── solinv-disclose/   # Divergence findings as checkable evidence
 │   │                      #   (serde+sha2 only, no Crucible/Solana);
 │   │                      #   platform formatters pending
-│   └── solinv-cli/        # `solinv` binary — idl, diff (+ source.rs: declared
-│                          #   account types and #[account] constraints; diff.rs:
-│                          #   what a change removes), mutate, score (+ scaffolds:
-│                          #   init, check, fuzz, corpus, disclose)
+│   └── solinv-cli/        # `solinv` binary — idl, diff (on solinv-static),
+│                          #   mutate, score (+ scaffolds: init, check, fuzz,
+│                          #   corpus, disclose)
 ├── examples/
 │   ├── escrow-demo/             # planted-bug acceptance fixture (7 invariants)
 │   │   ├── diff/drop-a-check/   # escrow-clean with one check dropped (diff quickstart)
@@ -934,6 +939,8 @@ features than the IDL.
 In the fixture, the stub becomes the spec:
 
 ```rust
+use solinv_fuzz::IdlSpecExt;   // brings `spec()` into scope
+
 let spec = idl.spec("deposit", program_id)?
     .account("vault", vault_pda)
     .signer("depositor", Arc::clone(&depositor))
@@ -1119,6 +1126,9 @@ solinv idl <idl.json>                        # account-validation map + unsigned
 solinv idl <idl.json> --src <program src>    # + U/T/t: unchecked, typed, typed but untied
 solinv diff --base-src <before> --head-src <after>  # checks a change removes; exit 1 if any
 solinv diff … --format github                # the same, as Actions annotations
+solinv diff --base-idl <a.json> --head-idl <b.json>  # from two IDLs, e.g. the audited build
+                                             #   and `anchor idl fetch`: signer, seeds,
+                                             #   address, has_one only
 solinv idl <idl.json> --rust <ix|all>        # SpecBuilder stub to paste into a fixture
 solinv init                                  # scaffold a solinv harness (not yet implemented)
 solinv check <target>                        # run invariant checks

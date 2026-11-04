@@ -97,7 +97,7 @@ flagged instructions are the demo program's three planted account-validation bug
 |---|---|
 | A removed check fails the PR | The demo above; [the demo pull request](https://github.com/psyto/solinv/pull/2) |
 | A check in vipers' `validate()` counts too | Cashio's real source, fixed → before the fix: the check its fix added is named, in both instructions ([details](docs/diff.md#checked-on)); the map marks 2 of its 26 typed accounts `t`, both validated by the program they are passed to (26 before vipers was read, [#8](https://github.com/psyto/solinv/issues/8)) |
-| …on the 11 classes of [sealevel-attacks](https://github.com/coral-xyz/sealevel-attacks) | Turning each fixed program into its insecure version: 9 of 11 caught where the check was declared, 0 of 11 where it was written in the handler; 0 false positives in the other direction ([details](docs/sealevel-attacks.md)) |
+| …on the 11 classes of [sealevel-attacks](https://github.com/coral-xyz/sealevel-attacks) | Turning each fixed program into its insecure version: 11 of 11 caught where the check was declared, 0 of 11 where it was written in the handler ([#12](https://github.com/psyto/solinv/issues/12)); 0 removed checks reported in the other direction ([details](docs/sealevel-attacks.md)) |
 | No noise on code that keeps its checks | Comparing Jito tip-payment, tip-distribution and Raydium cp-swap with themselves: 0 reports. Reformatting a constraint or renaming its error: 0 reports (tested) |
 | The fuzz detectors catch a check that is removed | Mutation test on the clean escrow: of the removed checks the harness reached, 5 of 6 were caught, each by the detector predicted for it — after setting aside 5 mutations that cannot change behaviour, each argued in the [report](examples/escrow-demo/campaigns/escrow-clean-report.md) (5 of 11 before) |
 | …but not every kind yet | On Raydium's native AMM, 0 of 18: its guards compare values computed inside the handler, which a declaration cannot name ([why](#mutation-testing--measuring-detector-power-on-a-real-target)) |
@@ -1123,6 +1123,8 @@ CLI surface:
 
 ```
 solinv idl <idl.json>                        # account-validation map + unsigned writers
+solinv idl --src <program src>               # the map from source alone (no IDL: older Anchor);
+                                             #   A also marks a non-constant `address =`
 solinv idl <idl.json> --src <program src>    # + U/T/t: unchecked, typed, typed but untied
 solinv diff --base-src <before> --head-src <after>  # checks a change removes; exit 1 if any
 solinv diff … --format github                # the same, as Actions annotations

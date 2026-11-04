@@ -12,7 +12,7 @@
 
 use anyhow::{Context, Result};
 use regex::Regex;
-use crate::idl::SlotKind;
+use crate::idl::{Idl, IdlAccount, IdlAccountItem, IdlInstruction, IdlPda, SlotKind};
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
@@ -36,6 +36,10 @@ pub struct Attrs {
     pub has_one: Vec<String>,
     /// Each `constraint = <expr>`, whitespace collapsed, error dropped.
     pub constraints: Vec<String>,
+    /// `close = <target>`: when the instruction ends Anchor sends the
+    /// lamports to the target, clears the data and hands the account back
+    /// to the system program.
+    pub close: Option<String>,
     /// `init` (not `init_if_needed`, which also accepts an existing
     /// account): the account is created here.
     pub init: bool,
@@ -85,6 +89,9 @@ pub struct Slot {
     /// Where the field is declared, for annotations.
     pub file: String,
     pub line: usize,
+    /// Position in the instruction's account list, composites flattened
+    /// in place, as Anchor lays the accounts out.
+    pub order: usize,
 }
 
 /// Declared slots per (instruction, dotted slot path).
@@ -160,8 +167,16 @@ impl SourceKinds {
         // A keyed constraint on `p` ties `path` when it names `path` and
         // another slot of the instruction or a constant — not only
         // `path`, and not an instruction argument.
+        // `x.key` (no `()`) compares an address only when `x` is an
+        // `AccountInfo`-like slot; on `Account<T>` it reads a data field.
+        let address_field = |p: &str, recv: &str| {
+            self.slot(ix, &resolve(p, recv)).is_some_and(|s| {
+                matches!(s.ty.as_str(), "AccountInfo" | "UncheckedAccount" | "Signer" | "SystemAccount" | "Program" | "Sysvar")
+            })
+        };
         let ties = |p: &str, c: &[String]| {
-            c.iter().any(|n| resolve(p, n) == path)
+            c.iter().filter_map(|n| n.strip_prefix("@key:")).all(|recv| address_field(p, recv))
+                && c.iter().any(|n| resolve(p, n) == path)
                 && c.iter().any(|n| {
                     n == "::" || {
                         let q = resolve(p, n);
@@ -198,6 +213,57 @@ impl SourceKinds {
                     || t.attrs.keyed_constraints.iter().any(|c| ties(p, c))
             }
         })
+    }
+
+    /// The account lists as an IDL would give them, read from source
+    /// alone, for programs with no IDL to hand (#11): signer from `Signer`
+    /// or `#[account(signer)]`, writable from `mut` / `init`, a PDA from
+    /// `seeds` or `associated_token::authority` (seed values not read), a
+    /// fixed address from an `address` constraint — constant or not, where
+    /// an IDL lists only constant ones — or a `Program<'info, T>` / `Sysvar`
+    /// type,
+    /// relations from `has_one`. Unplaced slots (an alias, a multi-line
+    /// type) are listed too, as nothing declared. No discriminators, args
+    /// or program id: enough for the map, not for building a spec.
+    pub fn to_idl(&self) -> Idl {
+        let mut by_ix: std::collections::BTreeMap<&str, Vec<(&String, &Slot)>> = Default::default();
+        for ((ix, path), s) in &self.map {
+            by_ix.entry(ix.as_str()).or_default().push((path, s));
+        }
+        let instructions = by_ix
+            .into_iter()
+            .map(|(ix, mut slots)| {
+                slots.sort_by_key(|(_, s)| s.order);
+                IdlInstruction {
+                    name: ix.to_string(),
+                    discriminator: Vec::new(),
+                    args: Vec::new(),
+                    accounts: slots
+                        .into_iter()
+                        .map(|(path, s)| {
+                            IdlAccountItem::Single(IdlAccount {
+                                name: path.clone(),
+                                writable: s.attrs.mutable,
+                                // Anchor makes a non-PDA `init` account sign: it is
+                                // created at a fresh keypair's address.
+                                signer: s.ty == "Signer"
+                                    || s.attrs.signer
+                                    || (s.attrs.init && !s.attrs.seeds && !s.attrs.token_authority),
+                                optional: s.optional,
+                                // `Program<'info, T>` and `Sysvar` name one address by type.
+                                address: (s.attrs.address || matches!(s.ty.as_str(), "Program" | "Sysvar"))
+                                    .then(|| "(from source)".into()),
+                                // An associated token account is a PDA of the ATA program.
+                                pda: (s.attrs.seeds || s.attrs.token_authority)
+                                    .then(|| IdlPda { seeds: Vec::new(), program: None }),
+                                relations: s.attrs.has_one.clone(),
+                            })
+                        })
+                        .collect(),
+                }
+            })
+            .collect();
+        Idl { address: String::new(), instructions, accounts: Vec::new() }
     }
 
     /// Every placed slot, as ((instruction, path), slot), sorted.
@@ -367,7 +433,11 @@ fn read_attrs(text: &str, expr: &str) -> Attrs {
     // An upper-case constant: `VAULT_ID`, `crate::ID`. A qualified call
     // (`helpers::f(arg)`) is not one.
     let constant = Regex::new(r"\b[A-Z][A-Z0-9_]*\b").unwrap();
-    let keyed = Regex::new(r"\.\s*key\s*\(\s*\)").unwrap();
+    // `x.key()`, or `x.key` — the `AccountInfo` field older Anchor code
+    // compares (`authority.key == &token.owner`).
+    let keyed = Regex::new(r"\.\s*key\b(?:\s*\(\s*\))?").unwrap();
+    let keyed_call = Regex::new(r"\.\s*key\s*\(\s*\)").unwrap();
+    let field_key = Regex::new(r"\b([a-z_][A-Za-z0-9_]*)\s*\.\s*key\b").unwrap();
     // A name at the head of a path: not after `.` (a field) or `::` (a
     // module item). `text` has literals blanked, so `b"vault"` names
     // nothing.
@@ -403,7 +473,14 @@ fn read_attrs(text: &str, expr: &str) -> Attrs {
                 // `admin.key() == ADMIN && vault.amount > 0` the key
                 // comparison says nothing about `vault`.
                 for clause in clauses(v).into_iter().filter(|c| keyed.is_match(c)) {
-                    a.keyed_constraints.push(names_in(clause));
+                    let mut names = names_in(clause);
+                    // `x.key` without `()` is the address only on an
+                    // `AccountInfo`-like slot; on `Account<T>` it is a data
+                    // field. Mark the receivers so `unbound` can check.
+                    if !keyed_call.is_match(clause) {
+                        names.extend(field_key.captures_iter(clause).map(|c| format!("@key:{}", &c[1])));
+                    }
+                    a.keyed_constraints.push(names);
                 }
             }
             let fixes = match bare {
@@ -432,6 +509,7 @@ fn read_attrs(text: &str, expr: &str) -> Attrs {
             ("seeds", Some(_)) => a.seeds = true,
             ("address", Some(_)) => a.address = true,
             ("owner", Some(_)) => a.owner = true,
+            ("close", Some(v)) => a.close = Some(v[..error_cut(v)].split_whitespace().collect()),
             ("has_one", Some(v)) => {
                 let target: String =
                     v.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
@@ -606,8 +684,13 @@ fn walk(
             Field::Kind(k) => Some(*k),
             Field::Unknown => None,
         };
+        let key = (ix.to_string(), path);
+        // A second handler of the same name walks the same slots again.
+        let order = out
+            .get(&key)
+            .map_or_else(|| out.keys().filter(|(i, _)| i == ix).count(), |s| s.order);
         out.insert(
-            (ix.to_string(), path),
+            key,
             Slot {
                 kind,
                 ty: f.ty.clone(),
@@ -616,6 +699,7 @@ fn walk(
                 attrs: f.attrs.clone(),
                 file: f.file.clone(),
                 line: f.line,
+                order,
             },
         );
     }
@@ -1096,6 +1180,12 @@ pub struct Buy<'info> {
     pub same: Account<'info, TokenAccount>,
     #[account(mut, constraint = fixed.key() == FIXED_ID)]
     pub fixed: Account<'info, TokenAccount>,
+    #[account(constraint = buyer.key == &field_key.owner)]
+    pub field_key: Account<'info, TokenAccount>,
+    #[account(mut, constraint = keyring.keys_len > 0 && buyer.key() == ADMIN)]
+    pub keyring: Account<'info, TokenAccount>,
+    #[account(mut, constraint = order.key == config.key)]
+    pub order: Account<'info, Order>,
     #[account(mut, constraint = arg.key() == expected)]
     pub arg: Account<'info, TokenAccount>,
     #[account(mut, constraint = sale.key() == sale.key())]
@@ -1161,11 +1251,11 @@ pub struct Bound<'info> {
         for slot in [
             "sale", "vault", "mint_only", "reused", "elsewhere", "same", "arg", "other", "err",
             "call", "by_arg", "seeded_by_arg", "owned_by_arg", "arg_has_one", "clause",
-            "grouped", "either",
+            "grouped", "either", "keyring", "order",
         ] {
             assert!(k.unbound("buy", slot), "{slot}");
         }
-        for slot in ["own", "config", "registry", "fixed", "both", "buyer", "token_program"] {
+        for slot in ["own", "config", "registry", "fixed", "both", "field_key", "buyer", "token_program"] {
             assert!(!k.unbound("buy", slot), "{slot}");
         }
         for slot in [
@@ -1237,6 +1327,59 @@ impl<'info> ::vipers::Validate<'info> for crate::Print<'info> {
         assert_eq!(
             k.slot("print", "destination").unwrap().attrs.validate,
             vec!["assert_keys_neq!(destination, source)"]
+        );
+    }
+
+    /// Without an IDL the map's columns come from the attributes (#11),
+    /// accounts in declaration order with composites flattened in place.
+    #[test]
+    fn to_idl_reads_the_columns_from_the_attributes() {
+        let src = r#"
+pub fn swap(ctx: Context<Swap>) -> Result<()> {}
+#[derive(Accounts)]
+pub struct Pool<'info> {
+    #[account(mut, seeds = [b"pool"], bump)]
+    pub state: Account<'info, State>,
+}
+#[derive(Accounts)]
+pub struct Swap<'info> {
+    #[account(mut)]
+    pub user: Signer<'info>,
+    pub pool: Pool<'info>,
+    #[account(mut, address = pool.state.vault)]
+    pub vault: Account<'info, TokenAccount>,
+    #[account(mut, associated_token::mint = mint, associated_token::authority = user)]
+    pub user_ata: Account<'info, TokenAccount>,
+    pub mint: Account<'info, Mint>,
+    pub token_program: Program<'info, Token>,
+}
+"#;
+        let idl = SourceKinds::parse(src).to_idl();
+        let ix = &idl.instructions[0];
+        let rows: Vec<(String, bool, bool, bool, bool)> = ix
+            .flat_accounts()
+            .iter()
+            .map(|f| {
+                let a = f.account;
+                (f.path(), a.signer, a.writable, a.pda.is_some(), a.address.is_some())
+            })
+            .collect();
+        let fresh = SourceKinds::parse(&src.replace("    pub mint: Account<'info, Mint>,", "    #[account(init, payer = user, space = 8)]\n    pub mint: Account<'info, Mint>,"))
+            .to_idl();
+        let mint = fresh.instructions[0].flat_accounts().into_iter().find(|f| f.path() == "mint").unwrap();
+        // A non-PDA `init` account signs, as Anchor's IDL says.
+        assert!(mint.account.signer && mint.account.writable);
+        let want = [
+            ("user", true, true, false, false),
+            ("pool.state", false, true, true, false),
+            ("vault", false, true, false, true),
+            ("user_ata", false, true, true, false),
+            ("mint", false, false, false, false),
+            ("token_program", false, false, false, true),
+        ];
+        assert_eq!(
+            rows,
+            want.iter().map(|&(p, s, w, pda, a)| (p.to_string(), s, w, pda, a)).collect::<Vec<_>>()
         );
     }
 

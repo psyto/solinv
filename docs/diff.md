@@ -34,9 +34,13 @@ instruction whose handler takes that struct as its `Context<..>`
 | `has_one = x` deleted | removed — or *moved* (warning) if another slot of the instruction now has it |
 | `constraint = <expr>` deleted or replaced | removed, naming the expression — or *moved* (warning) |
 | vipers `assert_keys_eq!` / `assert_keys_neq!` deleted from an `impl Validate` the handler's `#[access_control(ctx.accounts.validate())]` runs (composites' `self.x.validate()` followed) | removed, naming the check — or *moved* (warning) |
+| `close = <target>` deleted | removed: no longer emptied and handed back to the system program |
+| `close` target changed | warning: that is where its lamports go |
 | typed → a different typed type (`Account<Config>` → `Signer`) | warning: type changed |
 | a slot wrapped in `Option<…>` | warning: now optional |
 | a slot with checks gone from an instruction that remains | warning: renamed or removed, listing its checks |
+| an instruction renamed — gone, with a new instruction sharing at least half of the two's slot names (programs, sysvars, `authority` and `payer` not counted), best match first, ties left unpaired | warning naming the new name; the two are compared slot by slot, so a check the rename dropped is still removed |
+| an instruction gone with nothing that matches, and checks | warning: not compared, with how many checks it had |
 | a new instruction with no signer that writes an account | warning: permissionless by design, or a missing authority check? |
 
 Removals exit 1 (unless `--no-fail`); warnings do not. Annotations sit on
@@ -59,6 +63,10 @@ the `#[access_control]` that runs them removes every one.
   themselves: nothing reported.
 - escrow-clean against the planted-bug escrow: three warnings, on exactly
   the three planted instructions that write state with no signer.
+- [sealevel-attacks](sealevel-attacks.md): every fixed program turned
+  into its insecure version — 11 of 11 classes where the check was
+  declared, 0 of 11 where it was written in the handler; 0 removed
+  checks in the 22 pairs the other way round.
 - Cashio's real source, fixed (`7df6581`) against the version before the
   fix: `assert_keys_eq!(common.bank.crate_mint, common.crate_mint)` removed
   from `validate()`, in `print_cash` and `burn_cash` — the check its fix
@@ -80,7 +88,9 @@ It reads text, not types, line by line as rustfmt lays fields out:
   are not normalised, so switching to one reads as a removal.
 - A field typed by a type alias, a struct name defined twice, or a field
   type split over lines is not placed, so changes to it are not compared.
-- A whole instruction removed is not reported; its handler is gone with
-  its checks.
+- A renamed instruction is paired by slot names alone: a rename that
+  also renames most slots reads as one instruction gone (a warning) and
+  one new, and an unrelated new instruction that happens to reuse half
+  of a removed one's names is compared with it.
 - Checks the IDL carries but the source does not spell (none in Anchor
   today) are out of reach; it compares source with source.

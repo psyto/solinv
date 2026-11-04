@@ -15,7 +15,7 @@
 
 use crate::source::{Slot, SourceKinds};
 use crate::idl::SlotKind;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Severity {
@@ -42,8 +42,78 @@ pub fn diff(base: &SourceKinds, head: &SourceKinds) -> Vec<Change> {
     let in_ix = |ix: &str| -> Vec<(&String, &Slot)> {
         head_slots.iter().filter(|((i, _), _)| i == ix).map(|((_, p), s)| (p, *s)).collect()
     };
+    let base_ixs: BTreeSet<String> = base.slots().iter().map(|((ix, _), _)| ix.clone()).collect();
+    let head_ixs: BTreeSet<String> = head_slots.iter().map(|((ix, _), _)| ix.clone()).collect();
 
-    for ((ix, path), b) in base.slots() {
+    // Each base instruction's name in the head version: its own, or — for
+    // one that is gone — the new instruction whose slots it shares most,
+    // so a rename that also drops a check is still compared (#9). Slots
+    // every instruction has (programs, sysvars, `authority`, `payer`) do
+    // not count towards the match. Pairs are taken best first; a score
+    // two pairs share for one instruction is ambiguous and pairs neither.
+    let mut renamed: BTreeMap<String, String> = BTreeMap::new();
+    let gone: Vec<&String> = base_ixs.difference(&head_ixs).collect();
+    let new: Vec<&String> = head_ixs.difference(&base_ixs).collect();
+    let telling = |k: &SourceKinds, ix: &str| -> BTreeSet<String> {
+        k.slots()
+            .into_iter()
+            .filter(|((i, p), s)| {
+                i == ix
+                    && !matches!(s.ty.as_str(), "Program" | "Interface" | "Sysvar")
+                    && !matches!(p.rsplit('.').next(), Some("authority" | "payer"))
+            })
+            .map(|((_, p), _)| p.clone())
+            .collect()
+    };
+    let mut scored: Vec<(f64, &String, &String)> = Vec::new();
+    for old in &gone {
+        let a = telling(base, old);
+        for n in &new {
+            let b = telling(head, n);
+            let shared = a.intersection(&b).count();
+            let score = shared as f64 / a.union(&b).count().max(1) as f64;
+            if shared > 0 && score >= 0.5 {
+                scored.push((score, *old, *n));
+            }
+        }
+    }
+    scored.sort_by(|x, y| y.0.total_cmp(&x.0).then(x.1.cmp(y.1)).then(x.2.cmp(y.2)));
+    // Settled on either side: paired, or left out by a tie at its best.
+    let (mut settled, mut taken): (BTreeSet<&String>, BTreeSet<&String>) = Default::default();
+    for &(score, old, n) in &scored {
+        if settled.contains(old) || taken.contains(n) {
+            continue;
+        }
+        let rival = scored.iter().any(|&(s, o, m)| s == score && (o, m) != (old, n) && (o == old || m == n));
+        if !rival {
+            renamed.insert(old.to_string(), n.to_string());
+        }
+        settled.insert(old);
+        taken.insert(n);
+    }
+    for old in &gone {
+        let checks: Vec<String> = base
+            .slots()
+            .into_iter()
+            .filter(|((i, _), _)| i == *old)
+            .flat_map(|(_, s)| checks_of(s))
+            .collect();
+        let message = match renamed.get(*old) {
+            Some(n) => format!("instruction renamed to `{n}` (its slots match): compared with it"),
+            None if checks.is_empty() => continue,
+            None => format!(
+                "instruction removed, or renamed past recognition: its {} check(s) are not \
+                 compared — confirm no remaining instruction relied on them",
+                checks.len()
+            ),
+        };
+        let at = renamed.get(*old).and_then(|n| in_ix(n).first().map(|(_, s)| (s.file.clone(), s.line)));
+        let (file, line) = at.unwrap_or_default();
+        out.push(Change { severity: Severity::Warning, ix: old.to_string(), path: String::new(), message, file, line });
+    }
+
+    for ((base_ix, path), b) in base.slots() {
+        let Some(ix) = renamed.get(base_ix).or(head_ixs.get(base_ix)) else { continue };
         let siblings = in_ix(ix);
         let Some(h) = head.slot(ix, path) else {
             // The instruction is still there but this slot is not: renamed
@@ -133,6 +203,20 @@ pub fn diff(base: &SourceKinds, head: &SourceKinds) -> Vec<Change> {
                 None => push(Severity::Regression, format!("`constraint = {expr}` removed")),
             }
         }
+        match (&ba.close, &ha.close) {
+            (Some(t), None) => push(
+                Severity::Regression,
+                format!(
+                    "`close = {t}` removed: the account is no longer emptied and handed back \
+                     to the system program when the instruction ends"
+                ),
+            ),
+            (Some(t), Some(u)) if t != u => push(
+                Severity::Warning,
+                format!("`close` target changed from `{t}` to `{u}`: that is where its lamports go"),
+            ),
+            _ => {}
+        }
         for check in ba.validate.iter().filter(|e| !ha.validate.contains(e)) {
             match siblings.iter().find(|(_, s)| s.attrs.validate.contains(check)) {
                 Some((other, _)) => push(
@@ -145,9 +229,7 @@ pub fn diff(base: &SourceKinds, head: &SourceKinds) -> Vec<Change> {
     }
 
     // New instructions with the shape of a missing authority check.
-    let base_ixs: BTreeSet<&str> = base.slots().iter().map(|((ix, _), _)| ix.as_str()).collect();
-    let head_ixs: BTreeSet<&str> = head_slots.iter().map(|((ix, _), _)| ix.as_str()).collect();
-    for ix in head_ixs.difference(&base_ixs) {
+    for ix in new.iter().filter(|n| !renamed.values().any(|v| v == **n)) {
         let slots = in_ix(ix);
         let signed = slots.iter().any(|(_, s)| signs(s));
         let written = slots.iter().find(|(_, s)| s.attrs.mutable);
@@ -185,6 +267,7 @@ fn checks_of(s: &Slot) -> Vec<String> {
     }
     c.extend(a.has_one.iter().map(|t| format!("has_one = {t}")));
     c.extend(a.constraints.iter().map(|e| format!("constraint = {e}")));
+    c.extend(a.close.iter().map(|t| format!("close = {t}")));
     c.extend(a.validate.iter().cloned());
     c
 }
@@ -492,5 +575,153 @@ pub struct Sweep<'info> {
         let unrun = base.replace("#[access_control(ctx.accounts.validate())]\n", "");
         let removed = diff(&kinds(base), &kinds(&unrun));
         assert_eq!(removed.iter().filter(|c| c.severity == Severity::Regression).count(), 5);
+    }
+
+    #[test]
+    fn a_renamed_instruction_is_compared_and_a_removed_one_named() {
+        let base = r#"
+pub fn init(ctx: Context<Init>) -> Result<()> {}
+pub fn close(ctx: Context<Close>) -> Result<()> {}
+#[derive(Accounts)]
+pub struct Init<'info> {
+    #[account(init, payer = authority, space = 8)]
+    pub user: Account<'info, User>,
+    #[account(mut)]
+    pub authority: Signer<'info>,
+}
+#[derive(Accounts)]
+pub struct Close<'info> {
+    #[account(mut, close = destination, has_one = owner)]
+    pub vault: Account<'info, Vault>,
+    pub owner: Signer<'info>,
+    pub destination: SystemAccount<'info>,
+}
+"#;
+        // `init` → `initialize` with its check dropped; `close` loses
+        // `close =`.
+        let head = base
+            .replace("fn init(ctx: Context<Init>)", "fn initialize(ctx: Context<Initialize>)")
+            .replace("struct Init<'info>", "struct Initialize<'info>")
+            .replace("pub user: Account<'info, User>", "pub user: AccountInfo<'info>")
+            .replace("close = destination, ", "");
+        let changes = diff(&kinds(base), &kinds(&head));
+        let got: Vec<_> = changes.iter().map(|c| (c.severity, c.slot(), c.message.as_str())).collect();
+        assert!(got.iter().any(|(s, slot, m)| *s == Severity::Regression
+            && slot == "initialize.user"
+            && m.starts_with("was Account, now AccountInfo")));
+        assert!(got.iter().any(|(s, slot, m)| *s == Severity::Warning
+            && slot == "init"
+            && m.starts_with("instruction renamed to `initialize`")));
+        assert!(got.iter().any(|(s, slot, m)| *s == Severity::Regression
+            && slot == "close.vault"
+            && m.starts_with("`close = destination` removed")));
+        // A renamed instruction is not also reported as a new one.
+        assert!(!got.iter().any(|(_, _, m)| m.starts_with("new instruction")));
+
+        // The `@ Error` is not part of the target.
+        let err = base.replace("close = destination", "close = destination @ E::A");
+        let err2 = base.replace("close = destination", "close = destination @ E::B");
+        assert!(diff(&kinds(&err), &kinds(&err2)).is_empty());
+        assert!(diff(&kinds(base), &kinds(&err)).is_empty());
+
+        // Two gone instructions match one new one: the better match wins,
+        // whatever the names' order.
+        let pair = r#"
+pub fn a_old(ctx: Context<A>) -> Result<()> {}
+pub fn b_old(ctx: Context<B>) -> Result<()> {}
+#[derive(Accounts)]
+pub struct A<'info> {
+    pub pool: Account<'info, P>,
+    pub vault: Account<'info, V>,
+    pub junk: Account<'info, J>,
+    pub authority: Signer<'info>,
+}
+#[derive(Accounts)]
+pub struct B<'info> {
+    #[account(has_one = authority)]
+    pub pool: Account<'info, P>,
+    pub vault: Account<'info, V>,
+    pub authority: Signer<'info>,
+}
+"#;
+        let one = r#"
+pub fn n(ctx: Context<N>) -> Result<()> {}
+#[derive(Accounts)]
+pub struct N<'info> {
+    pub pool: Account<'info, P>,
+    pub vault: Account<'info, V>,
+    pub authority: Signer<'info>,
+}
+"#;
+        let c = diff(&kinds(pair), &kinds(one));
+        assert!(c.iter().any(|c| c.severity == Severity::Regression && c.slot() == "n.pool"), "{c:?}");
+
+        // Tied between two new instructions: no pair, not even a worse one.
+        let tie = r#"
+pub fn x(ctx: Context<X>) -> Result<()> {}
+#[derive(Accounts)]
+pub struct X<'info> {
+    #[account(has_one = q)]
+    pub p: Account<'info, D>,
+    pub q: Account<'info, D>,
+    pub r: Account<'info, D>,
+    pub s: Account<'info, D>,
+}
+"#;
+        let three = r#"
+pub fn n1(ctx: Context<N1>) -> Result<()> {}
+pub fn n2(ctx: Context<N2>) -> Result<()> {}
+pub fn n3(ctx: Context<N3>) -> Result<()> {}
+#[derive(Accounts)]
+pub struct N1<'info> {
+    pub p: Account<'info, D>,
+    pub q: Account<'info, D>,
+    pub r: Account<'info, D>,
+    pub t1: Account<'info, D>,
+}
+#[derive(Accounts)]
+pub struct N2<'info> {
+    pub p: Account<'info, D>,
+    pub q: Account<'info, D>,
+    pub r: Account<'info, D>,
+    pub t2: Account<'info, D>,
+}
+#[derive(Accounts)]
+pub struct N3<'info> {
+    pub p: Account<'info, D>,
+    pub q: Account<'info, D>,
+    pub r: Account<'info, D>,
+    pub t4: Account<'info, D>,
+    pub t5: Account<'info, D>,
+}
+"#;
+        let c = diff(&kinds(tie), &kinds(three));
+        assert!(!c.iter().any(|c| c.severity == Severity::Regression), "{c:?}");
+        assert!(c.iter().any(|c| c.slot() == "x" && c.message.contains("not compared")), "{c:?}");
+
+        // Shared generic slots alone are not a rename.
+        let crank = base
+            .replace("pub fn init(ctx: Context<Init>)", "pub fn crank(ctx: Context<Crank>)")
+            .replace("struct Init<'info>", "struct Crank<'info>")
+            .replace("pub user: Account<'info, User>", "pub config: Account<'info, Config>");
+        let c = diff(&kinds(base), &kinds(&crank));
+        assert!(!c.iter().any(|c| c.message.starts_with("instruction renamed")), "{c:?}");
+
+        // A target change is a warning.
+        let moved = base.replace("close = destination", "close = owner");
+        let c = diff(&kinds(base), &kinds(&moved));
+        assert!(c.len() == 1 && c[0].severity == Severity::Warning && c[0].message.contains("from `destination` to `owner`"));
+
+        // Gone with nothing that matches: named, not silent.
+        let gone = base.replace("pub fn close(ctx: Context<Close>) -> Result<()> {}\n", "");
+        let c = diff(&kinds(base), &kinds(&gone));
+        assert_eq!(c.len(), 1);
+        assert!(c[0].slot() == "close" && c[0].message.contains("not compared") && c[0].file.is_empty());
+
+        // Two equally good candidates: no guess.
+        let two = base
+            .replace("fn init(ctx: Context<Init>) -> Result<()> {}", "fn a(ctx: Context<Init>) -> Result<()> {}\npub fn b(ctx: Context<Init>) -> Result<()> {}");
+        let c = diff(&kinds(base), &kinds(&two));
+        assert!(c.iter().any(|c| c.slot() == "init" && c.message.contains("not compared")));
     }
 }

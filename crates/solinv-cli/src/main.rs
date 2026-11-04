@@ -57,8 +57,9 @@ enum Commands {
     /// Show an Anchor IDL's account-validation surface, and which
     /// instructions to point the Critical 5 at first
     Idl {
-        /// Anchor IDL JSON, e.g. target/idl/my_program.json
-        path: PathBuf,
+        /// Anchor IDL JSON, e.g. target/idl/my_program.json. Optional
+        /// with --src: without it the map is read from source alone
+        path: Option<PathBuf>,
         /// Print a `SpecBuilder` binding stub for this instruction
         /// (`all` for every instruction)
         #[arg(long)]
@@ -567,6 +568,35 @@ fn main() -> Result<()> {
             }
         }
         Commands::Idl { path, rust, src } => {
+            let Some(path) = path else {
+                // No IDL (#11): the account lists come from the source.
+                let Some(dir) = src else {
+                    anyhow::bail!("solinv idl: give an IDL, or --src <program src> to map from source alone");
+                };
+                if rust.is_some() {
+                    anyhow::bail!("solinv idl --rust needs the IDL: discriminators and args are not in the source");
+                }
+                let kinds = source::SourceKinds::read(&dir)?;
+                if kinds.is_empty() {
+                    anyhow::bail!(
+                        "solinv idl: no #[derive(Accounts)] field under {} could be matched to an instruction",
+                        dir.display()
+                    );
+                }
+                eprintln!(
+                    "note: no IDL: S/W/P/A below come from the #[account] attributes in {} \
+                     (instructions in name order, seeds not resolved)",
+                    dir.display()
+                );
+                print!(
+                    "{}",
+                    kinds.to_idl().report_with_bound(
+                        |ix, path| kinds.get(ix, path),
+                        |ix, path| !kinds.unbound(ix, path)
+                    )
+                );
+                return Ok(());
+            };
             let raw = fs::read_to_string(&path)
                 .with_context(|| format!("failed to read IDL: {}", path.display()))?;
             let (idl, legacy) = solinv_fuzz::Idl::from_json_any(&raw)?;

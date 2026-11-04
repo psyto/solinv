@@ -39,7 +39,7 @@ anchor build      # writes target/idl/<program>.json
 solinv idl target/idl/<program>.json --src programs/<program>/src
 ```
 
-If you would rather not build, an IDL already in the repo works too, but it may lack PDA seeds and fixed addresses if it was generated without resolution.
+If you would rather not build, an IDL already in the repo works too, but it may lack PDA seeds and fixed addresses if it was generated without resolution. With no IDL at all (an older Anchor version, or a build that fails), `solinv idl --src programs/<program>/src` reads the map from the source alone, the columns taken from the `#[account(...)]` attributes. It differs from the IDL's in small ways: instructions in name order, and `A` also on an `address = …` that is not a constant.
 
 On Anchor 0.30, building the IDL with current Rust fails in `anchor-syn` with `no method named source_file found for struct proc_macro2::Span` ([anchor#3661](https://github.com/otter-sec/anchor/issues/3661); fixed in 0.31.1). What worked for us on 0.30.1, from the workspace root:
 

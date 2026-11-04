@@ -251,6 +251,20 @@ impl Idl {
     /// (instruction name, dotted slot path), so the slots whose owner and
     /// type checks are hand-written are counted apart from typed ones.
     pub fn report_with(&self, kind: impl Fn(&str, &str) -> Option<SlotKind>) -> String {
+        self.report_with_bound(kind, |_, _| true)
+    }
+
+    /// [`Idl::report_with`], with `bound` saying whether some declared
+    /// constraint fixes a typed slot's identity (`has_one`, `seeds`,
+    /// `address`, a `.key()` comparison, …). A typed slot none fixes is
+    /// marked `t`: Anchor checks its owner and type, so unless the
+    /// handler compares its key, a caller may pass any account of the
+    /// type — where `account-swap` should look.
+    pub fn report_with_bound(
+        &self,
+        kind: impl Fn(&str, &str) -> Option<SlotKind>,
+        bound: impl Fn(&str, &str) -> bool,
+    ) -> String {
         let types: Vec<&str> = self
             .accounts
             .iter()
@@ -259,7 +273,8 @@ impl Idl {
         let mut out = format!(
             "program {} — {} instructions, account types: {}\n\n\
              S signer  W writable  P pda seeds  A fixed address  \
-             · nothing declared  U unchecked in source  T typed in source\n",
+             · nothing declared  U unchecked in source  T typed in source  \
+             t typed, identity not fixed by a constraint\n",
             if self.address.is_empty() { "(no address)" } else { &self.address },
             self.instructions.len(),
             if types.is_empty() { "none".into() } else { types.join(", ") },
@@ -272,6 +287,7 @@ impl Idl {
             .max()
             .unwrap_or(0);
         let mut unsigned = Vec::new();
+        let mut loose = Vec::new();
         let (mut silent, mut unchecked, mut known) = (0, 0, false);
         for ix in &self.instructions {
             let kinds: Vec<Option<SlotKind>> =
@@ -304,6 +320,12 @@ impl Idl {
                         unchecked += 1;
                         " U"
                     }
+                    (true, Some(SlotKind::Typed)) if !bound(&ix.name, &flat.path()) => {
+                        if a.writable {
+                            loose.push(format!("{}.{}", ix.name, flat.path()));
+                        }
+                        " t"
+                    }
                     (true, Some(SlotKind::Typed)) => " T",
                     (true, None) => {
                         silent += 1;
@@ -319,6 +341,18 @@ impl Idl {
                 "\n{unchecked} slots are UncheckedAccount / AccountInfo in source: their \
                  checks are hand-written, which is where the Critical 5 can find something.\n"
             );
+            if !loose.is_empty() {
+                out += &format!(
+                    "! {} writable typed accounts have no declared constraint fixing which \
+                     account they are (no seeds, address, has_one, associated_token:: or \
+                     .key() comparison; the handler body is not read). Unless the handler \
+                     checks the key, a caller may pass any account of the type: expected for \
+                     their own token accounts, a hole for a vault, escrow or pool the program \
+                     owns. account-swap candidates: {}\n",
+                    loose.len(),
+                    loose.join(", ")
+                );
+            }
             if silent > 0 {
                 out += &format!("{silent} slots declare nothing and were not found in source.\n");
             }
@@ -1262,6 +1296,14 @@ mod tests {
         // The unsigned-writer flag does not depend on declared types.
         assert!(r.contains("3 instruction(s) with no signer write an unconstrained slot"));
         assert!(idl.report().contains("which the IDL cannot tell apart"));
+        assert!(!r.contains(" t\n") && !r.contains("typed accounts have no declared"));
+
+        let loose = idl.report_with_bound(
+            |_, _| Some(SlotKind::Typed),
+            |ix, path| (ix, path) != ("unsafe_set_amount_from_source", "target"),
+        );
+        assert!(loose.contains("! 1 writable typed accounts have no declared constraint"));
+        assert!(loose.contains("account-swap candidates: unsafe_set_amount_from_source.target\n"));
     }
 
     #[test]

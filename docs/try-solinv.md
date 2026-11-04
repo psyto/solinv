@@ -54,10 +54,11 @@ unsafe_withdraw   ! no signer, writes an unconstrained slot
 | `S` `W` `P` `A` | signer, writable, PDA seeds, fixed address — as the IDL declares them; Anchor enforces these |
 | `U` | `UncheckedAccount` / `AccountInfo` in your source: owner and type checks are hand-written |
 | `T` | a typed account (`Account<'info, T>` and friends): Anchor checks owner and type |
+| `t` | a typed account whose identity no declared constraint fixes (no `seeds`, `address`, `has_one`, `associated_token::*` or `.key()` comparison): Anchor checks it is *an* account of the type, not *which* one. Fine for the caller's own token account; a hole for a vault or escrow the program owns, unless the handler compares its key |
 | `·` | declares nothing, and the source reader could not place it (an alias, a multi-line type) |
 | `! no signer, …` | the instruction has no signer and writes a slot the IDL leaves unconstrained — either meant to be permissionless, or a missing authority check |
 
-For each flagged instruction, note whether it is meant to be callable by anyone. On the audited programs we tried, every one was — that is a fine answer.
+For each flagged instruction, note whether it is meant to be callable by anyone. For each writable `t`, note whether the caller is meant to choose it. On the audited programs we tried, every one was — that is a fine answer.
 
 Also try the pull-request check on two commits of your own history (a minute, no build):
 

@@ -36,6 +36,28 @@ pub struct Attrs {
     pub has_one: Vec<String>,
     /// Each `constraint = <expr>`, whitespace collapsed, error dropped.
     pub constraints: Vec<String>,
+    /// `init` (not `init_if_needed`, which also accepts an existing
+    /// account): the account is created here.
+    pub init: bool,
+    /// `associated_token::authority`: the account is the one associated
+    /// token account of that authority and mint. `token::authority` and
+    /// `token::mint` are not: one authority can own many token accounts.
+    pub token_authority: bool,
+    /// The names in the `seeds` and `address` values, `"::"` marking a
+    /// constant as in `keyed_constraints`.
+    pub seed_names: Vec<String>,
+    pub address_names: Vec<String>,
+    /// The names in `associated_token::authority`.
+    pub authority_names: Vec<String>,
+    /// The names in each `constraint` that compares a `.key()`, with
+    /// `"::"` standing for an upper-case constant (`VAULT_ID`, `crate::ID`): it fixes
+    /// this slot's identity when it names this slot and something else.
+    /// What the comparison says is not checked.
+    pub keyed_constraints: Vec<Vec<String>>,
+    /// The names (not field selectors: `a` in `a.b`, never `b`) in each
+    /// `seeds`, `address`, `token::authority` and `associated_token::*`
+    /// value. Each names a slot this one is tied to.
+    pub refs: Vec<String>,
 }
 
 /// One account slot as the source declares it.
@@ -83,6 +105,75 @@ impl SourceKinds {
 
     pub fn slot(&self, ix: &str, path: &str) -> Option<&Slot> {
         self.map.get(&(ix.to_string(), path.to_string()))
+    }
+
+    /// A data account (`Account`, `AccountLoader`, `InterfaceAccount`)
+    /// whose identity no attribute fixes: no `seeds`, `address`,
+    /// `associated_token::authority` or `has_one` on it naming another
+    /// slot or a constant (`seeds` of literals alone count; an
+    /// instruction argument does not), no `&&` clause of a `constraint`
+    /// on it naming it and another slot or constant beside a `.key()`,
+    /// no other slot's `has_one` or identity-fixing value naming it
+    /// (`vault.key() == pool.load()?.vault` ties `pool` too: the pool
+    /// the caller picks is what the vault is checked against), and not
+    /// created by `init`. Anchor checks its owner and type, so
+    /// unless the handler body compares its key (not read), a caller can
+    /// pass any account of the type. Names in another slot's attribute
+    /// are resolved among that slot's siblings.
+    pub fn unbound(&self, ix: &str, path: &str) -> bool {
+        let Some(s) = self.slot(ix, path) else { return false };
+        if s.kind != Some(SlotKind::Typed)
+            || !matches!(s.ty.as_str(), "Account" | "AccountLoader" | "InterfaceAccount")
+        {
+            return false;
+        }
+        let a = &s.attrs;
+        if a.init {
+            return false;
+        }
+        // A name in slot `p`'s attribute, resolved among `p`'s siblings.
+        let resolve = |p: &str, n: &str| format!("{}{n}", p.rfind('.').map_or("", |i| &p[..=i]));
+        // A keyed constraint on `p` ties `path` when it names `path` and
+        // another slot of the instruction or a constant — not only
+        // `path`, and not an instruction argument.
+        let ties = |p: &str, c: &[String]| {
+            c.iter().any(|n| resolve(p, n) == path)
+                && c.iter().any(|n| {
+                    n == "::" || {
+                        let q = resolve(p, n);
+                        q != path && self.map.contains_key(&(ix.to_string(), q))
+                    }
+                })
+        };
+        // Another slot of the instruction, or a constant — not an
+        // instruction argument, which the caller picks.
+        let fixed = |n: &String| {
+            n == "::" || {
+                let q = resolve(path, n);
+                q != path && self.map.contains_key(&(ix.to_string(), q))
+            }
+        };
+        // Seeds of literals alone name one address; seeds or an address
+        // built only from arguments name whichever the caller picks.
+        let seeds_fix = a.seeds
+            && (a.seed_names.iter().all(|n| n == "::") || a.seed_names.iter().any(fixed));
+        // `has_one = x` compares against `x.key()`, and `x` may be an
+        // instruction argument as well as a slot.
+        if seeds_fix
+            || a.has_one.iter().any(|n| n != "::" && fixed(n))
+            || (a.address && a.address_names.iter().any(fixed))
+            || (a.token_authority && a.authority_names.iter().any(fixed))
+        {
+            return false;
+        }
+        !self.map.iter().any(|((i, p), t)| {
+            i == ix && {
+                let named = |n: &String| p != path && resolve(p, n) == path;
+                t.attrs.has_one.iter().any(named)
+                    || t.attrs.refs.iter().any(named)
+                    || t.attrs.keyed_constraints.iter().any(|c| ties(p, c))
+            }
+        })
     }
 
     /// Every placed slot, as ((instruction, path), slot), sorted.
@@ -195,6 +286,30 @@ impl SourceKinds {
 /// `expr`, the same bytes with only comments blanked, supplies the
 /// constraint expressions.
 fn read_attrs(text: &str, expr: &str) -> Attrs {
+    // An upper-case constant: `VAULT_ID`, `crate::ID`. A qualified call
+    // (`helpers::f(arg)`) is not one.
+    let constant = Regex::new(r"\b[A-Z][A-Z0-9_]*\b").unwrap();
+    let keyed = Regex::new(r"\.\s*key\s*\(\s*\)").unwrap();
+    // A name at the head of a path: not after `.` (a field) or `::` (a
+    // module item). `text` has literals blanked, so `b"vault"` names
+    // nothing.
+    let name = Regex::new(r"(?:^|[^.:\w\s])\s*([a-z_][A-Za-z0-9_]*)|^\s*([a-z_][A-Za-z0-9_]*)").unwrap();
+    // The names in `s` (a slice of `text`), `"::"` added for a constant.
+    // `expr` has the same bytes with literals kept, so a `b` or `br`
+    // before a quote there is a byte-string prefix, not a name.
+    let names_in = |s: &str| -> Vec<String> {
+        let at = s.as_ptr() as usize - text.as_ptr() as usize;
+        let mut names: Vec<String> = name
+            .captures_iter(s)
+            .filter_map(|c| c.get(1).or(c.get(2)))
+            .filter(|m| !matches!(expr.as_bytes().get(at + m.end()), Some(b'"' | b'\'' | b'#')))
+            .map(|m| m.as_str().to_string())
+            .collect();
+        if constant.is_match(s) {
+            names.push("::".into());
+        }
+        names
+    };
     let mut a = Attrs::default();
     for r in account_items(text) {
         let item = &text[r.clone()];
@@ -202,8 +317,39 @@ fn read_attrs(text: &str, expr: &str) -> Attrs {
         let key = eq.map_or(item, |e| &item[..e]).trim();
         let value = eq.map(|e| item[e + 1..].trim());
         let bare = key.split_whitespace().next().unwrap_or("");
+        if let Some(v) = value {
+            // The `@ Error` names no account.
+            let v = &v[..error_cut(v)];
+            if bare == "constraint" {
+                // Each `&&` / `||` clause on its own: in
+                // `admin.key() == ADMIN && vault.amount > 0` the key
+                // comparison says nothing about `vault`.
+                for clause in clauses(v).into_iter().filter(|c| keyed.is_match(c)) {
+                    a.keyed_constraints.push(names_in(clause));
+                }
+            }
+            let fixes = match bare {
+                "seeds" | "address" | "token::authority" => true,
+                b => b.starts_with("associated_token::"),
+            };
+            if fixes {
+                let marked = names_in(v);
+                a.refs.extend(marked.iter().filter(|n| *n != "::").cloned());
+                match bare {
+                    "seeds" => a.seed_names = marked,
+                    "address" => a.address_names = marked,
+                    "associated_token::authority" => a.authority_names = marked,
+                    _ => {}
+                }
+            }
+        }
+        a.token_authority |= bare == "associated_token::authority";
         match (bare, value) {
-            ("mut" | "init" | "init_if_needed", _) => a.mutable = true,
+            ("init", _) => {
+                a.mutable = true;
+                a.init = true;
+            }
+            ("mut" | "init_if_needed", _) => a.mutable = true,
             ("signer", _) => a.signer = true,
             ("seeds", Some(_)) => a.seeds = true,
             ("address", Some(_)) => a.address = true,
@@ -282,19 +428,73 @@ fn account_items(text: &str) -> Vec<std::ops::Range<usize>> {
 /// the same bytes with literals blanked and finds the `@`, so an `@` or
 /// bracket inside a string is part of the expression.
 fn normalise_expr(blanked: &str, v: &str) -> String {
-    let (mut depth, mut cut) = (0i32, v.len());
+    v[..error_cut(blanked)].split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// The clauses every passing evaluation of `v` must satisfy: `v` split
+/// at its top-level `&&`, wrapping parentheses removed, recursively. A
+/// part with a top-level `||` contributes nothing, since one branch
+/// alone can pass.
+fn clauses(v: &str) -> Vec<&str> {
+    let v = v.trim();
+    let b = v.as_bytes();
+    // `( … )` around the whole value, matched at its own depth.
+    if b.first() == Some(&b'(') {
+        let mut depth = 0i32;
+        let close = b.iter().position(|&c| {
+            depth += match c {
+                b'(' | b'[' | b'{' => 1,
+                b')' | b']' | b'}' => -1,
+                _ => 0,
+            };
+            depth == 0
+        });
+        if close == Some(b.len() - 1) {
+            return clauses(&v[1..v.len() - 1]);
+        }
+    }
+    let (mut depth, mut start, mut parts, mut or) = (0i32, 0usize, Vec::new(), false);
+    let mut j = 0;
+    while j < b.len() {
+        match b[j] {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth -= 1,
+            b'|' if depth == 0 && b.get(j + 1) == Some(&b'|') => {
+                or = true;
+                j += 1;
+            }
+            b'&' if depth == 0 && b.get(j + 1) == Some(&b'&') => {
+                parts.push(&v[start..j]);
+                start = j + 2;
+                j += 1;
+            }
+            _ => {}
+        }
+        j += 1;
+    }
+    if or {
+        return Vec::new();
+    }
+    if parts.is_empty() {
+        return vec![v];
+    }
+    parts.push(&v[start..]);
+    parts.into_iter().flat_map(clauses).collect()
+}
+
+/// Where a value's top-level `@ Error` starts (its end if none), found
+/// in literal-blanked text so an `@` inside a string is not one.
+fn error_cut(blanked: &str) -> usize {
+    let mut depth = 0i32;
     for (j, ch) in blanked.char_indices() {
         match ch {
             '(' | '[' | '{' => depth += 1,
             ')' | ']' | '}' => depth -= 1,
-            '@' if depth == 0 => {
-                cut = j;
-                break;
-            }
+            '@' if depth == 0 => return j,
             _ => {}
         }
     }
-    v[..cut].split_whitespace().collect::<Vec<_>>().join(" ")
+    blanked.len()
 }
 
 fn full_type(ty: &str) -> String {
@@ -688,6 +888,113 @@ pub struct F<'info> {
             ]
         );
         assert!(k.slot("f", "vault").unwrap().attrs.signer);
+    }
+
+    #[test]
+    fn typed_accounts_not_tied_to_another_slot_are_unbound() {
+        let src = r#"
+pub fn buy(ctx: Context<Buy>) -> Result<()> {}
+pub fn bound(ctx: Context<Bound>) -> Result<()> {}
+#[derive(Accounts)]
+pub struct Buy<'info> {
+    #[account(mut)]
+    pub sale: Account<'info, Sale>,
+    #[account(mut)]
+    pub vault: Account<'info, TokenAccount>,
+    #[account(mut, constraint = own.amount > 0 && config.vault == sale.payout)]
+    pub config: Account<'info, Config>,
+    #[account(mut, constraint = own.key() == config.sale)]
+    pub own: Account<'info, TokenAccount>,
+    #[account(mut, token::mint = sale.mint)]
+    pub mint_only: Account<'info, TokenAccount>,
+    #[account(mut, constraint = buyer.key() == consts::reused() @ E::X)]
+    pub elsewhere: Account<'info, TokenAccount>,
+    #[account(seeds = [b"vault", b"sale"], bump)]
+    pub registry: Account<'info, Registry>,
+    #[account(mut, constraint = same.key() == same.key())]
+    pub same: Account<'info, TokenAccount>,
+    #[account(mut, constraint = fixed.key() == FIXED_ID)]
+    pub fixed: Account<'info, TokenAccount>,
+    #[account(mut, constraint = arg.key() == expected)]
+    pub arg: Account<'info, TokenAccount>,
+    #[account(mut, constraint = sale.key() == sale.key())]
+    pub other: Account<'info, TokenAccount>,
+    #[account(mut, constraint = err.key() == err.key() @ ErrorCode::Unauthorized)]
+    pub err: Account<'info, TokenAccount>,
+    #[account(mut, constraint = call.key() == helpers::identity(expected))]
+    pub call: Account<'info, TokenAccount>,
+    #[account(mut, address = expected)]
+    pub by_arg: Account<'info, TokenAccount>,
+    #[account(mut, token::authority = expected)]
+    pub owned_by_arg: Account<'info, TokenAccount>,
+    #[account(mut, has_one = authority)]
+    pub arg_has_one: Account<'info, Vault>,
+    #[account(mut, constraint = buyer.key() == ADMIN && clause.amount > 0)]
+    pub clause: Account<'info, TokenAccount>,
+    #[account(mut, constraint = (buyer.key() == ADMIN && grouped.amount > 0))]
+    pub grouped: Account<'info, TokenAccount>,
+    #[account(mut, constraint = either.key() == EITHER || buyer.key() == ADMIN)]
+    pub either: Account<'info, TokenAccount>,
+    #[account(mut, constraint = (both.key() == BOTH) && (both.amount > 0 || buyer.key() == ADMIN))]
+    pub both: Account<'info, TokenAccount>,
+    #[account(seeds = [b"pos", expected.as_ref()], bump)]
+    pub seeded_by_arg: Account<'info, Position>,
+    #[account(init_if_needed, payer = buyer, space = 8)]
+    pub reused: Account<'info, Receipt>,
+    #[account(mut)]
+    pub buyer: Signer<'info>,
+    pub token_program: Program<'info, Token>,
+}
+#[derive(Accounts)]
+pub struct Bound<'info> {
+    #[account(mut, has_one = vault)]
+    pub sale: Account<'info, Sale>,
+    #[account(mut)]
+    pub vault: Account<'info, TokenAccount>,
+    #[account(mut, associated_token::mint = mint, associated_token::authority = sale)]
+    pub escrow: Account<'info, TokenAccount>,
+    #[account(mut, token::authority = sale)]
+    pub owned_by_sale: Account<'info, TokenAccount>,
+    pub mint: Account<'info, Mint>,
+    #[account(mut, constraint = payout.key() == sale.payout @ E::Payout)]
+    pub payout: Account<'info, TokenAccount>,
+    #[account(address = crate::TREASURY)]
+    pub treasury: Account<'info, TokenAccount>,
+    #[account(seeds = [b"config"], bump)]
+    pub singleton: Account<'info, Config>,
+    #[account(init, payer = buyer, space = 8)]
+    pub receipt: Account<'info, Receipt>,
+    #[account(mut, constraint = fee.key() == FEE_VAULT)]
+    pub fee: Account<'info, TokenAccount>,
+    #[account(seeds = [b"pos", owner.key().as_ref()], bump)]
+    pub position: Account<'info, Position>,
+    pub owner: Account<'info, Owner>,
+    #[account(mut)]
+    pub buyer: Signer<'info>,
+}
+"#;
+        let k = SourceKinds::parse(src);
+        // `config.vault` and `config.sale` select fields: they do not tie
+        // `vault` or `sale`. `own.key() == config.sale` ties both `own` and
+        // `config`; `consts::reused()` names no slot, and `b"vault"` is a literal.
+        for slot in [
+            "sale", "vault", "mint_only", "reused", "elsewhere", "same", "arg", "other", "err",
+            "call", "by_arg", "seeded_by_arg", "owned_by_arg", "arg_has_one", "clause",
+            "grouped", "either",
+        ] {
+            assert!(k.unbound("buy", slot), "{slot}");
+        }
+        for slot in ["own", "config", "registry", "fixed", "both", "buyer", "token_program"] {
+            assert!(!k.unbound("buy", slot), "{slot}");
+        }
+        for slot in [
+            "sale", "vault", "escrow", "payout", "receipt", "fee", "position", "owner", "treasury",
+            "singleton", "mint",
+        ] {
+            assert!(!k.unbound("bound", slot), "{slot}");
+        }
+        // One authority can own many token accounts.
+        assert!(k.unbound("bound", "owned_by_sale"));
     }
 
     /// strip() blanks byte for byte: non-ASCII text in a comment or a

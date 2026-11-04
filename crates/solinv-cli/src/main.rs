@@ -562,7 +562,13 @@ fn main() -> Result<()> {
                                 dir.display()
                             );
                         }
-                        print!("{}", idl.report_with(|ix, path| kinds.get(ix, path)));
+                        print!(
+                            "{}",
+                            idl.report_with_bound(
+                                |ix, path| kinds.get(ix, path),
+                                |ix, path| !kinds.unbound(ix, path)
+                            )
+                        );
                     }
                     None => print!("{}", idl.report()),
                 },

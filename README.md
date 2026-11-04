@@ -65,23 +65,26 @@ cargo run -q -p solinv-cli -- idl examples/escrow-demo/idl/escrow.json \
 ```
 program Esrcw11111111111111111111111111111111111111 — 12 instructions, account types: Vault
 
-S signer  W writable  P pda seeds  A fixed address  · nothing declared  U unchecked in source  T typed in source
+S signer  W writable  P pda seeds  A fixed address  · nothing declared  U unchecked in source  T typed in source  t typed, identity not fixed by a constraint
 …
 unsafe_set_amount_from_source   ! no signer, writes an unconstrained slot
    0 source               U
-   1 target           W   T
+   1 target           W   t
 …
 unsafe_withdraw   ! no signer, writes an unconstrained slot
    0 vault            W   U
    1 depositor        W   U
 
 7 slots are UncheckedAccount / AccountInfo in source: their checks are hand-written, which is where the Critical 5 can find something.
+! 1 writable typed accounts have no declared constraint fixing which account they are (no seeds, address, has_one, associated_token:: or .key() comparison; the handler body is not read). Unless the handler checks the key, a caller may pass any account of the type: expected for their own token accounts, a hole for a vault, escrow or pool the program owns. account-swap candidates: unsafe_set_amount_from_source.target
 3 instruction(s) with no signer write an unconstrained slot: unsafe_set_amount_from_source, unsafe_withdraw_with_bump, unsafe_withdraw
 Start there: either they are meant to be permissionless, or an authority check is missing.
 ```
 
 `U` marks an `UncheckedAccount` / `AccountInfo`, whose owner and type checks are hand-written; `T`
-a typed account Anchor checks. Without `--src` the IDL alone cannot tell them apart. The three
+a typed account Anchor checks. `t` is a typed account whose identity no declared constraint fixes:
+Anchor checks that it is *a* `Vault`, not *which* one, so unless the handler compares its key, a
+caller can pass their own. Without `--src` the IDL alone cannot tell these apart. The three
 flagged instructions are the demo program's three planted account-validation bugs. To fuzz them, see
 [fuzz the planted-bug demo](#quickstart--escrow-demo) (needs the Crucible CLI and `cargo build-sbf`).
 
@@ -840,13 +843,38 @@ The IDL cannot tell a typed `Account<'info, T>` from an
 without source every unconstrained slot counts the same. `--src` reads
 each field's declared type from the `#[derive(Accounts)]` structs and
 marks slots `U` (`UncheckedAccount` / `AccountInfo`: owner and type
-checks are hand-written) or `T` (one of Anchor's typed wrappers). It is a
-line reader, not a parser: a slot typed by a type alias, a struct name
+checks are hand-written) or `T` (one of Anchor's typed wrappers). A typed
+data account (`Account`, `AccountLoader`, `InterfaceAccount`) that no
+`seeds`, `address`, `has_one`, `associated_token::*` or `.key()`
+comparison identifies — on it, or on
+another slot naming it — and that `init` does not create, is marked
+`t`: Anchor checks its owner and type, not which account it is, so it
+is where `account-swap` should look. It is a candidate list, not a
+verdict: `seeds`, `address`, `has_one`, `associated_token::authority` and each
+`&&` clause of a constraint comparing a `.key()` (not an `||`, where
+one branch can pass alone) count when they
+name another account of the instruction or an upper-case constant
+(`seeds` of literals alone too), not an instruction argument the caller
+picks, and what a comparison says is not checked; a key
+comparison in the handler body is not read (Jito
+tip-distribution's `upload_merkle_root` checks there), nor is the fact
+that a type only ever exists at one PDA. A tie to another account
+counts even when that account is itself the caller's choice (the pool
+or sale the instruction acts on): whether a caller can create a matching
+pair depends on who can create the type, which the map does not read —
+`account-swap` with both slots swapped is the test for that. The reader is a line reader,
+not a parser: a slot typed by a type alias, a struct name
 defined twice, or a field type split over lines is left unplaced and
 counted as not found — never guessed. On the production programs
 measured that narrows the review a lot: Jito tip-distribution 29
 unconstrained slots → 5 unchecked, tip-payment 34 → 14, Raydium cp-swap
-108 → 30, with every slot placed.
+108 → 30, with every slot placed. Writable `t` slots: tip-distribution 4
+(a `Config` that `initialize` creates at a PDA, and tip-distribution
+accounts the handler checks or any caller may migrate by design),
+cp-swap 22 (admin-chosen configs and the
+caller's own token accounts — its vaults are tied by `constraint`), and
+20 on an Anchor 0.30 program of our own, among them the vaults behind
+four real holes ([#3](https://github.com/psyto/solinv/issues/3)).
 
 Building a spec, `system_program` and `associated_token_program` are
 bound by name when the IDL gives no address, and listed in
@@ -1029,7 +1057,7 @@ thing" drift after a negative result.
 
 ```bash
 cargo check --workspace               # verify scaffold (~5s)
-cargo test  --workspace               # all crates (272 tests)
+cargo test  --workspace               # all crates (273 tests)
 cargo test  -p solinv-core            # invariant regression tests
 cargo test  -p solinv-fuzz            # bytepoke + differential oracle + schema + idl
 cargo test  -p solinv-mutate          # operators + mutants + scoring (no Solana deps)
@@ -1043,7 +1071,7 @@ CLI surface:
 
 ```
 solinv idl <idl.json>                        # account-validation map + unsigned writers
-solinv idl <idl.json> --src <program src>    # + U/T: unchecked vs typed, from source
+solinv idl <idl.json> --src <program src>    # + U/T/t: unchecked, typed, typed but untied
 solinv diff --base-src <before> --head-src <after>  # checks a change removes; exit 1 if any
 solinv diff … --format github                # the same, as Actions annotations
 solinv idl <idl.json> --rust <ix|all>        # SpecBuilder stub to paste into a fixture

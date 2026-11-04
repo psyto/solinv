@@ -31,6 +31,7 @@ checks, install it (below).
 | I want to… | Use |
 |---|---|
 | fail a pull request that removes an account check, with a note on the line | the `psyto/solinv` GitHub Action, or `solinv diff --base-src <before> --head-src <after>` |
+| see which account checks a deployed program's upgrade dropped, without its source | `solinv diff --base-idl <audited.json> --head-idl <onchain.json>` (`anchor idl fetch`), or every upgrade at once in [solinv check](https://solinv-check.meowna-server.workers.dev); [how it decides](docs/idl-diff.md) |
 | see which instructions need a hand-checked account, before writing any harness | `solinv idl target/idl/<program>.json --src programs/<program>/src` |
 | get a paste-ready spec for one instruction | `solinv idl <idl> --rust <ix>` |
 | fill an `InstructionSpec` from the IDL and fixture state instead of by hand | `solinv_fuzz::Idl` → `.spec()` → `.infer_from_state()` / `.infer_candidates()` |
@@ -877,11 +878,16 @@ solinv idl target/idl/my_program.json --src programs/my_program/src  # + declare
 solinv idl target/idl/my_program.json --rust deposit   # binding stub for one ix
 ```
 
-Reads the Anchor 0.30+ IDL format. A legacy (pre-0.30) IDL is rejected
-with the fix: convert it with
-`anchor idl convert <path> -p <program id> -o <out>` (`-p` is needed
-when the IDL has no `metadata.address`; klend's does not). Shank IDLs
-from native programs are not supported. Building an IDL on Anchor 0.30
+Reads the Anchor 0.30+ IDL format, and a legacy (pre-0.30) IDL directly:
+`solinv idl` and `solinv diff --base-idl` convert it the way
+`anchor idl convert` does, minus two bugs in that converter (string const
+seeds keep their JSON quotes,
+[anchor#5255](https://github.com/otter-sec/anchor/issues/5255); `has_one`
+relations land on the wrong account,
+[anchor#5256](https://github.com/otter-sec/anchor/issues/5256)), so do
+not pre-convert with it. In a harness, `Idl::from_json_any` does the
+same; `Idl::from_json` takes 0.30+ only. Shank IDLs from native programs
+are not supported. Building an IDL on Anchor 0.30
 with current Rust needs a `proc-macro2` pin
 ([anchor#3661](https://github.com/otter-sec/anchor/issues/3661)); the
 steps are in [`docs/try-solinv.md`](docs/try-solinv.md#step-2--map-your-program-about-5-minutes).

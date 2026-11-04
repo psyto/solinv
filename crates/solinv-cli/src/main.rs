@@ -601,7 +601,9 @@ fn main() -> Result<()> {
                 .with_context(|| format!("failed to read IDL: {}", path.display()))?;
             let (idl, legacy) = solinv_fuzz::Idl::from_json_any(&raw)?;
             if legacy {
-                eprintln!("note: legacy (pre-0.30) IDL, read as `anchor idl convert` would convert it");
+                eprintln!(
+                    "note: legacy (pre-0.30) IDL, converted like `anchor idl convert` without its seed and relations bugs (anchor#5255, #5256)"
+                );
             }
             match rust.as_deref() {
                 None => match src {

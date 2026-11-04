@@ -33,6 +33,7 @@ instruction whose handler takes that struct as its `Context<..>`
 | `seeds`, `address` or `owner` constraint deleted | removed |
 | `has_one = x` deleted | removed — or *moved* (warning) if another slot of the instruction now has it |
 | `constraint = <expr>` deleted or replaced | removed, naming the expression — or *moved* (warning) |
+| vipers `assert_keys_eq!` / `assert_keys_neq!` deleted from an `impl Validate` the handler's `#[access_control(ctx.accounts.validate())]` runs (composites' `self.x.validate()` followed) | removed, naming the check — or *moved* (warning) |
 | typed → a different typed type (`Account<Config>` → `Signer`) | warning: type changed |
 | a slot wrapped in `Option<…>` | warning: now optional |
 | a slot with checks gone from an instruction that remains | warning: renamed or removed, listing its checks |
@@ -45,6 +46,10 @@ Constraints are compared by expression, with whitespace collapsed and the
 `@ Error` dropped, so reformatting or renaming an error is not a change,
 and swapping one check for another is. String literals in an expression
 are kept, so `role == "admin"` → `role == "attacker"` is a change.
+vipers key checks are compared with their arguments sorted and written
+from the instruction's root (`assert_keys_eq!(common.bank.crate_mint,
+common.crate_mint)`), so swapping the arguments is not a change; removing
+the `#[access_control]` that runs them removes every one.
 
 ## Checked on
 
@@ -54,6 +59,11 @@ are kept, so `role == "admin"` → `role == "attacker"` is a change.
   themselves: nothing reported.
 - escrow-clean against the planted-bug escrow: three warnings, on exactly
   the three planted instructions that write state with no signer.
+- Cashio's real source, fixed (`7df6581`) against the version before the
+  fix: `assert_keys_eq!(common.bank.crate_mint, common.crate_mint)` removed
+  from `validate()`, in `print_cash` and `burn_cash` — the check its fix
+  added. Cashio's code never had that check, so no pull request removed
+  it; this shows that one written and later deleted would be named.
 
 ## Limits
 
@@ -61,7 +71,13 @@ It reads text, not types, line by line as rustfmt lays fields out:
 
 - A check moved from an attribute into the handler body
   (`require_keys_eq!`) reads as removed. That is deliberate: a reviewer
-  should look.
+  should look. Handler bodies are not read; the one exception is vipers'
+  `assert_keys_eq!` / `assert_keys_neq!` in an `impl Validate` run by
+  `#[access_control]`. A check inside an `if` counts as always run; a
+  second `impl Validate` for the same struct anywhere in the source (a
+  test module's included) leaves both unread. Rarer spellings —
+  `self.x.to_account_info().key`, `<X as Validate>::validate(&self.x)` —
+  are not normalised, so switching to one reads as a removal.
 - A field typed by a type alias, a struct name defined twice, or a field
   type split over lines is not placed, so changes to it are not compared.
 - A whole instruction removed is not reported; its handler is gone with

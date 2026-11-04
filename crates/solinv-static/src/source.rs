@@ -58,6 +58,15 @@ pub struct Attrs {
     /// `seeds`, `address`, `token::authority` and `associated_token::*`
     /// value. Each names a slot this one is tied to.
     pub refs: Vec<String>,
+    /// Each vipers `assert_keys_eq!` / `assert_keys_neq!` in an
+    /// `impl Validate` that the handler's `#[access_control]` runs, with
+    /// this slot as its first argument naming a slot: arguments sorted,
+    /// paths from the instruction's root, e.g.
+    /// `assert_keys_eq!(common.bank.crate_mint, common.crate_mint)`.
+    pub validate: Vec<String>,
+    /// For each `assert_keys_eq!` above, the slots its arguments name
+    /// (full paths) and `"::"` for a constant: like `keyed_constraints`.
+    pub validate_keys: Vec<Vec<String>>,
 }
 
 /// One account slot as the source declares it.
@@ -81,6 +90,14 @@ pub struct Slot {
 /// Declared slots per (instruction, dotted slot path).
 pub struct SourceKinds {
     map: HashMap<(String, String), Slot>,
+}
+
+/// `assert_keys_eq!` / `assert_keys_neq!` calls and `self.<field>.validate()`
+/// calls in one `impl Validate for <struct>`.
+#[derive(Default)]
+struct ValidateImpl {
+    checks: Vec<(bool, [String; 2])>,
+    calls: Vec<String>,
 }
 
 struct RawField {
@@ -129,6 +146,13 @@ impl SourceKinds {
         }
         let a = &s.attrs;
         if a.init {
+            return false;
+        }
+        // An `assert_keys_eq!` naming it and another slot or a constant.
+        if self.map.iter().any(|((i, _), t)| {
+            i == ix
+                && t.attrs.validate_keys.iter().any(|c| c.iter().any(|n| n == path) && c.iter().any(|n| n != path))
+        }) {
             return false;
         }
         // A name in slot `p`'s attribute, resolved among `p`'s siblings.
@@ -218,6 +242,21 @@ impl SourceKinds {
         )
         .unwrap();
         let ident = Regex::new(r"\b([A-Z]\w*)\b").unwrap();
+        // vipers' `impl<'info> Validate<'info> for X<'info>`, run by
+        // `#[access_control(ctx.accounts.validate())]` on the handler.
+        let validate_impl = Regex::new(
+            r"\bimpl\b[^{;]*?\bValidate\s*(?:<[^{;>]*>)?\s+for\s+(?:[A-Za-z_]\w*::)*([A-Za-z_]\w*)[^{;]*\{",
+        )
+        .unwrap();
+        let key_assert = Regex::new(r"\bassert_keys_(eq|neq)\s*!\s*[(\[]").unwrap();
+        // `self.x.validate()` or `Validate::validate(&self.x)`.
+        let validate_call = Regex::new(
+            r"\bself\s*\.\s*([a-z_]\w*)\s*\.\s*validate\s*\(\s*\)|\bValidate\s*::\s*validate\s*\(\s*&\s*self\s*\.\s*([a-z_]\w*)\s*\)",
+        )
+        .unwrap();
+        let access_control =
+            Regex::new(r"access_control\s*\([^]]*\bctx\s*\.\s*accounts\s*\.\s*validate\s*\(\s*\)")
+                .unwrap();
 
         let stripped: Vec<(String, String)> = files
             .iter()
@@ -268,12 +307,51 @@ impl SourceKinds {
             structs.insert(name.clone(), fields);
         }
 
+        let mut validates: HashMap<String, ValidateImpl> = HashMap::new();
+        let mut seen: HashMap<String, usize> = HashMap::new();
+        for (file, src) in &stripped {
+            for c in validate_impl.captures_iter(src) {
+                let open = c.get(0).unwrap().end();
+                let Some(body) = braced(&src[open..]) else { continue };
+                let expr_body = &exprs[file.as_str()][open..open + body.len()];
+                *seen.entry(c[1].to_string()).or_default() += 1;
+                let v = validates.entry(c[1].to_string()).or_default();
+                for m in key_assert.captures_iter(body) {
+                    let at = m.get(0).unwrap().end();
+                    let Some(close) = closing_paren(&body[at..]) else { continue };
+                    let args = split_top(&body[at..at + close], &expr_body[at..at + close]);
+                    if let [a, b, ..] = args.as_slice() {
+                        v.checks.push((&m[1] == "eq", [a.clone(), b.clone()]));
+                    }
+                }
+                v.calls.extend(
+                    validate_call
+                        .captures_iter(body)
+                        .filter_map(|c| c.get(1).or(c.get(2)).map(|m| m.as_str().to_string())),
+                );
+            }
+        }
+        // Two impls for one name cannot be told apart: use neither.
+        validates.retain(|n, _| seen[n] == 1);
+
         let mut map = HashMap::new();
+        let mut validated = Vec::new();
         for (_, src) in &stripped {
             for c in handler.captures_iter(src) {
                 let Some(ctx) = ident.captures_iter(&c[2]).last() else { continue };
                 walk(&structs, &ctx[1], &c[1], "", &mut map, 0);
+                // The handler's attributes: back to the item before it.
+                let start = c.get(0).unwrap().start();
+                let from = src[..start].rfind(['}', ';', '{']).map_or(0, |i| i + 1);
+                if access_control.is_match(&src[from..start]) {
+                    validated.push((ctx[1].to_string(), c[1].to_string()));
+                }
             }
+        }
+        // After every walk: a second fn of the same name (the program's
+        // wrapper and the action it calls) walks the same slots again.
+        for (ctx, ix) in validated {
+            apply_validate(&structs, &validates, &ctx, &ix, "", &mut map, 0);
         }
         SourceKinds { map }
     }
@@ -543,6 +621,109 @@ fn walk(
     }
 }
 
+/// Attach the key checks `name`'s `validate()` runs (and the composites'
+/// `validate()` it calls) to the slots they name, for instruction `ix`.
+fn apply_validate(
+    structs: &HashMap<String, Vec<RawField>>,
+    validates: &HashMap<String, ValidateImpl>,
+    name: &str,
+    ix: &str,
+    prefix: &str,
+    out: &mut HashMap<(String, String), Slot>,
+    depth: usize,
+) {
+    let Some(v) = validates.get(name) else { return };
+    if depth > 8 {
+        return;
+    }
+    let join = |p: &str, f: &str| if p.is_empty() { f.to_string() } else { format!("{p}.{f}") };
+    let constant = Regex::new(r"^(?:[A-Za-z_]\w*::)*[A-Z][A-Z0-9_]*$").unwrap();
+    for (eq, args) in &v.checks {
+        // Each argument: its text from the instruction's root, and the
+        // slot it names (`self.bank.crate_mint` names `bank`), or "::"
+        // for a constant.
+        let mut resolved: Vec<(String, Option<String>)> = args
+            .iter()
+            .map(|a| a.trim_start_matches(['&', '*']))
+            .map(|a| a.strip_suffix(".key()").unwrap_or(a))
+            .map(|a| match a.strip_prefix("self.") {
+                Some(rest) => {
+                    let segs: Vec<&str> = rest
+                        .split('.')
+                        .take_while(|s| !s.is_empty() && s.chars().all(|c| c.is_alphanumeric() || c == '_'))
+                        .collect();
+                    let text = join(prefix, rest);
+                    let head = (1..=segs.len()).rev().map(|k| join(prefix, &segs[..k].join("."))).find(|p| {
+                        out.contains_key(&(ix.to_string(), p.clone()))
+                    });
+                    (text, head)
+                }
+                None if constant.is_match(a) => (a.to_string(), Some("::".to_string())),
+                None => (a.to_string(), None),
+            })
+            .collect();
+        // Sorted, so swapping the arguments is not a change.
+        resolved.sort();
+        let Some(slot) = resolved.iter().find_map(|(_, h)| h.clone().filter(|h| h != "::")) else {
+            continue;
+        };
+        let texts: Vec<&str> = resolved.iter().map(|(t, _)| t.as_str()).collect();
+        let check = format!("assert_keys_{}!({})", if *eq { "eq" } else { "neq" }, texts.join(", "));
+        let names: Vec<String> = resolved.iter().filter_map(|(_, h)| h.clone()).collect();
+        if let Some(s) = out.get_mut(&(ix.to_string(), slot)) {
+            if !s.attrs.validate.contains(&check) {
+                s.attrs.validate.push(check);
+                if *eq {
+                    s.attrs.validate_keys.push(names);
+                }
+            }
+        }
+    }
+    let Some(fields) = structs.get(name) else { return };
+    for call in &v.calls {
+        if let Some(Field::Composite(inner)) = fields.iter().find(|f| &f.name == call).map(|f| &f.field) {
+            apply_validate(structs, validates, inner, ix, &join(prefix, call), out, depth + 1);
+        }
+    }
+}
+
+/// Offset of the `)` that closes a parenthesis already opened.
+fn closing_paren(s: &str) -> Option<usize> {
+    let mut depth = 0i32;
+    for (i, ch) in s.char_indices() {
+        match ch {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' if depth == 0 => return Some(i),
+            ')' | ']' | '}' => depth -= 1,
+            _ => {}
+        }
+    }
+    None
+}
+
+/// `expr` split at the top-level commas `blanked` (the same bytes, with
+/// literals blanked) shows, each part with whitespace removed.
+fn split_top(blanked: &str, expr: &str) -> Vec<String> {
+    let (mut depth, mut start, mut parts) = (0i32, 0usize, Vec::new());
+    for (i, ch) in blanked.char_indices() {
+        match ch {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth -= 1,
+            ',' if depth == 0 => {
+                parts.push(&expr[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(&expr[start..]);
+    parts
+        .into_iter()
+        .map(|p| p.chars().filter(|c| !c.is_whitespace()).collect::<String>())
+        .filter(|p| !p.is_empty())
+        .collect()
+}
+
 const TYPED: &[&str] = &[
     "Account",
     "AccountLoader",
@@ -733,7 +914,7 @@ fn collect(dir: &Path, out: &mut Vec<(String, String)>) -> Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -995,6 +1176,68 @@ pub struct Bound<'info> {
         }
         // One authority can own many token accounts.
         assert!(k.unbound("bound", "owned_by_sale"));
+    }
+
+    /// vipers' `impl Validate` blocks, run through `#[access_control]`,
+    /// the way the Saber family (Cashio among them) writes its checks.
+    pub(crate) const VALIDATED: &str = r#"
+#[access_control(ctx.accounts.validate())]
+pub fn print(ctx: Context<Print>, amount: u64) -> Result<()> {}
+pub fn unvalidated(ctx: Context<Print>) -> Result<()> {}
+#[derive(Accounts)]
+pub struct Common<'info> {
+    pub bank: Box<Account<'info, Bank>>,
+    pub crate_mint: Account<'info, Mint>,
+    pub crate_token: Account<'info, CrateToken>,
+}
+#[derive(Accounts)]
+pub struct Print<'info> {
+    pub common: Common<'info>,
+    #[account(mut)]
+    pub source: Account<'info, TokenAccount>,
+    #[account(mut)]
+    pub destination: Account<'info, TokenAccount>,
+    #[account(mut)]
+    pub fee: Account<'info, TokenAccount>,
+    pub issue_authority: Account<'info, Authority>,
+    pub depositor: Signer<'info>,
+}
+impl<'info> Validate<'info> for Common<'info> {
+    fn validate(&self) -> Result<()> {
+        assert_keys_eq!(self.bank.crate_mint, self.crate_mint, "mint");
+        assert_keys_eq!(self.crate_mint, self.crate_token.mint);
+        Ok(())
+    }
+}
+impl<'info> ::vipers::Validate<'info> for crate::Print<'info> {
+    fn validate(&self) -> Result<()> {
+        Validate::validate(&self.common)?;
+        assert_keys_eq![&self.depositor, self.source.owner.key()];
+        assert_keys_neq!(self.destination, self.source);
+        assert_keys_eq!(self.issue_authority, crate::ISSUE_AUTHORITY);
+        Ok(())
+    }
+}
+"#;
+
+    #[test]
+    fn vipers_validate_checks_tie_slots_when_access_control_runs_them() {
+        let k = SourceKinds::parse(VALIDATED);
+        for slot in ["common.bank", "common.crate_mint", "common.crate_token", "source", "issue_authority"] {
+            assert!(!k.unbound("print", slot), "{slot}");
+        }
+        // `assert_keys_neq!` ties nothing; `fee` is checked nowhere.
+        assert!(k.unbound("print", "destination") && k.unbound("print", "fee"));
+        // Without `#[access_control]` the impl never runs.
+        assert!(k.unbound("unvalidated", "source") && k.unbound("unvalidated", "common.bank"));
+        assert_eq!(
+            k.slot("print", "common.bank").unwrap().attrs.validate,
+            vec!["assert_keys_eq!(common.bank.crate_mint, common.crate_mint)"]
+        );
+        assert_eq!(
+            k.slot("print", "destination").unwrap().attrs.validate,
+            vec!["assert_keys_neq!(destination, source)"]
+        );
     }
 
     /// strip() blanks byte for byte: non-ASCII text in a comment or a

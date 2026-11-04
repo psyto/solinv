@@ -96,6 +96,7 @@ flagged instructions are the demo program's three planted account-validation bug
 | Claim | Evidence |
 |---|---|
 | A removed check fails the PR | The demo above; [the demo pull request](https://github.com/psyto/solinv/pull/2) |
+| A check in vipers' `validate()` counts too | Cashio's real source, fixed → before the fix: the check its fix added is named, in both instructions ([details](docs/diff.md#checked-on)); the map marks 2 of its 26 typed accounts `t`, both validated by the program they are passed to (26 before vipers was read, [#8](https://github.com/psyto/solinv/issues/8)) |
 | No noise on code that keeps its checks | Comparing Jito tip-payment, tip-distribution and Raydium cp-swap with themselves: 0 reports. Reformatting a constraint or renaming its error: 0 reports (tested) |
 | The fuzz detectors catch a check that is removed | Mutation test on the clean escrow: of the removed checks the harness reached, 5 of 6 were caught, each by the detector predicted for it — after setting aside 5 mutations that cannot change behaviour, each argued in the [report](examples/escrow-demo/campaigns/escrow-clean-report.md) (5 of 11 before) |
 | …but not every kind yet | On Raydium's native AMM, 0 of 18: its guards compare values computed inside the handler, which a declaration cannot name ([why](#mutation-testing--measuring-detector-power-on-a-real-target)) |
@@ -891,7 +892,9 @@ comparison identifies — on it, or on
 another slot naming it — and that `init` does not create, is marked
 `t`: Anchor checks its owner and type, not which account it is, so it
 is where `account-swap` should look. It is a candidate list, not a
-verdict: `seeds`, `address`, `has_one`, `associated_token::authority` and each
+verdict: `seeds`, `address`, `has_one`, `associated_token::authority`, a
+vipers `assert_keys_eq!` in an `impl Validate` that `#[access_control]`
+runs, and each
 `&&` clause of a constraint comparing a `.key()` (not an `||`, where
 one branch can pass alone) count when they
 name another account of the instruction or an upper-case constant

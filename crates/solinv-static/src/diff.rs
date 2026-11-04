@@ -133,6 +133,15 @@ pub fn diff(base: &SourceKinds, head: &SourceKinds) -> Vec<Change> {
                 None => push(Severity::Regression, format!("`constraint = {expr}` removed")),
             }
         }
+        for check in ba.validate.iter().filter(|e| !ha.validate.contains(e)) {
+            match siblings.iter().find(|(_, s)| s.attrs.validate.contains(check)) {
+                Some((other, _)) => push(
+                    Severity::Warning,
+                    format!("`{check}` in validate() moved to `{other}`"),
+                ),
+                None => push(Severity::Regression, format!("`{check}` removed from validate()")),
+            }
+        }
     }
 
     // New instructions with the shape of a missing authority check.
@@ -176,6 +185,7 @@ fn checks_of(s: &Slot) -> Vec<String> {
     }
     c.extend(a.has_one.iter().map(|t| format!("has_one = {t}")));
     c.extend(a.constraints.iter().map(|e| format!("constraint = {e}")));
+    c.extend(a.validate.iter().cloned());
     c
 }
 
@@ -413,5 +423,42 @@ pub struct Sweep<'info> {
         assert_eq!(changes[0].message, "`seeds` constraint removed: any address is accepted");
         assert_eq!(changes[1].severity, Severity::Warning);
         assert_eq!((changes[1].ix.as_str(), changes[1].path.as_str()), ("sweep", "vault"));
+    }
+
+    #[test]
+    fn a_line_removed_from_validate_is_a_removed_check() {
+        let base = crate::source::tests::VALIDATED;
+        let head = base.replace("        assert_keys_eq!(self.bank.crate_mint, self.crate_mint, \"mint\");\n", "");
+        let changes = diff(&kinds(base), &kinds(&head));
+        let msgs: Vec<_> = changes.iter().map(|c| (c.severity, c.ix.as_str(), c.path.as_str(), c.message.as_str())).collect();
+        assert_eq!(
+            msgs,
+            vec![(
+                Severity::Regression,
+                "print",
+                "common.bank",
+                "`assert_keys_eq!(common.bank.crate_mint, common.crate_mint)` removed from validate()"
+            )]
+        );
+        // Swapping the arguments is not a change; dropping the
+        // `#[access_control]` removes every check it ran.
+        let swapped = base.replace("assert_keys_eq![&self.depositor, self.source.owner.key()]", "assert_keys_eq!(self.source.owner, self.depositor)");
+        assert!(diff(&kinds(base), &kinds(&swapped)).is_empty());
+        // The program's wrapper and the action it calls share a name and
+        // a context; the order the files are read in changes nothing.
+        let action = "pub fn print(ctx: Context<Print>, amount: u64) -> Result<()> {}\n";
+        let wrapper = "pub mod p {\n#[access_control(ctx.accounts.validate())]\npub fn print(ctx: Context<Print>, amount: u64) -> Result<()> {}\n}\n";
+        let rest = base.replace("#[access_control(ctx.accounts.validate())]\npub fn print(ctx: Context<Print>, amount: u64) -> Result<()> {}\n", "");
+        let files = |a: &str, b: &str| {
+            SourceKinds::parse_files(&[(a.into(), wrapper.to_string()), (b.into(), format!("{action}{rest}"))])
+        };
+        for (w, a) in [("lib.rs", "actions.rs"), ("lib.rs", "a.rs"), ("a.rs", "lib.rs")] {
+            let k = files(w, a);
+            assert!(!k.unbound("print", "common.bank"), "{w} {a}");
+            assert!(diff(&kinds(base), &k).is_empty(), "{w} {a}");
+        }
+        let unrun = base.replace("#[access_control(ctx.accounts.validate())]\n", "");
+        let removed = diff(&kinds(base), &kinds(&unrun));
+        assert_eq!(removed.iter().filter(|c| c.severity == Severity::Regression).count(), 5);
     }
 }

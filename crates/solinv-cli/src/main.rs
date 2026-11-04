@@ -12,6 +12,7 @@ use clap::{Parser, Subcommand};
 use serde::Deserialize;
 use std::{fs, path::PathBuf};
 
+mod diff;
 mod source;
 
 #[derive(Parser)]
@@ -68,6 +69,22 @@ enum Commands {
         /// UncheckedAccount / AccountInfo
         #[arg(long)]
         src: Option<PathBuf>,
+    },
+    /// Name the account checks a change removes: compares two versions
+    /// of an Anchor program's source (no build needed)
+    Diff {
+        /// The program source before the change (file or directory)
+        #[arg(long)]
+        base_src: PathBuf,
+        /// The program source after the change
+        #[arg(long)]
+        head_src: PathBuf,
+        /// `text`, or `github` for Actions annotations on the changed lines
+        #[arg(long, default_value = "text")]
+        format: String,
+        /// Exit 0 even when checks were removed
+        #[arg(long)]
+        no_fail: bool,
     },
     /// Score and rank bug bounty targets
     Score {
@@ -507,6 +524,29 @@ fn main() -> Result<()> {
             println!("solinv disclose {bug_id}: not yet implemented");
         }
         Commands::Mutate { action } => run_mutate(action)?,
+        Commands::Diff { base_src, head_src, format, no_fail } => {
+            let base = source::SourceKinds::read(&base_src)?;
+            let head = source::SourceKinds::read(&head_src)?;
+            if base.is_empty() {
+                anyhow::bail!(
+                    "no #[derive(Accounts)] field under {} could be matched to an instruction",
+                    base_src.display()
+                );
+            }
+            let changes = diff::diff(&base, &head);
+            match format.as_str() {
+                "github" => {
+                    print!("{}", diff::render_github(&changes));
+                    eprint!("{}", diff::render_text(&changes));
+                }
+                "text" => print!("{}", diff::render_text(&changes)),
+                other => anyhow::bail!("unknown --format {other} (text or github)"),
+            }
+            let removed = changes.iter().any(|c| c.severity == diff::Severity::Regression);
+            if removed && !no_fail {
+                std::process::exit(1);
+            }
+        }
         Commands::Idl { path, rust, src } => {
             let raw = fs::read_to_string(&path)
                 .with_context(|| format!("failed to read IDL: {}", path.display()))?;

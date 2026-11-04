@@ -7,6 +7,8 @@
 //!
 //! Text, not a parser: one field per line, as rustfmt writes them. A
 //! field this misses is reported as "not found in source", never guessed.
+//! Each slot also keeps the constraints written in its `#[account(...)]`
+//! and where it is declared, which is what `solinv diff` compares.
 
 use anyhow::{Context, Result};
 use regex::Regex;
@@ -23,107 +25,200 @@ enum Field {
     Composite(String),
 }
 
-/// Declared kind per (instruction, dotted slot path).
+/// The constraints written in a field's `#[account(...)]` attribute.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Attrs {
+    pub mutable: bool,
+    pub signer: bool,
+    pub seeds: bool,
+    pub address: bool,
+    pub owner: bool,
+    pub has_one: Vec<String>,
+    pub constraints: usize,
+}
+
+/// One account slot as the source declares it.
+#[derive(Clone, Debug)]
+pub struct Slot {
+    /// `None` when the type is not one the reader recognises.
+    pub kind: Option<SlotKind>,
+    /// The type's name under `Box<` / `Option<`: `Account`, `Signer`, …
+    pub ty: String,
+    pub attrs: Attrs,
+    /// Where the field is declared, for annotations.
+    pub file: String,
+    pub line: usize,
+}
+
+/// Declared slots per (instruction, dotted slot path).
 pub struct SourceKinds {
-    map: HashMap<(String, String), SlotKind>,
+    map: HashMap<(String, String), Slot>,
+}
+
+struct RawField {
+    name: String,
+    field: Field,
+    ty: String,
+    attrs: Attrs,
+    file: String,
+    line: usize,
 }
 
 impl SourceKinds {
     pub fn is_empty(&self) -> bool {
-        self.map.is_empty()
+        !self.map.values().any(|s| s.kind.is_some())
     }
 
     pub fn get(&self, ix: &str, path: &str) -> Option<SlotKind> {
-        self.map.get(&(ix.to_string(), path.to_string())).copied()
+        self.slot(ix, path).and_then(|s| s.kind)
     }
 
-    /// Read every `.rs` file under `dir`.
+    pub fn slot(&self, ix: &str, path: &str) -> Option<&Slot> {
+        self.map.get(&(ix.to_string(), path.to_string()))
+    }
+
+    /// Every placed slot, as ((instruction, path), slot), sorted.
+    pub fn slots(&self) -> Vec<(&(String, String), &Slot)> {
+        let mut v: Vec<_> = self.map.iter().collect();
+        v.sort_by(|a, b| a.0.cmp(b.0));
+        v
+    }
+
+    /// Read every `.rs` file under `dir` (or `dir` itself, if a file).
     pub fn read(dir: &Path) -> Result<Self> {
-        let mut text = String::new();
-        collect(dir, &mut text)
+        let mut files = Vec::new();
+        collect(dir, &mut files)
             .with_context(|| format!("failed to read sources under {}", dir.display()))?;
-        Ok(Self::parse(&text))
+        Ok(Self::parse_files(&files))
     }
 
+    #[cfg(test)]
     pub fn parse(src: &str) -> Self {
-        let src = strip_comments_and_strings(src);
+        Self::parse_files(&[("<src>".to_string(), src.to_string())])
+    }
 
+    pub fn parse_files(files: &[(String, String)]) -> Self {
         // Type aliases are not resolved: what an alias names depends on
         // module scope and imports (`use x::Account as Raw`), which a
         // line reader cannot follow. A slot typed by an alias is
         // unplaced, never guessed.
-
         let derive = Regex::new(
             // `[^{]`, not `[^{;]`: an `#[instruction(.., proof: Vec<[u8; 32]>)]`
             // between the derive and the struct carries a `;`.
             r"#\[derive\([^)]*\bAccounts\b[^)]*\)\][^{]*?\bstruct\s+([A-Za-z_]\w*)[^{;]*\{",
         )
         .unwrap();
-        let mut bodies: Vec<(String, String)> = Vec::new();
-        for c in derive.captures_iter(&src) {
-            let open = c.get(0).unwrap().end();
-            if let Some(body) = braced(&src[open..]) {
-                bodies.push((c[1].to_string(), body.to_string()));
-            }
-        }
-        let names: Vec<String> = bodies.iter().map(|(n, _)| n.clone()).collect();
-        // A name defined twice (two modules, cfg alternatives) cannot be
-        // told apart by `Context<Name>`: map neither.
-        let dup = |n: &str| names.iter().filter(|m| *m == n).count() > 1;
-
         // A field's type starts upper-case, which also keeps attribute
         // lines like `token::mint = x,` from reading as fields.
         let field = Regex::new(
             r"(?m)^\s*(?:pub(?:\([^)]*\))?\s+)?([a-z_]\w*)\s*:\s*([A-Z].*?),?\s*$",
         )
         .unwrap();
-        let mut structs: HashMap<String, Vec<(String, Field)>> = HashMap::new();
-        for (name, body) in &bodies {
-            if dup(name) {
-                continue;
-            }
-            let fields = field
-                .captures_iter(body)
-                .map(|c| (c[1].to_string(), classify(&c[2], &names)))
-                .collect();
-            structs.insert(name.clone(), fields);
-        }
-
         let handler = Regex::new(
             r"fn\s+([A-Za-z_]\w*)\s*(?:<[^>(]*>)?\s*\(\s*[A-Za-z_]\w*\s*:\s*Context\s*<([^()]*?)>\s*[,)]",
         )
         .unwrap();
         let ident = Regex::new(r"\b([A-Z]\w*)\b").unwrap();
+
+        let stripped: Vec<(String, String)> = files
+            .iter()
+            .map(|(f, t)| (f.clone(), strip_comments_and_strings(t)))
+            .collect();
+
+        // (struct name, file, file text, body offset in it, body)
+        let mut bodies: Vec<(String, &str, &str, usize, &str)> = Vec::new();
+        for (file, src) in &stripped {
+            for c in derive.captures_iter(src) {
+                let open = c.get(0).unwrap().end();
+                if let Some(body) = braced(&src[open..]) {
+                    bodies.push((c[1].to_string(), file, src, open, body));
+                }
+            }
+        }
+        let names: Vec<String> = bodies.iter().map(|b| b.0.clone()).collect();
+        // A name defined twice (two modules, cfg alternatives) cannot be
+        // told apart by `Context<Name>`: map neither.
+        let dup = |n: &str| names.iter().filter(|m| *m == n).count() > 1;
+
+        let mut structs: HashMap<String, Vec<RawField>> = HashMap::new();
+        for (name, file, src, open, body) in &bodies {
+            if dup(name) {
+                continue;
+            }
+            let mut prev = 0;
+            let mut fields = Vec::new();
+            for c in field.captures_iter(body) {
+                let m = c.get(0).unwrap();
+                let attrs = read_attrs(&body[prev..m.start()]);
+                prev = m.end();
+                let at = open + c.get(1).unwrap().start();
+                fields.push(RawField {
+                    name: c[1].to_string(),
+                    field: classify(&c[2], &names),
+                    ty: base_ident(&c[2]),
+                    attrs,
+                    file: file.to_string(),
+                    line: src[..at].matches('\n').count() + 1,
+                });
+            }
+            structs.insert(name.clone(), fields);
+        }
+
         let mut map = HashMap::new();
-        for c in handler.captures_iter(&src) {
-            let Some(ctx) = ident.captures_iter(&c[2]).last() else { continue };
-            walk(&structs, &ctx[1], &c[1], "", &mut map, 0);
+        for (_, src) in &stripped {
+            for c in handler.captures_iter(src) {
+                let Some(ctx) = ident.captures_iter(&c[2]).last() else { continue };
+                walk(&structs, &ctx[1], &c[1], "", &mut map, 0);
+            }
         }
         SourceKinds { map }
     }
 }
 
+/// The constraints in the attribute text preceding a field.
+fn read_attrs(text: &str) -> Attrs {
+    let has = |re: &str| Regex::new(re).unwrap().is_match(text);
+    Attrs {
+        mutable: has(r"\bmut\b"),
+        signer: has(r"\bsigner\b"),
+        seeds: has(r"\bseeds\s*="),
+        address: has(r"\baddress\s*="),
+        owner: has(r"\bowner\s*="),
+        has_one: Regex::new(r"\bhas_one\s*=\s*([A-Za-z_]\w*)")
+            .unwrap()
+            .captures_iter(text)
+            .map(|c| c[1].to_string())
+            .collect(),
+        constraints: Regex::new(r"\bconstraint\s*=").unwrap().find_iter(text).count(),
+    }
+}
+
 fn walk(
-    structs: &HashMap<String, Vec<(String, Field)>>,
+    structs: &HashMap<String, Vec<RawField>>,
     name: &str,
     ix: &str,
     prefix: &str,
-    out: &mut HashMap<(String, String), SlotKind>,
+    out: &mut HashMap<(String, String), Slot>,
     depth: usize,
 ) {
     let Some(fields) = structs.get(name) else { return };
     if depth > 8 {
         return;
     }
-    for (field, f) in fields {
-        let path = if prefix.is_empty() { field.clone() } else { format!("{prefix}.{field}") };
-        match f {
-            Field::Kind(k) => {
-                out.insert((ix.to_string(), path), *k);
+    for f in fields {
+        let path = if prefix.is_empty() { f.name.clone() } else { format!("{prefix}.{}", f.name) };
+        let kind = match &f.field {
+            Field::Composite(inner) => {
+                walk(structs, inner, ix, &path, out, depth + 1);
+                continue;
             }
-            Field::Composite(inner) => walk(structs, inner, ix, &path, out, depth + 1),
-            Field::Unknown => {}
-        }
+            Field::Kind(k) => Some(*k),
+            Field::Unknown => None,
+        };
+        out.insert(
+            (ix.to_string(), path),
+            Slot { kind, ty: f.ty.clone(), attrs: f.attrs.clone(), file: f.file.clone(), line: f.line },
+        );
     }
 }
 
@@ -279,10 +374,9 @@ fn braced(s: &str) -> Option<&str> {
     None
 }
 
-fn collect(dir: &Path, out: &mut String) -> Result<()> {
+fn collect(dir: &Path, out: &mut Vec<(String, String)>) -> Result<()> {
     if dir.is_file() {
-        out.push_str(&fs::read_to_string(dir)?);
-        out.push('\n');
+        out.push((dir.display().to_string(), fs::read_to_string(dir)?));
         return Ok(());
     }
     let mut entries: Vec<_> = fs::read_dir(dir)?.collect::<std::io::Result<_>>()?;
@@ -292,8 +386,7 @@ fn collect(dir: &Path, out: &mut String) -> Result<()> {
         if p.is_dir() {
             collect(&p, out)?;
         } else if p.extension().is_some_and(|x| x == "rs") {
-            out.push_str(&fs::read_to_string(&p)?);
-            out.push('\n');
+            out.push((p.display().to_string(), fs::read_to_string(&p)?));
         }
     }
     Ok(())

@@ -1,0 +1,23 @@
+# Runs solinv's own action on pull requests that touch the demo programs:
+# a change that removes an account check fails here, with an annotation
+# on the line. Uses the action from this checkout and installs solinv at
+# the pull request's own commit.
+name: solinv diff
+
+on:
+  pull_request:
+    paths:
+      - examples/escrow-demo/programs/escrow-clean/**
+
+permissions:
+  contents: read
+
+jobs:
+  account-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./
+        with:
+          program-src: examples/escrow-demo/programs/escrow-clean/src
+          solinv-rev: ${{ github.event.pull_request.head.sha }}

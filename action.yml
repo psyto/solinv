@@ -1,0 +1,81 @@
+name: solinv diff
+description: Annotate pull requests with the Anchor account checks they remove
+branding:
+  icon: shield
+  color: purple
+
+inputs:
+  program-src:
+    description: Path to the Anchor program's source, relative to the repository root (e.g. programs/my_program/src)
+    required: true
+  base-ref:
+    description: Commit to compare against. Defaults to the pull request's base.
+    default: ${{ github.event.pull_request.base.sha }}
+  solinv-rev:
+    description: solinv commit to install. Defaults to the ref this action is used at.
+    default: ''
+  fail-on-removed:
+    description: Fail the job when a check is removed ('true' or 'false')
+    default: 'true'
+
+runs:
+  using: composite
+  steps:
+    - name: Pick the solinv commit
+      id: rev
+      shell: bash
+      env:
+        INPUT_REV: ${{ inputs.solinv-rev }}
+        ACTION_REF: ${{ github.action_ref }}
+      run: |
+        rev="${INPUT_REV:-$ACTION_REF}"
+        if [ -z "$rev" ]; then
+          echo "::error title=solinv::set solinv-rev (no action ref to default to)"
+          exit 1
+        fi
+        echo "rev=$rev" >> "$GITHUB_OUTPUT"
+
+    - name: Cache the solinv binary
+      id: cache
+      uses: actions/cache@v4
+      with:
+        path: ${{ runner.temp }}/solinv-bin
+        key: solinv-cli-${{ runner.os }}-${{ steps.rev.outputs.rev }}
+
+    - name: Install solinv
+      if: steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        REV: ${{ steps.rev.outputs.rev }}
+      run: |
+        cargo install --locked --git https://github.com/psyto/solinv --rev "$REV" \
+          solinv-cli --root "$RUNNER_TEMP/solinv-bin"
+
+    - name: Check out the base version
+      shell: bash
+      env:
+        BASE: ${{ inputs.base-ref }}
+      run: |
+        if [ -z "$BASE" ]; then
+          echo "::error title=solinv::no base-ref (not a pull_request event? set base-ref)"
+          exit 1
+        fi
+        git fetch --no-tags --depth=1 origin "$BASE"
+        git worktree add --detach "$RUNNER_TEMP/solinv-base" "$BASE"
+
+    - name: Compare account checks
+      shell: bash
+      env:
+        SRC: ${{ inputs.program-src }}
+        FAIL: ${{ inputs.fail-on-removed }}
+      run: |
+        if [ ! -e "$RUNNER_TEMP/solinv-base/$SRC" ]; then
+          echo "::notice title=solinv::$SRC is new in this pull request; nothing to compare"
+          exit 0
+        fi
+        flag=""
+        [ "$FAIL" = "true" ] || flag="--no-fail"
+        "$RUNNER_TEMP/solinv-bin/bin/solinv" diff \
+          --base-src "$RUNNER_TEMP/solinv-base/$SRC" \
+          --head-src "$SRC" \
+          --format github $flag

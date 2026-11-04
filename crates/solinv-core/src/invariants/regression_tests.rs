@@ -404,16 +404,20 @@ fn account_swap_sets_swap_slots_together() {
     account_swap::check_sets(&mut fixture(), &[set.clone()]);
     assert_detected("together");
 
-    // A set that swaps one slot twice is malformed and skipped.
-    clear_violation_tracking();
-    let twice = SwapSet { swaps: vec![(0, rogue_from), (1, rogue_base.pubkey()), (1, base.pubkey())], ..set.clone() };
-    account_swap::check_sets(&mut fixture(), &[twice]);
-    assert_not_detected();
-
-    // A set for an instruction the fixture lacks is skipped.
-    clear_violation_tracking();
-    account_swap::check_sets(&mut fixture(), &[SwapSet { ix: "other".into(), ..set }]);
-    assert_not_detected();
+    // A set that cannot run is a harness bug, reported as one (#13).
+    let missing = Pubkey::new_unique();
+    for (bad, why) in [
+        (SwapSet { swaps: vec![(0, rogue_from), (1, rogue_base.pubkey()), (1, base.pubkey())], ..set.clone() }, "swapped twice"),
+        (SwapSet { ix: "other".into(), ..set.clone() }, "no instruction of that name"),
+        (SwapSet { swaps: vec![(0, rogue_from), (9, rogue_base.pubkey())], ..set.clone() }, "out of range"),
+        (SwapSet { swaps: vec![(0, from)], ..set.clone() }, "is the real account"),
+        (SwapSet { swaps: vec![(0, missing)], ..set.clone() }, "does not exist"),
+    ] {
+        clear_violation_tracking();
+        account_swap::check_sets(&mut fixture(), &[bad]);
+        let msg = take_violation().unwrap_or_default();
+        assert!(msg.starts_with("[account-swap-config:") && msg.contains(why), "{why}: {msg}");
+    }
 }
 
 #[test]

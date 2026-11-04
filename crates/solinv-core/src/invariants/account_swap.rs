@@ -44,7 +44,8 @@ where
     for spec in &ixs {
         for (idx, alternates) in spec.swap_alternates.iter().enumerate() {
             for &alt_pubkey in alternates {
-                run_attempt(fixture, spec, &[(idx, alt_pubkey)]);
+                // A per-slot alternate that cannot run is skipped quietly.
+                let _ = run_attempt(fixture, spec, &[(idx, alt_pubkey)]);
             }
         }
     }
@@ -66,43 +67,61 @@ pub struct SwapSet {
 }
 
 /// [`check`] for sets of slots that must be swapped together. Call it
-/// beside `check` from the same `#[invariant_test]`; a set naming an
-/// instruction the fixture does not have is skipped.
+/// beside `check` from the same `#[invariant_test]`. A set is declared on
+/// purpose, so one that cannot run — no instruction of that name, an index
+/// out of range or repeated, an alternate equal to the real account or
+/// missing from the context — is reported as an `[account-swap-config:…]`
+/// finding, failing CI instead of testing nothing (#13).
 pub fn check_sets<F>(fixture: &mut F, sets: &[SwapSet])
 where
     F: HasContext + HasInstructionSet,
 {
     let ixs = fixture.instructions();
     for set in sets {
-        if let Some(spec) = ixs.iter().find(|s| s.name == set.ix) {
-            run_attempt(fixture, spec, &set.swaps);
+        let outcome = match ixs.iter().find(|s| s.name == set.ix) {
+            Some(spec) => run_attempt(fixture, spec, &set.swaps),
+            None => Err("no instruction of that name in instructions()".to_string()),
+        };
+        if let Err(why) = outcome {
+            fuzz_assert!(false, "[account-swap-config:{}] swap set cannot run: {}", set.ix, why);
         }
     }
 }
 
 /// Single attempt: substitute each real alternate pubkey for the
 /// canonical account at its index, all in one instruction.
-fn run_attempt<F>(fixture: &mut F, spec: &solinv_fuzz::InstructionSpec, swaps: &[(usize, Pubkey)])
+///
+/// `Err` names why the attempt could not run; `check` ignores it.
+fn run_attempt<F>(
+    fixture: &mut F,
+    spec: &solinv_fuzz::InstructionSpec,
+    swaps: &[(usize, Pubkey)],
+) -> Result<(), String>
 where
     F: HasContext + HasInstructionSet,
 {
-    if swaps.is_empty() || swaps.iter().any(|&(idx, _)| idx >= spec.accounts.len()) {
-        return;
+    if swaps.is_empty() {
+        return Err("no swaps".into());
+    }
+    if let Some(&(idx, _)) = swaps.iter().find(|&&(idx, _)| idx >= spec.accounts.len()) {
+        return Err(format!("account {idx} out of range ({} accounts)", spec.accounts.len()));
     }
     // One alternate per slot: a repeated index is a malformed set.
-    if swaps.iter().enumerate().any(|(i, &(idx, _))| swaps[..i].iter().any(|&(j, _)| j == idx)) {
-        return;
+    if let Some((_, &(idx, _))) =
+        swaps.iter().enumerate().find(|&(i, &(idx, _))| swaps[..i].iter().any(|&(j, _)| j == idx))
+    {
+        return Err(format!("account {idx} swapped twice"));
     }
-    if swaps.iter().any(|&(idx, alt)| alt == spec.accounts[idx].pubkey) {
+    if let Some(&(idx, _)) = swaps.iter().find(|&&(idx, alt)| alt == spec.accounts[idx].pubkey) {
         // Same account; not a swap. (Defensive — fixture should not
-        // include real in alternates list, but skip gracefully.)
-        return;
+        // include real in alternates list.)
+        return Err(format!("account {idx}'s alternate is the real account"));
     }
 
     // Sanity: each alt must exist in ctx. Fixture is supposed to have
-    // created it during setup; skip silently if not.
-    if swaps.iter().any(|&(_, alt)| fixture.ctx().get_account(&alt).is_err()) {
-        return;
+    // created it during setup.
+    if let Some(&(idx, alt)) = swaps.iter().find(|&&(_, alt)| fixture.ctx().get_account(&alt).is_err()) {
+        return Err(format!("account {idx}'s alternate {alt} does not exist (create it in setup())"));
     }
 
     // 1. Build the full list of pubkeys the modified ix will touch:
@@ -180,4 +199,5 @@ where
 
     // 7. Manual restore of all touched (including alt if attack modified it)
     restore_accounts(fixture.ctx_mut(), saves);
+    Ok(())
 }

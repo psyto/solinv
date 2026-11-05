@@ -146,6 +146,36 @@ pub fn diff(base: &SourceKinds, head: &SourceKinds) -> Vec<Change> {
                 line: h.line,
             })
         };
+        let leaf = path.rsplit('.').next().unwrap_or(path);
+        // Kept in the list as a placeholder (`/// CHECK: Deprecated …`):
+        // its lost checks are one removal that says so. Still a removal: a
+        // retired account's checks may have pinned one still in use — a
+        // `has_one`, an allowlist PDA seeded by another account — and the
+        // source cannot tell that from bookkeeping.
+        // Only when it becomes one, naming only what it lost: a placeholder
+        // that keeps its `seeds` has not lost them, and later versions
+        // compare as any slot does.
+        let became_placeholder = |s: &Slot| s.deprecated && s.kind == Some(SlotKind::Unchecked);
+        let kept = checks_of(h);
+        let lost: Vec<String> = checks_of(b).into_iter().filter(|c| c != "signer" && !kept.contains(c)).collect();
+        if became_placeholder(h) && !became_placeholder(b) && !lost.is_empty() {
+            if !b.optional && h.optional {
+                push(Severity::Warning, "now optional: the instruction runs without it".into());
+            }
+            push(
+                Severity::Regression,
+                format!(
+                    "now a placeholder its `/// CHECK:` calls deprecated; its checks ({}) went \
+                     with it. If nothing reads `{leaf}` they guard nothing of its own — confirm \
+                     none of them pinned another account still in use",
+                    lost.join(", ")
+                ),
+            );
+            if signs(b) && !signs(h) {
+                push(Severity::Regression, format!("was {}, now {}: no longer required to sign", label(b), label(h)));
+            }
+            continue;
+        }
         // A Signer loosened is reported as the signature it loses, below.
         if b.kind == Some(SlotKind::Typed) && h.kind == Some(SlotKind::Unchecked) && b.ty != "Signer" {
             push(
@@ -178,7 +208,6 @@ pub fn diff(base: &SourceKinds, head: &SourceKinds) -> Vec<Change> {
         // holder, `address` on the target, a `constraint` — is not gone:
         // `Some(None)`. `Some(Some(r))` when it holds only once a renamed
         // slot `r` (`old → new`) is read as the old one.
-        let leaf = path.rsplit('.').next().unwrap_or(path);
         let restated = |eqs: Vec<KeyEq>| -> Option<Option<String>> {
             let held = declared_eqs(head, ix);
             if eqs.iter().all(|e| held.contains(e)) {
@@ -480,6 +509,8 @@ fn checks_of(s: &Slot) -> Vec<String> {
         }
     }
     c.extend(a.has_one.iter().map(|t| format!("has_one = {t}")));
+    c.extend(a.token_mint.iter().map(|t| format!("token::mint = {t}")));
+    c.extend(a.token_owner.iter().map(|t| format!("token::authority = {t}")));
     c.extend(a.constraints.iter().map(|e| format!("constraint = {e}")));
     c.extend(a.close.iter().map(|t| format!("close = {t}")));
     c.extend(a.body.iter().cloned());
@@ -1400,5 +1431,38 @@ pub struct Act<'info> {
         assert_eq!(sev(&base.replace("token::mint = mint", "token::mint = other")), [Severity::Warning]);
         // Said as a constraint instead: the same check.
         assert_eq!(sev(&base.replace("token::mint = mint, ", "constraint = vault.mint == mint.key(), ")), []);
+    }
+
+    #[test]
+    fn a_deprecated_placeholder_is_one_removal() {
+        let base = r#"
+pub fn act(ctx: Context<Act>) -> Result<()> {}
+#[derive(Accounts)]
+pub struct Act<'info> {
+    pub pool: Account<'info, Pool>,
+    #[account(seeds = [b"p", pool.key().as_ref()], bump, constraint = old.pool == pool.key())]
+    pub old: Account<'info, Old>,
+}
+"#;
+        let head = base.replace(
+            "#[account(seeds = [b\"p\", pool.key().as_ref()], bump, constraint = old.pool == pool.key())]\n    pub old: Account<'info, Old>,",
+            "/// CHECK: Deprecated: kept for compatibility.\n    pub old: UncheckedAccount<'info>,",
+        );
+        let c = diff(&kinds(base), &kinds(&head));
+        let old: Vec<_> = c.iter().filter(|c| c.slot() == "act.old").collect();
+        assert_eq!(old.len(), 1, "{c:?}");
+        assert!(old[0].severity == Severity::Regression && old[0].message.contains("placeholder"), "{c:?}");
+        // Kept as it is in a later version: nothing to report.
+        assert!(diff(&kinds(&head), &kinds(&head)).is_empty());
+        let keeps = base.replace("pub old: Account<'info, Old>,", "/// CHECK: Deprecated\n    pub old: UncheckedAccount<'info>,");
+        let c = diff(&kinds(base), &kinds(&keeps));
+        assert!(c.iter().all(|c| !c.message.contains("seeds")), "{c:?}");
+        assert!(diff(&kinds(&keeps), &kinds(&keeps)).is_empty());
+        // Made optional: still said.
+        let opt = head.replace("pub old: UncheckedAccount<'info>", "pub old: Option<UncheckedAccount<'info>>");
+        assert!(diff(&kinds(&head), &kinds(&opt)).iter().any(|c| c.slot() == "act.old" && c.message.contains("optional")));
+        // Without the comment: each check on its own.
+        let bare = head.replace("Deprecated: kept for compatibility.", "checked in the handler");
+        assert!(diff(&kinds(base), &kinds(&bare)).iter().filter(|c| c.slot() == "act.old").count() > 1);
     }
 }

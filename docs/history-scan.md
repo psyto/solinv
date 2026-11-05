@@ -102,6 +102,11 @@ Two kinds of false removal found while reading are fixed:
   `constraint = a.mint == b.mint` made `token::mint = b.mint`. The other 3 changed which field
   or which account type, and are still removals. Re-run on the same 40: **32 reports, 5 of them
   real** — about 1 in 6.
+- An account retired as a `/// CHECK: Deprecated …` placeholder (raydium-clmm's
+  `protocol_position`, 5 of the 40) is now one removal per instruction that says so, instead of
+  two or three. It stays a removal: we tried making it a warning when nothing reads the account,
+  and a review found real loosenings that passes — a retired `config` whose `has_one = treasury`
+  pinned the account fees go to, an allowlist PDA seeded by the mint.
 
 `x::id()` rewritten as `x::ID` (cp-swap's anchor-0.31 upgrade) is still a removal: Rust does not
 make the two the same.

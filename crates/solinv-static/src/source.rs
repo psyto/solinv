@@ -101,6 +101,10 @@ pub struct Slot {
     pub full_ty: String,
     /// Wrapped in `Option<…>`: the account may be left out.
     pub optional: bool,
+    /// Its `/// CHECK:` comment calls it deprecated: kept in the account
+    /// list for compatibility (`/// CHECK: Deprecated: … kept for
+    /// compatibility.`).
+    pub deprecated: bool,
     pub attrs: Attrs,
     /// Where the field is declared, for annotations.
     pub file: String,
@@ -143,6 +147,7 @@ struct RawField {
     ty: String,
     full_ty: String,
     optional: bool,
+    deprecated: bool,
     attrs: Attrs,
     file: String,
     line: usize,
@@ -391,6 +396,8 @@ impl SourceKinds {
         // told apart by `Context<Name>`: map neither.
         let dup = |n: &str| names.iter().filter(|m| *m == n).count() > 1;
 
+        let originals: HashMap<&str, &str> = files.iter().map(|(f, t)| (f.as_str(), t.as_str())).collect();
+        let deprecated = Regex::new(r"(?im)^\s*///\s*CHECK\b.*\bdeprecated\b").unwrap();
         let mut structs: HashMap<String, Vec<RawField>> = HashMap::new();
         for (name, file, src, open, body) in &bodies {
             if dup(name) {
@@ -398,11 +405,16 @@ impl SourceKinds {
             }
             let expr_body = &exprs[*file][*open..*open + body.len()];
             let mut prev = 0;
+            // The previous field's type end: its match runs on over the
+            // blanked comment lines after it.
+            let mut doc_from = 0;
             let mut fields = Vec::new();
             for c in field.captures_iter(body) {
                 let m = c.get(0).unwrap();
                 let attrs = read_attrs(&body[prev..m.start()], &expr_body[prev..m.start()]);
+                let doc = &originals[*file][open + doc_from..open + c.get(1).unwrap().start()];
                 prev = m.end();
+                doc_from = c.get(2).unwrap().end();
                 let at = open + c.get(1).unwrap().start();
                 fields.push(RawField {
                     name: c[1].to_string(),
@@ -410,6 +422,7 @@ impl SourceKinds {
                     ty: base_ident(&c[2]),
                     full_ty: full_type(&c[2]),
                     optional: c[2].trim().trim_start_matches("Box<").trim().starts_with("Option<"),
+                    deprecated: deprecated.is_match(doc),
                     attrs,
                     file: file.to_string(),
                     line: src[..at].matches('\n').count() + 1,
@@ -776,6 +789,7 @@ fn walk(
                 ty: f.ty.clone(),
                 full_ty: f.full_ty.clone(),
                 optional: optional || f.optional,
+                deprecated: f.deprecated,
                 attrs: f.attrs.clone(),
                 file: f.file.clone(),
                 line: f.line,

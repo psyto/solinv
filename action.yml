@@ -1,5 +1,5 @@
 name: solinv diff
-description: Annotate pull requests and pushes with the Anchor account checks they remove
+description: Fail a PR or push that removes an Anchor account check (has_one, seeds, signer, constraint), annotated on the line.
 branding:
   icon: shield
   color: purple

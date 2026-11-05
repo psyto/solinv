@@ -13,7 +13,7 @@
 use anyhow::{Context, Result};
 use regex::Regex;
 use crate::idl::{Idl, IdlAccount, IdlAccountItem, IdlInstruction, IdlPda, SlotKind};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 
@@ -348,9 +348,11 @@ impl SourceKinds {
         )
         .unwrap();
         // A field's type starts upper-case, which also keeps attribute
-        // lines like `token::mint = x,` from reading as fields.
+        // lines like `token::mint = x,` from reading as fields. An
+        // attribute may end on the field's own line: `#[account(mut)] pub
+        // vault: …`, or `)] pub vault: …` closing a multi-line one.
         let field = Regex::new(
-            r"(?m)^\s*(?:pub(?:\([^)]*\))?\s+)?([a-z_]\w*)\s*:\s*([A-Z].*?),?\s*$",
+            r"(?m)^(?:[^\n]*\]\s*)?\s*(?:pub(?:\([^)]*\))?\s+)?([a-z_]\w*)\s*:\s*([A-Z].*?),?\s*$",
         )
         .unwrap();
         let handler = Regex::new(
@@ -412,7 +414,9 @@ impl SourceKinds {
             let mut fields = Vec::new();
             for c in field.captures_iter(body) {
                 let m = c.get(0).unwrap();
-                let attrs = read_attrs(&body[prev..m.start()], &expr_body[prev..m.start()]);
+                // Up to the name: an attribute on the field's own line is its.
+                let name_at = c.get(1).unwrap().start();
+                let attrs = read_attrs(&body[prev..name_at], &expr_body[prev..name_at]);
                 let doc = &originals[*file][open + doc_from..open + c.get(1).unwrap().start()];
                 prev = m.end();
                 doc_from = c.get(2).unwrap().end();
@@ -463,10 +467,44 @@ impl SourceKinds {
         let mut validated = Vec::new();
         let mut handlers = HashMap::new();
         let mut body_checks: Vec<(String, Vec<BodyCheck>)> = Vec::new();
+        // A fn name that takes two different account structs — `handler` in
+        // each `instructions/*.rs` — names no one instruction. Each such fn
+        // is read as the instruction whose other fn takes the same struct
+        // (`deposit(ctx: Context<Deposit>)` calling it); when no one fn
+        // does, as `handler(Deposit)`, so it is still compared, never
+        // dropped.
+        let mut structs_of: HashMap<String, HashSet<String>> = HashMap::new();
+        for (_, src) in &stripped {
+            for c in handler.captures_iter(src) {
+                if let Some(ctx) = ident.captures_iter(&c[2]).last() {
+                    structs_of.entry(c[1].to_string()).or_default().insert(ctx[1].to_string());
+                }
+            }
+        }
+        let mut names_of: HashMap<&str, Vec<&str>> = HashMap::new();
+        for (name, ctxs) in &structs_of {
+            if let [ctx] = ctxs.iter().collect::<Vec<_>>()[..] {
+                names_of.entry(ctx.as_str()).or_default().push(name.as_str());
+            }
+        }
+        // The instruction a fn is read as, and whether that is another fn's
+        // name. Fns read as one instruction keep every copy of their
+        // checks, so one hides nothing of another's (diff counts them).
+        let ix_name = |name: &str, ctx: &str| -> (String, bool) {
+            match structs_of[name].len() {
+                1 => (name.to_string(), false),
+                _ => match names_of.get(ctx).map(|v| &v[..]) {
+                    Some([only]) => (only.to_string(), true),
+                    _ => (format!("{name}({ctx})"), false),
+                },
+            }
+        };
+        let mut implemented: HashSet<String> = HashSet::new();
         for (file, src) in &stripped {
             for c in handler.captures_iter(src) {
                 let Some(ctx) = ident.captures_iter(&c[2]).last() else { continue };
-                walk(&structs, &ctx[1], &c[1], "", false, &mut map, 0);
+                let (ix, aliased) = ix_name(&c[1], &ctx[1]);
+                walk(&structs, &ctx[1], &ix, "", false, &mut map, 0);
                 let end = c.get(0).unwrap().end();
                 // A declaration with no body (`fn f(..) -> R;` in a trait) has none
                 // to read: never the next item's.
@@ -474,16 +512,27 @@ impl SourceKinds {
                 if let Some(open) = open.map(|i| end + i + 1) {
                     if let Some(body) = braced(&src[open..]) {
                         let expr_body = &exprs[file.as_str()][open..open + body.len()];
-                        body_checks.push((c[1].to_string(), read_body(body, expr_body)));
+                        body_checks.push((ix.clone(), read_body(body, expr_body)));
                     }
                 }
                 let line = src[..c.get(0).unwrap().start()].matches('\n').count() + 1;
-                handlers.entry(c[1].to_string()).or_insert((file.clone(), line));
+                // An aliased fn is where the instruction's checks are written:
+                // annotate there, not at the wrapper calling it.
+                match aliased {
+                    true => {
+                        handlers.insert(ix.clone(), (file.clone(), line));
+                        implemented.insert(ix.clone());
+                    }
+                    false if !implemented.contains(&ix) => {
+                        handlers.entry(ix.clone()).or_insert((file.clone(), line));
+                    }
+                    false => {}
+                }
                 // The handler's attributes: back to the item before it.
                 let start = c.get(0).unwrap().start();
                 let from = src[..start].rfind(['}', ';', '{']).map_or(0, |i| i + 1);
                 if access_control.is_match(&src[from..start]) {
-                    validated.push((ctx[1].to_string(), c[1].to_string()));
+                    validated.push((ctx[1].to_string(), ix.clone()));
                 }
             }
         }
@@ -1073,10 +1122,8 @@ fn attach_body_check(
     // Such a slot drops out of the tie; the rest of the check still ties.
     let tied: Vec<String> = heads.iter().filter(|h| !field_key_on_data(h)).cloned().collect();
     let Some(first) = heads.first().cloned() else {
-        let list = ix_checks.entry(ix.to_string()).or_default();
-        if !list.contains(&chk.text) {
-            list.push(chk.text);
-        }
+        // Every copy kept: diff counts them.
+        ix_checks.entry(ix.to_string()).or_default().push(chk.text);
         return;
     };
     let mut names = tied;
@@ -1084,11 +1131,9 @@ fn attach_body_check(
         names.push("::".into());
     }
     if let Some(s) = out.get_mut(&(ix.to_string(), first)) {
-        if !s.attrs.body.contains(&chk.text) {
-            s.attrs.body.push(chk.text);
-            if chk.ties {
-                s.attrs.body_keys.push(names);
-            }
+        s.attrs.body.push(chk.text);
+        if chk.ties {
+            s.attrs.body_keys.push(names);
         }
     }
 }

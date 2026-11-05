@@ -300,21 +300,20 @@ pub fn diff(base: &SourceKinds, head: &SourceKinds) -> Vec<Change> {
             ),
             _ => {}
         }
-        // Still in the head handler, on whichever account or the
-        // instruction (an alias can move it between them): not removed.
-        let in_head = |c: &String| {
-            head.ix_checks(ix).contains(c) || siblings.iter().any(|(_, s)| s.attrs.body.contains(c))
-        };
-        for check in ba.body.iter().filter(|e| !in_head(e)) {
-            match siblings.iter().find(|(_, s)| s.attrs.body.contains(check)) {
-                Some((other, _)) => push(
-                    Severity::Warning,
-                    format!("`{check}` in the handler moved to `{other}`"),
-                ),
-                None => match declared_instead(base, head, base_ix, ix, check, Some(path)) {
-                    Some(slot) => push(Severity::Warning, moved_message(check, &slot)),
-                    None => push(Severity::Regression, format!("`{check}` removed from the handler")),
-                },
+        // Counted, not de-duplicated: the same check written in two fns
+        // the instruction runs (a wrapper and its `handler`) is two, and
+        // removing one is a removal. Copies this slot lost are removed
+        // only when the instruction as a whole has fewer: an alias can
+        // move one to another account or to the instruction.
+        let mut seen = BTreeSet::new();
+        for check in ba.body.iter().filter(|c| seen.insert(*c)) {
+            let lost = count(&ba.body, check) > count(&ha.body, check);
+            if !lost || body_total(head, ix, check) >= body_total(base, base_ix, check) {
+                continue;
+            }
+            match declared_instead(base, head, base_ix, ix, check, Some(path)) {
+                Some(slot) => push(Severity::Warning, moved_message(check, &slot)),
+                None => push(Severity::Regression, format!("`{check}` removed from the handler")),
             }
         }
         for check in ba.validate.iter().filter(|e| !ha.validate.contains(e)) {
@@ -361,10 +360,12 @@ pub fn diff(base: &SourceKinds, head: &SourceKinds) -> Vec<Change> {
     for base_ix in &base_ixs {
         let Some(ix) = renamed.get(base_ix).or(head_ixs.get(base_ix)) else { continue };
         let (file, line) = head.handler_at(ix).map_or((String::new(), 0), |(f, l)| (f.to_string(), l));
-        let in_head = |c: &String| {
-            head.ix_checks(ix).contains(c) || in_ix(ix).iter().any(|(_, s)| s.attrs.body.contains(c))
+        let mut seen = BTreeSet::new();
+        let lost = |c: &String| {
+            count(base.ix_checks(base_ix), c) > count(head.ix_checks(ix), c)
+                && body_total(head, ix, c) < body_total(base, base_ix, c)
         };
-        for check in base.ix_checks(base_ix).iter().filter(|c| !in_head(c)) {
+        for check in base.ix_checks(base_ix).iter().filter(|c| seen.insert(*c) && lost(c)) {
             let (severity, message) = match declared_instead(base, head, base_ix, ix, check, None) {
                 Some(slot) => (Severity::Warning, moved_message(check, &slot)),
                 None => (Severity::Regression, format!("`{check}` removed from the handler")),
@@ -514,7 +515,12 @@ fn checks_of(s: &Slot) -> Vec<String> {
     c.extend(a.token_owner.iter().map(|t| format!("token::authority = {t}")));
     c.extend(a.constraints.iter().map(|e| format!("constraint = {e}")));
     c.extend(a.close.iter().map(|t| format!("close = {t}")));
-    c.extend(a.body.iter().cloned());
+    // Each check once in the list, however many copies the handler writes.
+    for b in &a.body {
+        if !c.contains(b) {
+            c.push(b.clone());
+        }
+    }
     c.extend(a.validate.iter().cloned());
     c
 }
@@ -635,6 +641,16 @@ fn rename_eqs(eqs: &[KeyEq], renames: &BTreeMap<String, String>) -> Vec<KeyEq> {
         t
     };
     eqs.iter().map(|(a, b)| ordered(swap(a), swap(b))).collect()
+}
+
+fn count(v: &[String], c: &str) -> usize {
+    v.iter().filter(|x| *x == c).count()
+}
+
+/// How many times the handler of `ix` writes `c`, on any account or none.
+fn body_total(k: &SourceKinds, ix: &str, c: &str) -> usize {
+    count(k.ix_checks(ix), c)
+        + k.slots().iter().filter(|((i, _), _)| i == ix).map(|(_, s)| count(&s.attrs.body, c)).sum::<usize>()
 }
 
 /// `n` as named in an attribute of the slot at `path`: a sibling.
@@ -1473,5 +1489,98 @@ pub struct Act<'info> {
         // Without the comment: each check on its own.
         let bare = head.replace("Deprecated: kept for compatibility.", "checked in the handler");
         assert!(diff(&kinds(base), &kinds(&bare)).iter().filter(|c| c.slot() == "act.old").count() > 1);
+    }
+
+    #[test]
+    fn one_line_fields_and_per_module_handlers() {
+        let base = r#"
+pub mod p {
+    pub fn deposit(ctx: Context<Deposit>) -> Result<()> { deposit::handler(ctx) }
+    pub fn withdraw(ctx: Context<Withdraw>) -> Result<()> { withdraw::handler(ctx) }
+}
+mod deposit {
+    #[derive(Accounts)]
+    pub struct Deposit<'info> {
+        #[account(mut, has_one = owner)] pub vault: Account<'info, Vault>,
+        pub owner: Signer<'info>,
+    }
+    pub fn handler(ctx: Context<Deposit>) -> Result<()> { Ok(()) }
+}
+mod withdraw {
+    #[derive(Accounts)]
+    pub struct Withdraw<'info> {
+        #[account(mut)] pub vault: Account<'info, Vault>,
+        pub boss: Signer<'info>,
+    }
+    pub fn handler(ctx: Context<Withdraw>) -> Result<()> {
+        require_keys_eq!(ctx.accounts.vault.boss, ctx.accounts.boss.key());
+        Ok(())
+    }
+}
+"#;
+        let k = kinds(base);
+        assert!(k.slot("handler", "vault").is_none());
+        assert!(k.slot("withdraw", "vault").is_some_and(|s| s.attrs.mutable));
+        assert!(!k.slot("withdraw", "boss").unwrap().attrs.mutable);
+        // A check on a one-line field, or in a module's `handler`, removed:
+        // named on the instruction it belongs to.
+        let gone = |h: &str| diff(&kinds(base), &kinds(h)).into_iter().filter(|c| c.severity == Severity::Regression).map(|c| c.slot()).collect::<Vec<_>>();
+        assert_eq!(gone(&base.replace("mut, has_one = owner", "mut")), ["deposit.vault"]);
+        let removed = base.replace("        require_keys_eq!(ctx.accounts.vault.boss, ctx.accounts.boss.key());\n", "");
+        assert_eq!(gone(&removed), ["withdraw.vault"]);
+        // Annotated where the check was written: the module's `handler`.
+        let at = base.lines().position(|l| l.contains("fn handler(ctx: Context<Withdraw>)")).unwrap() + 1;
+        assert_eq!(kinds(base).handler_at("withdraw").map(|(_, l)| l), Some(at));
+
+        // No one other fn takes its struct (two share it, or none does):
+        // still compared, as `handler(Shared)`, never dropped.
+        let shared = r#"
+pub mod p {
+    pub fn open(ctx: Context<Shared>) -> Result<()> { s::handler(ctx) }
+    pub fn close(ctx: Context<Shared>) -> Result<()> { s::handler(ctx) }
+}
+mod s {
+    #[derive(Accounts)]
+    pub struct Shared<'info> {
+        #[account(mut)]
+        pub vault: Account<'info, Vault>,
+        pub boss: Signer<'info>,
+    }
+    pub fn handler(ctx: Context<Shared>) -> Result<()> {
+        require_keys_eq!(ctx.accounts.vault.boss, ctx.accounts.boss.key());
+        Ok(())
+    }
+}
+mod t {
+    #[derive(Accounts)]
+    pub struct Other<'info> { pub x: Signer<'info> }
+    pub fn handler(ctx: Context<Other>) -> Result<()> { Ok(()) }
+}
+"#;
+        let removed = shared.replace("        require_keys_eq!(ctx.accounts.vault.boss, ctx.accounts.boss.key());\n", "");
+        let regressions = |b: &str, h: &str| diff(&kinds(b), &kinds(h)).into_iter().filter(|c| c.severity == Severity::Regression).count();
+        assert_eq!(regressions(shared, &removed), 1);
+        // A real instruction named `handler` beside module ones: still compared.
+        let real = shared.replace("pub fn close(ctx: Context<Shared>)", "pub fn handler(ctx: Context<Shared>)");
+        let removed = real.replace("        require_keys_eq!(ctx.accounts.vault.boss, ctx.accounts.boss.key());\n", "");
+        assert!(regressions(&real, &removed) > 0);
+        // The real one with the same check as the module's: removing only
+        // the real one's is still a removal.
+        let both = real.replace(
+            "pub fn handler(ctx: Context<Shared>) -> Result<()> { s::handler(ctx) }",
+            "pub fn handler(ctx: Context<Shared>) -> Result<()> {\n        require_keys_eq!(ctx.accounts.vault.boss, ctx.accounts.boss.key());\n        s::handler(ctx)\n    }",
+        );
+        let removed = both.replacen("        require_keys_eq!(ctx.accounts.vault.boss, ctx.accounts.boss.key());\n", "", 1);
+        assert!(regressions(&both, &removed) > 0, "{:?}", diff(&kinds(&both), &kinds(&removed)));
+        // Two `open` wrappers and the module's `handler` with the same check:
+        // removing only the handler's is still a removal; moving one to
+        // another account is not.
+        let wrappers = shared
+            .replace("pub fn close(ctx: Context<Shared>) -> Result<()> { s::handler(ctx) }\n}",
+                "}\npub mod q {\n    pub fn open(ctx: Context<Shared>) -> Result<()> {\n        require_keys_eq!(ctx.accounts.vault.boss, ctx.accounts.boss.key());\n        s::handler(ctx)\n    }\n}");
+        let in_handler = "    pub fn handler(ctx: Context<Shared>) -> Result<()> {\n        require_keys_eq!(ctx.accounts.vault.boss, ctx.accounts.boss.key());\n";
+        let removed = wrappers.replace(in_handler, "    pub fn handler(ctx: Context<Shared>) -> Result<()> {\n");
+        assert_eq!(regressions(&wrappers, &removed), 1, "{:?}", diff(&kinds(&wrappers), &kinds(&removed)));
+        assert_eq!(regressions(&wrappers, &wrappers), 0);
     }
 }

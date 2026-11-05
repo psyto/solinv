@@ -34,6 +34,7 @@ const CASES: &[(&str, usize)] = &[
     ("c21_nonascii_string_in_cond", 1),
     // Accounts bound above the `match`, a check dropped in one arm.
     ("n02_arm_preamble_binding", 1),
+    ("n03_logs_before_err", 2),
     // A check every arm shared, moved above the `match`: still made.
     ("fp1", 0),
 ];

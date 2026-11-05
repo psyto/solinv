@@ -31,6 +31,7 @@ A check is a condition that rejects the call — `if <cond> { return Err(..) }`,
 | `a.owner() != id`, `*a.owner != id`, `!a.is_owned_by(id)`, `!a.owned_by(id)` | `a`'s owner is `id` |
 | `a.key() != x`, `&x != a.key()`, `a.address() != x`, `!pubkey_eq(a.key(), x)`, `!cmp_pubkeys(..)`, `sol_memcmp(a.key, x, 32) != 0` | `a`'s key is `x` |
 
+- The block may log first: `{ msg!(".."); return Err(..) }`, `sol_log(..)`, `solana_program::msg!`.
 - Each `||` part is a check of its own; `!(p && q)` is `!p || !q`. A part joined by `&&` to
   anything but a flag is not read (`!a.is_signer() && !b.is_signer()` lets either sign).
 - Spelling does not matter: `&`, `*`, `.as_ref()`, `.to_bytes()`, `Pubkey::new_from_array(..)`,
@@ -90,10 +91,11 @@ solinv diff --base-src <parent>/<dir>/src --head-src <commit>/<dir>/src
 |---|---|---|---|---|
 | aeyakovenko/percolator-prog (to 69174f6, 2026-04-13; since rewritten as `v16_program.rs`) | 573 | 37 | 13 | 7 reports in 3 commits |
 | solana-program/token (SPL Token and p-token) | 475 | 4 | 4 | 1 |
-| psyto/princeps-solana | 20 | 1 | 1 | 1 |
-| **Total** | **1,068** | **42** | **18** | **9 reports in 5 commits** |
+| psyto/princeps-solana | 22 | 1 | 1 | 1 |
+| psyto/openhl-solana | 94 | 1 | 1 | 1 |
+| **Total** | **1,164** | **43** | **19** | **10 reports in 6 commits** |
 
-About 1 report in 5 is a real loosening, and 5 commits in 18. The real ones:
+About 1 report in 4 is a real loosening, and 6 commits in 19. The real ones:
 
 - percolator-prog 3a3225a: the owner checks of `WithdrawCollateral` and `TradeNoCpi`
   (`if Pubkey::new_from_array(owner) != *a_user.key`) commented out; restored later.
@@ -105,6 +107,9 @@ About 1 report in 5 is a real loosening, and 5 commits in 18. The real ones:
   signs ("self-revoke delegate").
 - princeps-solana e6a097f: `close_repo` lets the lender close after expiry, so the borrower key
   check became `is_borrower || (expired && is_lender)`.
+- openhl-solana 2fa82eb: `CreateSlab` initializes a slab the client created from a keypair instead
+  of creating it at a PDA of the market, so the slab's key is no longer compared with that PDA
+  (intended: it must now sign, be owned by the program, and be the right size).
 
 The rest: an oracle migration that replaced the oracle key check with a feed id in its data (14 of
 the 37, one commit), checks rewritten as Kani-provable struct predicates or a helper comparing a
@@ -120,6 +125,12 @@ call, a field name equal to an account name, non-ASCII text in a condition); eac
 `crates/solinv-static/tests/native_cases/`. Fixing the misses it found took the reports above
 from 35 to 42 (8 real to 9).
 
+Putting the action on openhl-solana then showed that a check whose block logs before it fails
+(`{ msg!(".."); return Err(..) }`) was not read at all: 78 of the 192 account checks in its
+`openhl-core`, and deleting `if !user_ai.is_signer { msg!(..); return Err(..) }` from `Deposit` was
+not reported. v0.1.5 reads them (test `n03_logs_before_err`); the three histories above report
+exactly the same with it.
+
 Nothing else in the three histories was reported; what it misses there is not measured. Planted
-removals: the unit tests in `crates/solinv-static/src/native.rs`, and the three above on
-princeps-solana's vault.
+removals: the unit tests in `crates/solinv-static/src/native.rs`, the three above on
+princeps-solana's vault, and the `Deposit` signer check on openhl-solana's core.

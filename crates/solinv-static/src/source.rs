@@ -697,6 +697,10 @@ static REQUIRE_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\b(require(?:_keys)?(?:_eq|_neq|_gt|_gte)?)\s*!\s*[(\[]").unwrap());
 pub(crate) static IF_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\bif\b").unwrap());
 pub(crate) static FAILS_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(?:return\s+)?(?:Err\s*\(|err!\s*\()").unwrap());
+/// A log line a failing block may open with: `msg!(..)`, `sol_log(..)`.
+static LOG_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^(?:[A-Za-z_]\w*::)*(?:(?:msg|log|println|eprintln|debug|trace|info|warn|error)!|sol_log\w*)\s*\(").unwrap()
+});
 /// What an account's owner is compared with when it is the program-owner
 /// check: this program's id, or a type's owner (`TickArray::owner()`).
 /// Not a user (`position.owner == authority.key()`), not another
@@ -1237,11 +1241,26 @@ pub(crate) fn calls_in(blanked: &str) -> Vec<CallAt<'_>> {
 /// Every condition in a body, at any depth, that rejects the call: the
 /// arguments of a `require*!`, and `if <cond> { return Err(..) }`.
 pub(crate) fn failing_conditions(blanked: &str, expr: &str) -> Vec<(Demand, String)> {
-    failing_conditions_at(blanked, expr).into_iter().map(|(d, c, _)| (d, c)).collect()
+    failing_conditions_at(blanked, expr, false).into_iter().map(|(d, c, _)| (d, c)).collect()
+}
+
+/// Offset in `blanked` past the log lines it opens with (`msg!("..");
+/// sol_log(..);`): where a block that logs before it fails fails.
+pub(crate) fn past_logs(blanked: &str) -> usize {
+    let mut at = 0;
+    loop {
+        let lead = at + (blanked[at..].len() - blanked[at..].trim_start().len());
+        let Some(m) = LOG_RE.find(&blanked[lead..]) else { return lead };
+        let Some(close) = closing_paren(&blanked[lead + m.end()..]) else { return lead };
+        let after = lead + m.end() + close + 1;
+        let Some(rest) = blanked[after..].trim_start().strip_prefix(';') else { return lead };
+        at = blanked.len() - rest.len();
+    }
 }
 
 /// [`failing_conditions`], each with the byte it starts at.
-pub(crate) fn failing_conditions_at(blanked: &str, expr: &str) -> Vec<(Demand, String, usize)> {
+/// With `logs`, a block may log before it fails (`{ msg!(..); return Err(..) }`).
+pub(crate) fn failing_conditions_at(blanked: &str, expr: &str, logs: bool) -> Vec<(Demand, String, usize)> {
     let mut out = Vec::new();
     for m in REQUIRE_RE.captures_iter(blanked) {
         let end = m.get(0).unwrap().end();
@@ -1272,7 +1291,8 @@ pub(crate) fn failing_conditions_at(blanked: &str, expr: &str) -> Vec<(Demand, S
         });
         let Some(open) = open.filter(|&o| o != usize::MAX) else { continue };
         let Some(block) = braced(&blanked[open + 1..]) else { continue };
-        if FAILS_RE.is_match(expr[open + 1..open + 1 + block.len()].trim_start()) {
+        let start = open + 1 + if logs { past_logs(block) } else { 0 };
+        if FAILS_RE.is_match(expr[start..open + 1 + block.len()].trim_start()) {
             out.push((Demand::RejectsIf, expr[m.end()..open].to_string(), m.start()));
         }
     }

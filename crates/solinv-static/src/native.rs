@@ -20,7 +20,7 @@
 
 use crate::diff::{Change, Severity};
 use crate::source::{
-    braced, calls_in, closing_paren, collect, failing_conditions_at, FAILS_RE, IF_RE, split_at_top, strip_comments, strip_comments_and_strings,
+    braced, calls_in, closing_paren, collect, failing_conditions_at, past_logs, FAILS_RE, IF_RE, split_at_top, strip_comments, strip_comments_and_strings,
     file_mods, top_level, unparen, Callee, Demand, FnIndex,
 };
 use anyhow::{Context, Result};
@@ -379,6 +379,7 @@ fn else_fails(blanked: &str, expr: &str) -> Vec<(Demand, String, usize)> {
         let r = r.trim_start();
         let Some(else_body) = r.strip_prefix('{') else { continue };
         let at = blanked.len() - else_body.len();
+        let at = at + past_logs(&blanked[at..]);
         if FAILS_RE.is_match(expr[at..].trim_start()) {
             out.push((Demand::RejectsIf, format!("!({})", expr[m.end()..open].trim()), m.start()));
         }
@@ -517,7 +518,7 @@ impl NativeChecks {
             let body = &blanked[f.file.as_str()][f.body.clone()];
             let expr = &exprs[f.file.as_str()][f.body.clone()];
             let mut direct = Vec::new();
-            for (d, cond, at) in failing_conditions_at(body, expr).into_iter().chain(else_fails(body, expr)) {
+            for (d, cond, at) in failing_conditions_at(body, expr, true).into_iter().chain(else_fails(body, expr)) {
                 if d != Demand::RejectsIf {
                     continue;
                 }

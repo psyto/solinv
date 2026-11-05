@@ -129,7 +129,7 @@ jobs:
       - uses: psyto/solinv@v0
 ```
 
-That is all. It finds every Anchor program in the repository (each `programs/<name>/src` with a
+That is all ([on the GitHub Marketplace](https://github.com/marketplace/actions/solinv-diff)). It finds every Anchor program in the repository (each `programs/<name>/src` with a
 `#[derive(Accounts)]`, at any depth), compares each with the pull request's base (on a push, with
 the commit `main` was at before it, so a push of several commits is compared as one change), and
 fails the job when a check is removed, with an annotation on the line. No Solana toolchain, no

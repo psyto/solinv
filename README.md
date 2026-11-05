@@ -145,18 +145,18 @@ otherwise (another runner OS, or a commit without a release) it compiles solinv,
   it had is gone. `fail-on-removed: false` turns every failure into a warning.
 - In a merge queue, add `merge_group:` to `on:`; it compares with the queue's base.
 
-The CLI (not on crates.io yet; pin a commit):
+The CLI (not on crates.io yet; pin a release tag):
 
 ```bash
-cargo install --git https://github.com/psyto/solinv --rev eb75c260c1ff solinv-cli
+cargo install --git https://github.com/psyto/solinv --tag v0.1.2 solinv-cli
 ```
 
 In your Crucible fuzz harness:
 
 ```toml
 [dependencies]
-solinv-fuzz = { git = "https://github.com/psyto/solinv", rev = "eb75c260c1ff95ce18196ecde07a46779a142d42" }
-solinv-core = { git = "https://github.com/psyto/solinv", rev = "eb75c260c1ff95ce18196ecde07a46779a142d42" }
+solinv-fuzz = { git = "https://github.com/psyto/solinv", tag = "v0.1.2" }
+solinv-core = { git = "https://github.com/psyto/solinv", tag = "v0.1.2" }
 crucible-test-context = { git = "https://github.com/asymmetric-research/crucible", tag = "v0.1.0" }
 ```
 ```rust
@@ -200,8 +200,8 @@ All installed from the pins above, the same way as for anyone else:
 
 | Repo | What runs | Measured |
 |---|---|---|
-| [fabrknt/veil](https://github.com/fabrknt/veil/blob/main/.github/workflows/solinv.yml) | the action on 5 Anchor 0.30 programs in one job, on pull requests and on pushes to `main` | A throwaway pull request that dropped a `has_one` failed only that program's job, with the annotation on the line ([fabrknt/veil#2](https://github.com/fabrknt/veil/pull/2)) |
-| [psyto/soldojo](https://github.com/psyto/soldojo/blob/main/.github/workflows/solinv.yml) | the action on the course's Anchor program, on pull requests and on pushes to `main` — changes there go straight to `main`, which is why the action compares pushes ([eb75c26](https://github.com/psyto/solinv/commit/eb75c26)) | Its first push compared cleanly (0 removed). Tried first on a throwaway branch here: a push of two commits that dropped a `has_one` failed with both annotations on the line, and its revert passed |
+| [fabrknt/veil](https://github.com/fabrknt/veil/blob/main/.github/workflows/solinv.yml) | the action at `@v0`, two lines, on pull requests and on pushes to `main`; it finds the 5 Anchor 0.30 programs itself | 10 seconds a run with the attested release binary. Earlier, a throwaway pull request that dropped a `has_one` failed with the annotation on the line ([fabrknt/veil#2](https://github.com/fabrknt/veil/pull/2)) |
+| [psyto/soldojo](https://github.com/psyto/soldojo/blob/main/.github/workflows/solinv.yml) | the action at `@v0`, two lines, on pull requests and on pushes to `main` — changes there go straight to `main`, which is why the action compares pushes | 9 seconds a run (0 removed). The same two lines on a throwaway branch of this repository found its 7 Anchor programs; a push that dropped a `has_one` failed with both annotations on the line, and its revert passed |
 | [psyto/princeps-solana](https://github.com/psyto/princeps-solana/tree/main/fuzz/psol-vault) | a fuzz harness for a native (Pinocchio) vault: signer-skip, owner-skip, account-swap, 3 minutes per pull request | Deleting one check at a time: 6 of 6 caught; 0 findings on the current code. Two of them — the compliance-program pin in `deposit` and `withdraw` — need two accounts swapped together, which `account_swap::check_sets` does ([#4](https://github.com/psyto/solinv/issues/4), [psyto/princeps-solana#3](https://github.com/psyto/princeps-solana/pull/3)) |
 | [psyto/openhl-solana](https://github.com/psyto/openhl-solana/tree/main/fuzz/vault) | a fuzz harness for the native trading vault of the Solana Internals course, Chapter 12, which ends with it as an exercise ([§12.7](https://github.com/psyto/openhl-solana/blob/main/docs/chapter-12-vault/DRAFT.en.md)) | Its first run found a real hole: withdraw did not check that the share belonged to the vault, so shares minted cheaply in one vault drained another. Deleting the 9 account checks one at a time: 5 caught; the other 4 are refused anyway by the runtime's owner rule or by SPL Token, and the chapter explains each |
 | [psyto/openhl-solana](https://github.com/psyto/openhl-solana/tree/main/fuzz/basics) | a second harness for Chapters 3, 4 and 6 of the same course (CreateMarket, Bench, CreateVault, Deposit), each chapter ending with it as an exercise | Deleting 14 account checks one at a time: 1 caught (CreateVault's vault-authority PDA, the one nothing else backs); the chapters trace what refused each of the other 13 (the runtime's signer and owner rules, a missing callee account, SPL Token, another check). cu-dos on Bench with a 50,000 CU cap: a finding within seconds. Writing it turned up [#15](https://github.com/psyto/solinv/issues/15) |
@@ -214,7 +214,13 @@ All installed from the pins above, the same way as for anyone else:
 What using it ourselves turned up: the `t` mark for typed accounts not tied to the instruction
 ([#3](https://github.com/psyto/solinv/issues/3); in veil it surrounds four real holes the earlier map showed as `T`),
 a signer-skip false positive ([#5](https://github.com/psyto/solinv/issues/5)), matrix jobs that
-race on the action's cache so each one recompiles ([#6](https://github.com/psyto/solinv/issues/6)),
+raced on the action's cache so each one recompiled ([#6](https://github.com/psyto/solinv/issues/6); the
+action now has no cache and downloads an attested binary instead), that the action ran only on pull
+requests while our repositories mostly push to `main` (it now compares pushes too), two misreads found
+by running `solinv idl --src` over 105 of our own Anchor programs (a field with its attribute on the
+same line was dropped; every module's `fn handler` merged into one phantom instruction; both fixed in
+[577ca4f](https://github.com/psyto/solinv/commit/577ca4f)), and that putting the action on a native
+program failed with an error that did not say why,
 two setup gaps in the docs ([#7](https://github.com/psyto/solinv/issues/7)), and `check_sets`
 skipping a set whose accounts are missing without saying so ([#13](https://github.com/psyto/solinv/issues/13)). Building
 solinv check turned up two bugs in `anchor idl convert`'s legacy-IDL conversion — string seeds keep

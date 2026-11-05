@@ -105,6 +105,13 @@ It reads text, not types, line by line as rustfmt lays fields out:
   test module's included) leaves both unread. Rarer spellings —
   `self.x.to_account_info().key`, `<X as Validate>::validate(&self.x)` —
   are not normalised, so switching to one reads as a removal.
+- Each module's `pub fn handler(ctx: Context<X>)` is read as the
+  instruction whose other fn takes `X` (the program's wrapper calling
+  it); when no one fn does, as `handler(X)`. A handler check written in
+  two fns one instruction runs counts twice: removing one copy is a
+  removal unless the instruction keeps as many.
+- A field may carry its attribute on its own line
+  (`#[account(mut)] pub vault: …`).
 - A field typed by a type alias, a struct name defined twice, or a field
   type split over lines is not placed, so changes to it are not compared.
 - A renamed instruction is paired by slot names alone: a rename that

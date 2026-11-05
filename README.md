@@ -113,10 +113,14 @@ flagged instructions are the demo program's three planted account-validation bug
 
 ## Use it in your own project
 
-On every pull request (`.github/workflows/solinv.yml`):
+On every pull request and every push to `main` (`.github/workflows/solinv.yml`; a push covers
+changes made without a pull request, and re-checks a merged one):
 
 ```yaml
-on: pull_request
+on:
+  pull_request:
+  push:
+    branches: [main]
 jobs:
   account-checks:
     runs-on: ubuntu-latest
@@ -127,8 +131,10 @@ jobs:
           program-src: programs/my_program/src
 ```
 
-It installs solinv at that commit, compares the program's source with the pull request's base,
-and fails the job when a check is removed. The first run compiles solinv (about 2 minutes on
+It installs solinv at that commit, compares the program's source with the pull request's base
+(on a push, with the commit `main` was at before it, so a push of several commits is compared as
+one change), and fails the job when a check is removed. In a merge queue, add `merge_group:` to
+`on:`; it compares with the queue's base. The first run compiles solinv (about 2 minutes on
 `ubuntu-latest` for the demo pull request); later runs restore it from the cache (the whole job took 7 seconds on a re-run). No Solana
 toolchain, no build of your program.
 

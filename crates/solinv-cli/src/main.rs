@@ -503,6 +503,11 @@ fn run_mutate(action: MutateAction) -> Result<()> {
     Ok(())
 }
 
+/// Why a source with no matched account struct is not compared.
+const NOT_ANCHOR: &str = "solinv reads Anchor programs: `#[derive(Accounts)]` structs a handler takes as its \
+                          `Context<..>`. A native or Pinocchio program has none; test its account checks with \
+                          the fuzz detectors (solinv-fuzz) instead";
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
@@ -538,7 +543,7 @@ fn main() -> Result<()> {
                     let head = source::SourceKinds::read(&head_src)?;
                     if base.is_empty() {
                         anyhow::bail!(
-                            "no #[derive(Accounts)] field under {} could be matched to an instruction",
+                            "no #[derive(Accounts)] field under {} could be matched to an instruction. {NOT_ANCHOR}",
                             base_src.display()
                         );
                     }
@@ -579,7 +584,7 @@ fn main() -> Result<()> {
                 let kinds = source::SourceKinds::read(&dir)?;
                 if kinds.is_empty() {
                     anyhow::bail!(
-                        "solinv idl: no #[derive(Accounts)] field under {} could be matched to an instruction",
+                        "solinv idl: no #[derive(Accounts)] field under {} could be matched to an instruction. {NOT_ANCHOR}",
                         dir.display()
                     );
                 }

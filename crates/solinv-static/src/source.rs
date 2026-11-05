@@ -110,10 +110,15 @@ pub struct Handed {
     pub with: Vec<String>,
     pub owner: bool,
     pub discriminator: bool,
-    /// The slots passed as a parameter that the called fn itself
-    /// compares a key with, in a check that rejects unless equal: what a
-    /// `has_one` tying another slot to them may have become.
-    pub keyed: Vec<String>,
+    /// When the called fn itself compares parameters' owners: the slots
+    /// passed as those. `None` when only fns it calls do (an account in a
+    /// `Vec` the callee walks cannot be followed there).
+    pub owner_on: Option<Vec<String>>,
+    /// Key comparisons the called fn itself rejects unless equal: (the
+    /// slot whose key is compared, the slot whose data it is compared
+    /// with, or `None` for a value the fn computed). What a `has_one`
+    /// tying the second to the first may have become.
+    pub keyed: Vec<(String, Option<String>)>,
 }
 
 /// One account slot as the source declares it.
@@ -544,7 +549,7 @@ impl SourceKinds {
                     if let Some(body) = braced(&src[open..]) {
                         let expr_body = &exprs[file.as_str()][open..open + body.len()];
                         body_checks.push((ix.clone(), read_body(body, expr_body)));
-                        for (path, h) in fns.handed(body, file, src[..open].matches('\n').count()) {
+                        for (path, h) in fns.handed(body, &ctx[1], file, src[..open].matches('\n').count()) {
                             handed.push((ix.clone(), path, h));
                         }
                     }
@@ -593,11 +598,25 @@ impl SourceKinds {
                 });
                 passes_account.then(|| segs[..k].join("."))
             };
-            for v in [&mut h.with, &mut h.keyed] {
+            h.with = h.with.iter().filter_map(|p| slot_of(p)).collect();
+            h.with.sort();
+            h.with.dedup();
+            if let Some(v) = &mut h.owner_on {
                 *v = v.iter().filter_map(|p| slot_of(p)).collect();
-                v.sort();
-                v.dedup();
             }
+            h.keyed = h
+                .keyed
+                .iter()
+                .filter_map(|(t, o)| {
+                    let o = match o {
+                        Some(o) => Some(slot_of(o)?),
+                        None => None,
+                    };
+                    Some((slot_of(t)?, o))
+                })
+                .collect();
+            h.keyed.sort();
+            h.keyed.dedup();
             if let Some(s) = slot_of(&path).and_then(|p| map.get_mut(&(ix.clone(), p))) {
                 if !s.attrs.handed.contains(&h) {
                     s.attrs.handed.push(h);
@@ -628,8 +647,13 @@ struct FnInfo {
     key: bool,
     /// Parameter names, `self` left out.
     params: Vec<String>,
-    /// The names in its key checks that reject unless equal.
-    key_names: HashSet<String>,
+    /// Each key comparison it rejects unless equal, as its two sides.
+    key_atoms: Vec<(String, String)>,
+    /// The parameters whose program owner it compares itself.
+    owner_params: Vec<String>,
+    /// The modules it is in: its file's path under `src/`, then any
+    /// inline `mod` around it.
+    mods: Vec<String>,
     /// Calls whose result is propagated: `?`, `.unwrap()`, returned.
     calls: Vec<(Callee, String)>,
 }
@@ -639,12 +663,16 @@ struct FnInfo {
 enum Callee {
     /// `f(..)` or `crate::m::f(..)`: a fn outside any `impl`.
     Free(Vec<String>),
-    /// `x.f(..)`.
-    Method,
+    /// `self.f(..)`: a method of the caller's impl.
+    SelfMethod,
+    /// `ctx.accounts.f(..)`: a method of the instruction's accounts struct.
+    AccountsMethod,
     /// `T::f(..)`, with the module path before `T`.
     Typed(Vec<String>, String),
     /// `Self::f(..)`.
     SelfTy,
+    /// Through a generic or turbofish path (`a::T::<u8>::f`): not followed.
+    Unknown,
 }
 
 /// How many calls deep a slot handed to a call is followed.
@@ -665,10 +693,16 @@ static REQUIRE_RE: LazyLock<Regex> =
 static IF_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\bif\b").unwrap());
 static FAILS_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(?:return\s+)?(?:Err\s*\(|err!\s*\()").unwrap());
 /// What an account's owner is compared with when it is the program-owner
-/// check: a program id, not a user (`position.owner == authority.key()`).
+/// check: this program's id, or a type's owner (`TickArray::owner()`).
+/// Not a user (`position.owner == authority.key()`), not another
+/// module's `declare_id!` (`admin::ID`, `TOKEN_PROGRAM_ID`).
 static PROGRAM_ID_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\bprogram_id\b|\bID\b|\bid\s*\(\s*\)|::\s*owner\s*\(\s*\)|PROGRAM_ID\b").unwrap()
+    Regex::new(r"^(?:(?:crate::)?(?:ID|id\(\))|(?:ctx\.)?program_id|(?:[A-Za-z_]\w*::)*[A-Z]\w*::owner\(\))$").unwrap()
 });
+/// `info.owner`, `info.owner()`, `info.to_account_info().owner`.
+static OWNER_SIDE_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^([a-z_]\w*)(?:\.to_account_info\(\))?\.owner(?:\(\))?$").unwrap());
+static INLINE_MOD_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\bmod\s+([a-z_]\w*)\s*\{").unwrap());
 static ACCOUNT_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\bctx\s*\.\s*accounts\s*\.\s*([a-z_]\w*(?:\s*\.\s*[a-z_]\w*)*)").unwrap()
 });
@@ -678,7 +712,12 @@ static ALIAS_RE: LazyLock<Regex> = LazyLock::new(|| {
     )
     .unwrap()
 });
+static PATTERN_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\bfor\s+([^{]*?)\s+in\b|\blet\s+(?:mut\s+)?(\([^=]*|[A-Z]\w*\s*[({][^=]*)=|\|([^|]*)\||([^,{};]*)=>").unwrap()
+});
 static LET_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\blet\s+(?:mut\s+)?([a-z_]\w*)\b").unwrap());
+/// `w.key()` / `w.key`: the side naming parameter `w`'s key.
+static KEY_SIDE_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^([a-z_]\w*)\.key(?:\(\))?$").unwrap());
 static WORD_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(^|[^.\w])([a-z_]\w*)\b").unwrap());
 /// A name at the head of a path: not after `.` (a field) or `::`.
 static HEAD_NAME_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(^|[^.:\w])([a-z_]\w*)").unwrap());
@@ -698,6 +737,14 @@ impl FnIndex {
                     braced(&src[open..]).map(|b| (open, open + b.len(), ty))
                 })
                 .collect();
+            // (start, end, name) of each inline `mod name { .. }`, outer first.
+            let inline_mods: Vec<(usize, usize, String)> = INLINE_MOD_RE
+                .captures_iter(src)
+                .filter_map(|c| {
+                    let open = c.get(0).unwrap().end();
+                    braced(&src[open..]).map(|b| (open, open + b.len(), c[1].to_string()))
+                })
+                .collect();
             let tests: Vec<(usize, usize)> = TEST_MOD_RE
                 .find_iter(src)
                 .filter_map(|m| braced(&src[m.end()..]).map(|b| (m.start(), m.end() + b.len())))
@@ -714,27 +761,40 @@ impl FnIndex {
                 let expr_body = &exprs[file.as_str()][open..open + body.len()];
                 // The innermost impl around it.
                 let ty = impls.iter().filter(|(a, b, _)| *a <= start && start < *b).max_by_key(|(a, _, _)| *a).map(|(_, _, t)| t.clone());
-                let (mut owner, mut discriminator, mut key) = (false, false, false);
-                let mut key_names = HashSet::new();
-                for (demand, cond) in failing_conditions(body, expr_body) {
-                    // Only a condition that rejects unless two things are equal.
-                    if !demands_equal(demand, &cond) {
-                        continue;
-                    }
-                    owner |= cond.contains(".owner") && PROGRAM_ID_RE.is_match(&cond);
-                    discriminator |= cond.to_lowercase().contains("discriminator");
-                    if cond.contains(".key") {
-                        key = true;
-                        key_names.extend(HEAD_NAME_RE.captures_iter(&cond).map(|m| m[2].to_string()));
-                    }
-                }
                 let sig = &src[c.get(0).unwrap().end()..open];
                 let params = sig
                     .find('(')
                     .and_then(|i| closing_paren(&sig[i + 1..]).map(|e| params_of(&sig[i + 1..i + 1 + e])))
                     .unwrap_or_default();
+                let (mut owner, mut discriminator) = (false, false);
+                let mut key_atoms = Vec::new();
+                let mut owner_params = Vec::new();
+                // Only comparisons a condition rejects unless equal.
+                for (l, r) in failing_conditions(body, expr_body).iter().flat_map(|(d, c)| equalities(*d, c)) {
+                    // The program owner: a parameter's own `.owner` against a
+                    // program id, not a field of data read from it.
+                    let owned = |a: &str, b: &str| {
+                        OWNER_SIDE_RE
+                            .captures(a)
+                            .map(|m| m[1].to_string())
+                            .filter(|p| params.contains(p) && PROGRAM_ID_RE.is_match(b))
+                    };
+                    if let Some(p) = owned(&l, &r).or_else(|| owned(&r, &l)) {
+                        owner = true;
+                        owner_params.push(p);
+                    }
+                    discriminator |= format!("{l}{r}").to_lowercase().contains("discriminator");
+                    if l.contains(".key") || r.contains(".key") {
+                        key_atoms.push((l.clone(), r.clone()));
+                    }
+                }
+                let key = !key_atoms.is_empty();
+                let mut fn_mods = file_mods(file);
+                fn_mods.extend(
+                    inline_mods.iter().filter(|(a, b, _)| *a <= start && start < *b).map(|(_, _, n)| n.clone()),
+                );
                 let calls = calls_in(body).into_iter().filter(|c| c.propagated).map(|c| (c.callee, c.name)).collect();
-                fns.push(FnInfo { name: c[1].to_string(), ty, owner, discriminator, key, params, key_names, calls });
+                fns.push(FnInfo { name: c[1].to_string(), ty, owner, discriminator, key, params, key_atoms, owner_params, mods: fn_mods, calls });
             }
         }
         let mut by_name: HashMap<String, Vec<usize>> = HashMap::new();
@@ -747,20 +807,31 @@ impl FnIndex {
     /// The one fn a call names, or None when it cannot be told: a path
     /// through a module this source does not declare (another crate), a
     /// name two fns of that kind share.
-    fn resolve(&self, callee: &Callee, name: &str, caller_ty: Option<&str>) -> Option<usize> {
+    fn resolve(&self, callee: &Callee, name: &str, caller_ty: Option<&str>, accounts_ty: Option<&str>) -> Option<usize> {
         let local = |path: &[String]| path.iter().all(|m| matches!(m.as_str(), "crate" | "super" | "self") || self.mods.contains(m));
+        // `a::b::f`: a fn whose modules end with `a::b`.
+        let under = |i: usize, path: &[String]| {
+            let want: Vec<&String> = path.iter().filter(|m| !matches!(m.as_str(), "crate" | "super" | "self")).collect();
+            let have = &self.fns[i].mods;
+            want.len() <= have.len() && have[have.len() - want.len()..].iter().zip(&want).all(|(h, w)| h == *w)
+        };
         let named = self.by_name.get(name)?;
         let pick: Vec<usize> = match callee {
-            Callee::Free(path) if local(path) => named.iter().copied().filter(|&i| self.fns[i].ty.is_none()).collect(),
-            Callee::Method => named.clone(),
-            Callee::Typed(path, t) if local(path) => {
-                named.iter().copied().filter(|&i| self.fns[i].ty.as_deref() == Some(t.as_str())).collect()
+            Callee::Free(path) if local(path) => {
+                named.iter().copied().filter(|&i| self.fns[i].ty.is_none() && under(i, path)).collect()
             }
-            Callee::SelfTy => {
+            Callee::SelfMethod | Callee::SelfTy => {
                 let t = caller_ty?;
                 named.iter().copied().filter(|&i| self.fns[i].ty.as_deref() == Some(t)).collect()
             }
-            _ => return None,
+            Callee::AccountsMethod => {
+                let t = accounts_ty?;
+                named.iter().copied().filter(|&i| self.fns[i].ty.as_deref() == Some(t)).collect()
+            }
+            Callee::Typed(path, t) if local(path) => {
+                named.iter().copied().filter(|&i| self.fns[i].ty.as_deref() == Some(t.as_str())).collect()
+            }
+            Callee::Unknown | Callee::Free(_) | Callee::Typed(..) => return None,
         };
         match pick[..] {
             [only] => Some(only),
@@ -779,7 +850,7 @@ impl FnIndex {
                 .iter()
                 .flat_map(|&i| {
                     let ty = self.fns[i].ty.as_deref();
-                    self.fns[i].calls.iter().filter_map(move |(c, n)| self.resolve(c, n, ty))
+                    self.fns[i].calls.iter().filter_map(move |(c, n)| self.resolve(c, n, ty, None))
                 })
                 .filter(|i| seen.insert(*i))
                 .collect();
@@ -796,12 +867,22 @@ impl FnIndex {
     /// The slots a handler body passes to calls that reach a check and
     /// whose result it propagates: (`ctx.accounts.` path, the call).
     /// `line0`: lines before the body.
-    fn handed(&self, body: &str, file: &str, line0: usize) -> Vec<(String, Handed)> {
+    fn handed(&self, body: &str, accounts_ty: &str, file: &str, line0: usize) -> Vec<(String, Handed)> {
         // `let w = &mut ctx.accounts.whirlpool;`: `w` passed is the slot.
         // A name bound by any other `let` too is not followed.
         let mut lets: HashMap<&str, usize> = HashMap::new();
         for c in LET_RE.captures_iter(body) {
             *lets.entry(c.get(1).unwrap().as_str()).or_default() += 1;
+        }
+        // Bound again by a pattern (`for t in`, `let (t, _)`, `|t|`, a match
+        // arm): counted as a second binding.
+        for c in PATTERN_RE.captures_iter(body) {
+            let Some(pat) = (1..=4).find_map(|g| c.get(g)) else { continue };
+            for w in WORD_RE.captures_iter(pat.as_str()) {
+                if let Some(n) = lets.get_mut(w.get(2).unwrap().as_str()) {
+                    *n += 1;
+                }
+            }
         }
         let aliases: HashMap<String, String> = ALIAS_RE
             .captures_iter(body)
@@ -810,7 +891,7 @@ impl FnIndex {
             .collect();
         let mut out = Vec::new();
         for call in calls_in(body).into_iter().filter(|c| c.propagated) {
-            let Some(i) = self.resolve(&call.callee, &call.name, None) else { continue };
+            let Some(i) = self.resolve(&call.callee, &call.name, None, Some(accounts_ty)) else { continue };
             let (owner, discriminator, key) = self.reach(i);
             if !(owner || discriminator || (key && self.fns[i].key)) {
                 continue;
@@ -826,19 +907,42 @@ impl FnIndex {
             let mut with = slots_in(call.args);
             with.sort();
             with.dedup();
-            // Argument i is parameter i: keyed when the callee compares that
-            // parameter's key itself (not only some fn it calls).
+            // Argument i is parameter i. The callee itself (not some fn it
+            // calls) compares parameter `p`'s key with a local, or with
+            // parameter `q`'s data: (slots passed as `p`, slots as `q` or
+            // none for a local). `has_one = p` on `q` may have become it.
             let f = &self.fns[i];
             let args = top_level(call.args);
-            let keyed: Vec<String> = match args.len() == f.params.len() {
-                true => args
-                    .iter()
-                    .zip(&f.params)
-                    .filter(|(_, p)| f.key_names.contains(*p))
-                    .flat_map(|(a, _)| slots_in(a))
-                    .collect(),
-                false => Vec::new(),
+            let mut keyed: Vec<(String, Option<String>)> = Vec::new();
+            let owner_on = match f.owner_params.is_empty() {
+                true => None,
+                false if args.len() == f.params.len() => Some(
+                    f.params
+                        .iter()
+                        .zip(&args)
+                        .filter(|(p, _)| f.owner_params.contains(p))
+                        .flat_map(|(_, a)| slots_in(a))
+                        .collect(),
+                ),
+                false => Some(Vec::new()),
             };
+            if args.len() == f.params.len() {
+                let arg_of = |q: &str| f.params.iter().position(|p| p == q).map(|k| slots_in(args[k]));
+                for (l, r) in &f.key_atoms {
+                    for (a, b) in [(l, r), (r, l)] {
+                        let Some(p) = KEY_SIDE_RE.captures(a).map(|m| m[1].to_string()) else { continue };
+                        let Some(ps) = arg_of(&p) else { continue };
+                        let root = HEAD_NAME_RE.captures(b).map(|m| m[2].to_string()).unwrap_or_default();
+                        match arg_of(&root) {
+                            None => keyed.extend(ps.iter().map(|t| (t.clone(), None))),
+                            Some(qs) if root != p => {
+                                keyed.extend(ps.iter().flat_map(|t| qs.iter().map(move |o| (t.clone(), Some(o.clone())))))
+                            }
+                            Some(_) => {}
+                        }
+                    }
+                }
+            }
             let name = match &call.callee {
                 Callee::Typed(_, t) => format!("{t}::{}", call.name),
                 Callee::SelfTy => format!("Self::{}", call.name),
@@ -848,7 +952,16 @@ impl FnIndex {
             for p in &with {
                 out.push((
                     p.clone(),
-                    Handed { call: name.clone(), file: file.to_string(), line, with: with.clone(), owner, discriminator, keyed: keyed.clone() },
+                    Handed {
+                        call: name.clone(),
+                        file: file.to_string(),
+                        line,
+                        with: with.clone(),
+                        owner,
+                        discriminator,
+                        owner_on: owner_on.clone(),
+                        keyed: keyed.clone(),
+                    },
                 ));
             }
         }
@@ -900,17 +1013,112 @@ enum Demand {
     Other,
 }
 
-/// The condition rejects unless two things are equal: `require!(a == b)`,
-/// `require_keys_eq!(a, b)`, `if a != b { return Err }`. Not `a != b`
-/// required, `a == b` rejected (an init guard), nor an `||` that lets
-/// either through or an `&&` that rejects only sometimes.
-fn demands_equal(d: Demand, cond: &str) -> bool {
-    match d {
-        Demand::Equal => true,
-        Demand::Holds => cond.contains("==") && !cond.contains("!=") && !cond.contains("||"),
-        Demand::RejectsIf => cond.contains("!=") && !cond.contains("==") && !cond.contains("&&"),
-        Demand::Other => false,
+/// The equalities a condition rejects without, each as its two sides
+/// (whitespace, a leading `&` / `*` dropped): `require!(a == b && c == d)`,
+/// `require_keys_eq!(a, b)`, `if a != b || c != d { return Err }`. Only
+/// that shape: a `!` in front, a `|` / `&` / `^`, or the other comparison
+/// (`require!(a != b)`, an init guard `if a == b { return Err }`) gives
+/// none.
+fn equalities(d: Demand, cond: &str) -> Vec<(String, String)> {
+    let t: String = cond.chars().filter(|c| !c.is_whitespace()).collect();
+    let side = |x: &str| x.trim_start_matches(['&', '*']).to_string();
+    let (join, op) = match d {
+        Demand::Equal => {
+            let args = top_level(&t);
+            return match args[..] {
+                [a, b, ..] if !a.starts_with('!') && !b.starts_with('!') => vec![(side(a), side(b))],
+                _ => Vec::new(),
+            };
+        }
+        Demand::Holds => ("&&", "=="),
+        Demand::RejectsIf => ("||", "!="),
+        Demand::Other => return Vec::new(),
+    };
+    // `require!(cond, Error)`: the condition is the first argument.
+    let t = match d {
+        Demand::Holds => top_level(&t).first().map(|s| s.to_string()).unwrap_or_default(),
+        _ => t,
+    };
+    let mut out = Vec::new();
+    for part in split_at_top(&unparen(&t), join) {
+        let part = unparen(part);
+        let pieces = split_at_top(&part, op);
+        // Exactly one comparison, and nothing else at the top level.
+        let [l, r] = pieces[..] else { return Vec::new() };
+        let bad = |x: &str| {
+            x.is_empty()
+                || x.starts_with('!')
+                || ["==", "!=", "||", "&&", "|", "&", "^", "<", ">"].iter().any(|o| split_at_top(x, o).len() > 1)
+        };
+        if bad(l) || bad(r) {
+            return Vec::new();
+        }
+        out.push((side(l), side(r)));
     }
+    out
+}
+
+/// `(x)` → `x` when the parentheses wrap all of it.
+fn unparen(t: &str) -> String {
+    let mut t = t.to_string();
+    while t.starts_with('(') && t.ends_with(')') && closing_paren(&t[1..]) == Some(t.len() - 2) {
+        t = t[1..t.len() - 1].to_string();
+    }
+    t
+}
+
+/// `t` split at each top-level `op` (not inside brackets, not part of a
+/// longer operator: `|` is not `||`, `&` not `&&` nor a leading borrow).
+fn split_at_top<'a>(t: &'a str, op: &str) -> Vec<&'a str> {
+    let b = t.as_bytes();
+    let (mut depth, mut start, mut out, mut i) = (0i32, 0usize, Vec::new(), 0usize);
+    while i < b.len() {
+        match b[i] {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth -= 1,
+            _ if depth == 0 && t[i..].starts_with(op) => {
+                let prev = if i == 0 { None } else { Some(b[i - 1]) };
+                let next = b.get(i + op.len()).copied();
+                let longer = match op {
+                    "|" => prev == Some(b'|') || next == Some(b'|'),
+                    "&" => prev == Some(b'&') || next == Some(b'&') || i == start,
+                    "<" | ">" => next == Some(b'=') || prev == Some(b'-') || prev == Some(b'='),
+                    "==" | "!=" => prev.is_some_and(|c| matches!(c, b'=' | b'!' | b'<' | b'>')),
+                    _ => false,
+                };
+                if !longer {
+                    out.push(&t[start..i]);
+                    i += op.len();
+                    start = i;
+                    continue;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    out.push(&t[start..]);
+    out
+}
+
+/// Bracket depth at byte `at` of `s`.
+fn depth_at(s: &str, at: usize) -> i32 {
+    s[..at].bytes().fold(0, |d, c| match c {
+        b'(' | b'[' | b'{' => d + 1,
+        b')' | b']' | b'}' => d - 1,
+        _ => d,
+    })
+}
+
+/// A file's modules from its path under `src/`: `src/util/sparse_swap.rs`
+/// → `util`, `sparse_swap`; `lib.rs` / `main.rs` / `mod.rs` add none.
+fn file_mods(file: &str) -> Vec<String> {
+    let rel = file.rsplit_once("/src/").map_or(file, |(_, r)| r);
+    let mut segs: Vec<String> = rel.trim_end_matches(".rs").split('/').map(String::from).collect();
+    if matches!(segs.last().map(String::as_str), Some("lib" | "main" | "mod")) {
+        segs.pop();
+    }
+    segs
 }
 
 /// The `{` opening the body of the item whose signature starts at `from`,
@@ -982,7 +1190,18 @@ fn calls_in(blanked: &str) -> Vec<CallAt<'_>> {
         let path: Vec<String> =
             c[1].split("::").map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
         let callee = match path.split_last() {
-            None if before.ends_with('.') => Callee::Method,
+            _ if before.ends_with("::") || before.ends_with('>') => Callee::Unknown,
+            None if before.ends_with('.') => {
+                let recv: String = before.chars().filter(|c| !c.is_whitespace()).collect();
+                if recv.ends_with("ctx.accounts.") {
+                    Callee::AccountsMethod
+                } else if recv.ends_with("self.") && !recv[..recv.len() - 5].ends_with(|c: char| c.is_alphanumeric() || c == '_' || c == '.') {
+                    Callee::SelfMethod
+                } else {
+                    // On a value of a type the reader does not know.
+                    Callee::Unknown
+                }
+            }
             None => Callee::Free(Vec::new()),
             Some((t, _)) if t == "Self" => Callee::SelfTy,
             Some((t, mods)) if t.starts_with(|c: char| c.is_ascii_uppercase()) => Callee::Typed(mods.to_vec(), t.clone()),
@@ -996,11 +1215,12 @@ fn calls_in(blanked: &str) -> Vec<CallAt<'_>> {
             let Some(e) = closing_paren(r) else { break };
             rest = r[e + 1..].trim_start();
         }
+        // The body's own last expression; a block's (`let _ = { f(x) };`,
+        // an `if` arm, a closure) is not the fn's result.
         let propagated = rest.starts_with('?')
             || rest.starts_with(".unwrap()")
             || rest.starts_with(".expect(")
-            || rest.starts_with('}')
-            || rest.is_empty()
+            || (rest.is_empty() && depth_at(blanked, start) == 0)
             || before.ends_with("return");
         out.push(CallAt { callee, name: name.to_string(), at: start, args: &blanked[open..open + close], propagated });
     }

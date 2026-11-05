@@ -158,8 +158,13 @@ pub fn diff(base: &SourceKinds, head: &SourceKinds) -> Vec<Change> {
         // followed: the reviewer confirms it is this one.
         let handed = |want: &dyn Fn(&crate::source::Handed) -> bool| h.attrs.handed.iter().find(|d| want(d));
         let handed_at = |d: &crate::source::Handed| format!("`{}` ({}:{})", d.call, d.file, d.line);
+        // The call compares `target`'s key with a value it computed, or
+        // with this slot's data: not a third account's.
+        let keys = |d: &crate::source::Handed, target: &str| {
+            d.keyed.iter().any(|(t, o)| t == target && o.as_ref().is_none_or(|o| o == path))
+        };
         if b.kind == Some(SlotKind::Typed) && h.kind == Some(SlotKind::Unchecked) && b.ty != "Signer" {
-            match handed(&|d| d.owner && d.discriminator) {
+            match handed(&|d| d.owner && d.discriminator && d.owner_on.as_ref().is_none_or(|v| v.contains(path))) {
                 Some(d) => push(
                     Severity::Warning,
                     format!(
@@ -281,7 +286,7 @@ pub fn diff(base: &SourceKinds, head: &SourceKinds) -> Vec<Change> {
                         Severity::Warning,
                         format!("`has_one = {target}` is still declared in other words once {r} is read as a rename: confirm it is the same account"),
                     ),
-                    None => match handed(&|d| d.keyed.contains(&sibling(path, target))) {
+                    None => match handed(&|d| keys(d, &sibling(path, target))) {
                         Some(d) => push(
                             Severity::Warning,
                             format!(
@@ -336,7 +341,7 @@ pub fn diff(base: &SourceKinds, head: &SourceKinds) -> Vec<Change> {
                         // A key comparison with other accounts, all of them
                         // handed to one call with this one that compares keys.
                         None => match (expr.contains(".key"), others_named(base, base_ix, path, expr)) {
-                            (true, others) if !others.is_empty() => match handed(&|d| others.iter().all(|o| d.keyed.contains(o))) {
+                            (true, others) if !others.is_empty() => match handed(&|d| others.iter().all(|o| keys(d, o))) {
                                 Some(d) => push(
                                     Severity::Warning,
                                     format!(
@@ -649,16 +654,26 @@ fn constraint_eqs(k: &SourceKinds, ix: &str, path: &str, c: &str) -> Option<Vec<
 /// `.ge(&3)` → `.ge(&0)`) is a removal.
 fn yes_no(e: &str) -> bool {
     static CMP: LazyLock<regex::Regex> = LazyLock::new(|| {
-        regex::Regex::new(r#"==|!=|<|>|\||\.\s*(?:eq|ne|ge|gt|le|lt|cmp|partial_cmp)\s*\(|\bmatches\s*!|"|'|\b\d"#).unwrap()
+        regex::Regex::new(r#"==|!=|<|>|\||\^|\.\s*(?:eq|ne|ge|gt|le|lt|cmp|partial_cmp)\s*\(|\bmatches\s*!|"|'|\b\d|\btrue\b|\bfalse\b"#).unwrap()
     });
     !CMP.is_match(e)
 }
 
-/// One gate the other with a `!` added or taken away: inverted.
+/// One gate the other with a `!` added or taken away: inverted. Read
+/// alike: `load_mut()?` / `load_init()?` and `load()?`; `x == false`,
+/// `x != true` and `x.not()` and `!x`.
 fn negated(a: &str, b: &str) -> bool {
     let core = |e: &str| -> (usize, String) {
         let mut t: String = e.chars().filter(|c| !c.is_whitespace()).collect();
+        t = t.replace(".load_mut()?", ".load()?").replace(".load_init()?", ".load()?");
         let mut bangs = 0;
+        for (suffix, flips) in [("==false", 1), ("!=true", 1), ("==true", 0), ("!=false", 0), (".not()", 1)] {
+            if let Some(r) = t.strip_suffix(suffix) {
+                t = r.to_string();
+                bangs += flips;
+                break;
+            }
+        }
         loop {
             if let Some(r) = t.strip_prefix('!') {
                 t = r.to_string();
@@ -900,6 +915,10 @@ fn escape_property(s: &str) -> String {
 #[cfg(test)]
 #[path = "diff_adversarial.rs"]
 mod adversarial;
+
+#[cfg(test)]
+#[path = "diff_adversarial_round2.rs"]
+mod adversarial_round2;
 
 #[cfg(test)]
 mod tests {
@@ -1726,7 +1745,7 @@ fn peek(a: AccountInfo) -> Result<TickArray> {
         let k = kinds(&moved);
         let d = &k.slot("swap", "tick_array").unwrap().attrs.handed[0];
         assert_eq!((d.call.as_str(), d.owner, d.discriminator), ("Builder::try_from", true, true));
-        assert_eq!(d.keyed, ["whirlpool"]);
+        assert_eq!(d.keyed, [("whirlpool".to_string(), None)]);
         assert_eq!(d.with, ["tick_array", "whirlpool"]);
 
         // Not handed to it: both removed.

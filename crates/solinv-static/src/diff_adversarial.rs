@@ -303,3 +303,4 @@ impl<'info> Swap<'info> {
     let h = unchecked(fns, "ctx.accounts.verify(&ctx.accounts.tick_array.to_account_info())?;");
     assert_eq!(show("d2 method on accounts", HB, &h, "swap.tick_array"), [Severity::Regression, Severity::Warning]);
 }
+

@@ -672,13 +672,41 @@ fn negated(a: &str, b: &str) -> bool {
         let mut t: String = e.chars().filter(|c| !c.is_whitespace()).collect();
         t = t.replace(".load_mut()?", ".load()?").replace(".load_init()?", ".load()?");
         let mut bangs = 0;
-        for (suffix, flips) in [("==false", 1), ("!=true", 1), ("==true", 0), ("!=false", 0), (".not()", 1)] {
+        // `Not::not(x)` / `std::ops::Not::not(x)` is `!x`.
+        for p in ["std::ops::Not::not(", "core::ops::Not::not(", "Not::not("] {
+            if t.starts_with(p) && t.ends_with(')') && closing_paren_at(&t[p.len() - 1..]) == Some(t.len() - p.len()) {
+                t = t[p.len()..t.len() - 1].to_string();
+                bangs += 1;
+                break;
+            }
+        }
+        for (suffix, flips) in [
+            ("==false", 1),
+            ("!=true", 1),
+            ("==true", 0),
+            ("!=false", 0),
+            (".not()", 1),
+        ] {
             if let Some(r) = t.strip_suffix(suffix) {
                 t = r.to_string();
                 bangs += flips;
                 break;
             }
         }
+        // Each pair one question asked both ways: `x.is_none()` is `!x.is_some()`.
+        for (yes, no) in [(".is_some()", ".is_none()"), (".is_ok()", ".is_err()")] {
+            if let Some(r) = t.strip_suffix(no) {
+                t = format!("{r}{yes}");
+                bangs += 1;
+            }
+        }
+        // `(*x).f()` is `x.f()`.
+        while let Some(i) = t.find("(*") {
+            let Some(close) = closing_paren_at(&t[i..]) else { break };
+            t = format!("{}{}{}", &t[..i], &t[i + 2..i + close], &t[i + close + 1..]);
+        }
+        let t = t.trim_start_matches('*').to_string();
+        let mut t = t;
         loop {
             if let Some(r) = t.strip_prefix('!') {
                 t = r.to_string();
@@ -1698,6 +1726,19 @@ pub struct Act<'info> {
         let or_same = base.replace("is_operational()", "is_operational() || group.load()?.testing == 1");
         assert_eq!(at(&or_same), [Severity::Regression]);
         // A new constraint naming another account is not a gate on this one.
+        // Inverted in other words: a removal.
+        for (x, y) in [
+            ("pause_reason().is_none()", "pause_reason().is_some()"),
+            ("check_live().is_ok()", "check_live().is_err()"),
+        ] {
+            let (b, h) = (base.replace("is_operational()", x), base.replace("is_operational()", y));
+            assert_eq!(diff(&kinds(&b), &kinds(&h)).into_iter().filter(|c| c.slot() == "act.group").map(|c| c.severity).collect::<Vec<_>>(), [Severity::Regression], "{x} → {y}");
+        }
+        let neg = base.replace("group.load()?.is_operational()", "!group.load()?.is_operational()");
+        for h in ["(*group.load()?).is_operational()", "std::ops::Not::not(!group.load()?.is_operational())"] {
+            let h = base.replace("group.load()?.is_operational()", h);
+            assert_eq!(diff(&kinds(&neg), &kinds(&h)).into_iter().filter(|c| c.slot() == "act.group").map(|c| c.severity).collect::<Vec<_>>(), [Severity::Regression], "{h}");
+        }
         let other = base.replace("is_operational()", "admin == owner.key()");
         assert_eq!(at(&other), [Severity::Regression]);
         let other = base.replace("is_operational()", "is_owner(account.load()?.owner)");

@@ -16,6 +16,7 @@
 use crate::source::{clauses, Slot, SourceKinds};
 use crate::idl::SlotKind;
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::LazyLock;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Severity {
@@ -162,8 +163,8 @@ pub fn diff(base: &SourceKinds, head: &SourceKinds) -> Vec<Change> {
                 Some(d) => push(
                     Severity::Warning,
                     format!(
-                        "was {}, now {}; the handler passes it to {}, which rejects on an owner and a \
-                         discriminator: confirm they are this account's",
+                        "was {}, now {}; the handler passes it to {}, which compares an owner with a \
+                         program id and a discriminator: confirm they are this account's",
                         b.ty, h.ty, handed_at(d)
                     ),
                 ),
@@ -280,7 +281,7 @@ pub fn diff(base: &SourceKinds, head: &SourceKinds) -> Vec<Change> {
                         Severity::Warning,
                         format!("`has_one = {target}` is still declared in other words once {r} is read as a rename: confirm it is the same account"),
                     ),
-                    None => match handed(&|d| d.key && d.with.contains(&sibling(path, target))) {
+                    None => match handed(&|d| d.keyed.contains(&sibling(path, target))) {
                         Some(d) => push(
                             Severity::Warning,
                             format!(
@@ -297,6 +298,7 @@ pub fn diff(base: &SourceKinds, head: &SourceKinds) -> Vec<Change> {
                 },
             }
         }
+        let mut used_gates: BTreeSet<String> = BTreeSet::new();
         for expr in ba.constraints.iter().filter(|e| !ha.constraints.contains(e)) {
             match siblings.iter().find(|(_, s)| s.attrs.constraints.contains(expr)) {
                 Some((other, _)) => push(
@@ -317,18 +319,24 @@ pub fn diff(base: &SourceKinds, head: &SourceKinds) -> Vec<Change> {
                     // With `||` it may let a second way through.
                     None => match ha.constraints.iter().find(|e| {
                         !ba.constraints.contains(e)
-                            && !["||", "==", "!=", "<", ">"].iter().any(|op| e.contains(op))
+                            && !used_gates.contains(*e)
+                            && yes_no(e)
+                            && !negated(expr, e)
                             && gate_on(head, ix, path, e)
                             && gate_on(base, base_ix, path, expr)
                     }) {
-                        Some(e) => push(
-                            Severity::Warning,
-                            format!("`constraint = {expr}` replaced by `constraint = {e}` on the same account: confirm the new gate is as strict"),
-                        ),
+                        Some(e) => {
+                            // One new gate stands in for one removed.
+                            used_gates.insert(e.clone());
+                            push(
+                                Severity::Warning,
+                                format!("`constraint = {expr}` replaced by `constraint = {e}` on the same account: confirm the new gate is as strict"),
+                            )
+                        }
                         // A key comparison with other accounts, all of them
                         // handed to one call with this one that compares keys.
                         None => match (expr.contains(".key"), others_named(base, base_ix, path, expr)) {
-                            (true, others) if !others.is_empty() => match handed(&|d| d.key && others.iter().all(|o| d.with.contains(o))) {
+                            (true, others) if !others.is_empty() => match handed(&|d| others.iter().all(|o| d.keyed.contains(o))) {
                                 Some(d) => push(
                                     Severity::Warning,
                                     format!(
@@ -635,6 +643,58 @@ fn constraint_eqs(k: &SourceKinds, ix: &str, path: &str, c: &str) -> Option<Vec<
     (!eqs.is_empty() && eqs.len() == parts.len()).then_some(eqs)
 }
 
+/// A gate that answers yes or no from the account's state, comparing
+/// nothing: no `==`-like operator or method, no `matches!`, no `|`, no
+/// literal. A changed literal (`role == "admin"` → `"attacker"`,
+/// `.ge(&3)` → `.ge(&0)`) is a removal.
+fn yes_no(e: &str) -> bool {
+    static CMP: LazyLock<regex::Regex> = LazyLock::new(|| {
+        regex::Regex::new(r#"==|!=|<|>|\||\.\s*(?:eq|ne|ge|gt|le|lt|cmp|partial_cmp)\s*\(|\bmatches\s*!|"|'|\b\d"#).unwrap()
+    });
+    !CMP.is_match(e)
+}
+
+/// One gate the other with a `!` added or taken away: inverted.
+fn negated(a: &str, b: &str) -> bool {
+    let core = |e: &str| -> (usize, String) {
+        let mut t: String = e.chars().filter(|c| !c.is_whitespace()).collect();
+        let mut bangs = 0;
+        loop {
+            if let Some(r) = t.strip_prefix('!') {
+                t = r.to_string();
+                bangs += 1;
+            } else if t.starts_with('(') && t.ends_with(')') && closing_paren_at(&t) == Some(t.len() - 1) {
+                t = t[1..t.len() - 1].to_string();
+            } else {
+                return (bangs, t);
+            }
+        }
+    };
+    let ((x, s), (y, t)) = (core(a), core(b));
+    s == t && x % 2 != y % 2
+}
+
+/// The index of the `)` closing the `(` at 0.
+fn closing_paren_at(t: &str) -> Option<usize> {
+    let mut d = 0i32;
+    for (i, c) in t.char_indices() {
+        match c {
+            '(' => d += 1,
+            ')' => {
+                d -= 1;
+                if d == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// A name at the head of a path: not after `.` (a field) or `::`.
+static HEAD_NAME: LazyLock<regex::Regex> = LazyLock::new(|| regex::Regex::new(r"(^|[^.:\w])([A-Za-z_]\w*)").unwrap());
+
 /// A `constraint` on the slot at `path` that reads only that account's
 /// state (`group.load()?.is_operational()`, `g.testing == 1`): no other
 /// account of the instruction, and no key compared.
@@ -643,9 +703,7 @@ fn gate_on(k: &SourceKinds, ix: &str, path: &str, c: &str) -> bool {
         return false;
     }
     let leaf = path.rsplit('.').next().unwrap_or(path);
-    // A name at the head of a path: not after `.` (a field) or `::`.
-    let name = regex::Regex::new(r"(^|[^.:\w])([A-Za-z_]\w*)").unwrap();
-    let named: BTreeSet<&str> = name
+    let named: BTreeSet<&str> = HEAD_NAME
         .captures_iter(c)
         .map(|m| m.get(2).unwrap().as_str())
         .filter(|n| k.slot(ix, &sibling(path, n)).is_some())
@@ -656,8 +714,8 @@ fn gate_on(k: &SourceKinds, ix: &str, path: &str, c: &str) -> bool {
 /// The slots beside `path` other than it that a `constraint` names, as
 /// full paths.
 fn others_named(k: &SourceKinds, ix: &str, path: &str, c: &str) -> BTreeSet<String> {
-    let name = regex::Regex::new(r"(^|[^.:\w])([A-Za-z_]\w*)").unwrap();
-    name.captures_iter(c)
+    HEAD_NAME
+        .captures_iter(c)
         .map(|m| sibling(path, m.get(2).unwrap().as_str()))
         .filter(|p| p != path && k.slot(ix, p).is_some())
         .collect()
@@ -838,6 +896,10 @@ fn escape(s: &str) -> String {
 fn escape_property(s: &str) -> String {
     escape(s).replace(':', "%3A").replace(',', "%2C")
 }
+
+#[cfg(test)]
+#[path = "diff_adversarial.rs"]
+mod adversarial;
 
 #[cfg(test)]
 mod tests {
@@ -1663,7 +1725,8 @@ fn peek(a: AccountInfo) -> Result<TickArray> {
         assert_eq!(at(base, &moved), [Severity::Warning, Severity::Warning]);
         let k = kinds(&moved);
         let d = &k.slot("swap", "tick_array").unwrap().attrs.handed[0];
-        assert_eq!((d.call.as_str(), d.owner, d.discriminator, d.key), ("Builder::try_from", true, true, true));
+        assert_eq!((d.call.as_str(), d.owner, d.discriminator), ("Builder::try_from", true, true));
+        assert_eq!(d.keyed, ["whirlpool"]);
         assert_eq!(d.with, ["tick_array", "whirlpool"]);
 
         // Not handed to it: both removed.

@@ -13,7 +13,9 @@
 use anyhow::{Context, Result};
 use regex::Regex;
 use crate::idl::{Idl, IdlAccount, IdlAccountItem, IdlInstruction, IdlPda, SlotKind};
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::sync::LazyLock;
 use std::fs;
 use std::path::Path;
 
@@ -108,7 +110,10 @@ pub struct Handed {
     pub with: Vec<String>,
     pub owner: bool,
     pub discriminator: bool,
-    pub key: bool,
+    /// The slots passed as a parameter that the called fn itself
+    /// compares a key with, in a check that rejects unless equal: what a
+    /// `has_one` tying another slot to them may have become.
+    pub keyed: Vec<String>,
 }
 
 /// One account slot as the source declares it.
@@ -532,8 +537,10 @@ impl SourceKinds {
                 let end = c.get(0).unwrap().end();
                 // A declaration with no body (`fn f(..) -> R;` in a trait) has none
                 // to read: never the next item's.
-                let open = src[end..].find(['{', ';']).filter(|&i| src.as_bytes()[end + i] == b'{');
-                if let Some(open) = open.map(|i| end + i + 1) {
+                // The match ends at the `,` or `)` after the context: one open
+                // parenthesis left when `,`. Past `[u8; 32]` parameters.
+                let depth = i32::from(src[..end].ends_with(','));
+                if let Some(open) = body_open(src, end, depth) {
                     if let Some(body) = braced(&src[open..]) {
                         let expr_body = &exprs[file.as_str()][open..open + body.len()];
                         body_checks.push((ix.clone(), read_body(body, expr_body)));
@@ -575,14 +582,22 @@ impl SourceKinds {
             }
         }
         for (ix, path, mut h) in handed {
-            // `ctx.accounts.a.b.to_account_info`: the deepest slot it names.
+            // `ctx.accounts.a.b.to_account_info`: the deepest slot it names,
+            // when what is passed is that account. Its `.key()` or a field
+            // of its data is not: the callee cannot read its owner from it.
             let slot_of = |path: &str| {
                 let segs: Vec<&str> = path.split('.').collect();
-                (1..=segs.len()).rev().map(|k| segs[..k].join(".")).find(|p| map.contains_key(&(ix.clone(), p.clone())))
+                let k = (1..=segs.len()).rev().find(|&k| map.contains_key(&(ix.clone(), segs[..k].join("."))))?;
+                let passes_account = segs.get(k).is_none_or(|m| {
+                    matches!(*m, "to_account_info" | "as_ref" | "clone" | "load" | "load_mut" | "load_init" | "deref" | "as_mut")
+                });
+                passes_account.then(|| segs[..k].join("."))
             };
-            h.with = h.with.iter().filter_map(|p| slot_of(p)).collect();
-            h.with.sort();
-            h.with.dedup();
+            for v in [&mut h.with, &mut h.keyed] {
+                *v = v.iter().filter_map(|p| slot_of(p)).collect();
+                v.sort();
+                v.dedup();
+            }
             if let Some(s) = slot_of(&path).and_then(|p| map.get_mut(&(ix.clone(), p))) {
                 if !s.attrs.handed.contains(&h) {
                     s.attrs.handed.push(h);
@@ -594,9 +609,15 @@ impl SourceKinds {
 }
 
 /// Every fn of the source, by name and the type of the `impl` it is in,
-/// with what it rejects on and the fns it calls.
+/// with what it rejects on and the fns it calls. `#[cfg(test)]` code is
+/// left out: it never runs on chain.
 struct FnIndex {
     fns: Vec<FnInfo>,
+    by_name: HashMap<String, Vec<usize>>,
+    /// Lower-case module names declared in the source: `m::f` is followed
+    /// only through these, `crate`, `super` and `self`.
+    mods: HashSet<String>,
+    reached: RefCell<HashMap<usize, (bool, bool, bool)>>,
 }
 
 struct FnInfo {
@@ -605,20 +626,71 @@ struct FnInfo {
     owner: bool,
     discriminator: bool,
     key: bool,
-    calls: Vec<(Option<String>, String)>,
+    /// Parameter names, `self` left out.
+    params: Vec<String>,
+    /// The names in its key checks that reject unless equal.
+    key_names: HashSet<String>,
+    /// Calls whose result is propagated: `?`, `.unwrap()`, returned.
+    calls: Vec<(Callee, String)>,
+}
+
+/// How a call names its fn.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Callee {
+    /// `f(..)` or `crate::m::f(..)`: a fn outside any `impl`.
+    Free(Vec<String>),
+    /// `x.f(..)`.
+    Method,
+    /// `T::f(..)`, with the module path before `T`.
+    Typed(Vec<String>, String),
+    /// `Self::f(..)`.
+    SelfTy,
 }
 
 /// How many calls deep a slot handed to a call is followed.
 const HANDED_DEPTH: usize = 4;
 
+static IMPL_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\bimpl\b([^{;]*)\{").unwrap());
+static FN_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\bfn\s+([A-Za-z_]\w*)").unwrap());
+static MOD_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\bmod\s+([a-z_]\w*)").unwrap());
+static TEST_MOD_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+\w+\s*\{").unwrap());
+static CFG_TEST_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]").unwrap());
+static IMPL_TYPE_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^\s*&?\s*(?:[A-Za-z_]\w*\s*::\s*)*([A-Za-z_]\w*)").unwrap());
+static CALL_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"((?:[A-Za-z_]\w*\s*::\s*)*)\b([a-z_]\w*)\s*\(").unwrap());
+static REQUIRE_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\b(require(?:_keys)?(?:_eq|_neq|_gt|_gte)?)\s*!\s*[(\[]").unwrap());
+static IF_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\bif\b").unwrap());
+static FAILS_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(?:return\s+)?(?:Err\s*\(|err!\s*\()").unwrap());
+/// What an account's owner is compared with when it is the program-owner
+/// check: a program id, not a user (`position.owner == authority.key()`).
+static PROGRAM_ID_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\bprogram_id\b|\bID\b|\bid\s*\(\s*\)|::\s*owner\s*\(\s*\)|PROGRAM_ID\b").unwrap()
+});
+static ACCOUNT_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\bctx\s*\.\s*accounts\s*\.\s*([a-z_]\w*(?:\s*\.\s*[a-z_]\w*)*)").unwrap()
+});
+static ALIAS_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"\blet\s+(?:mut\s+)?([a-z_]\w*)\s*=\s*&?\s*(?:mut\s+)?ctx\s*\.\s*accounts\s*\.\s*([a-z_]\w*(?:\s*\.\s*[a-z_]\w*)*)\s*;",
+    )
+    .unwrap()
+});
+static LET_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\blet\s+(?:mut\s+)?([a-z_]\w*)\b").unwrap());
+static WORD_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(^|[^.\w])([a-z_]\w*)\b").unwrap());
+/// A name at the head of a path: not after `.` (a field) or `::`.
+static HEAD_NAME_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(^|[^.:\w])([a-z_]\w*)").unwrap());
+
 impl FnIndex {
     fn new(stripped: &[(String, String)], exprs: &HashMap<&str, String>) -> Self {
-        let impl_re = Regex::new(r"\bimpl\b([^{;]*)\{").unwrap();
-        let fn_re = Regex::new(r"\bfn\s+([A-Za-z_]\w*)").unwrap();
         let mut fns = Vec::new();
+        let mut mods = HashSet::new();
         for (file, src) in stripped {
+            mods.extend(MOD_RE.captures_iter(src).map(|c| c[1].to_string()));
             // (start, end, type) of each impl block.
-            let impls: Vec<(usize, usize, String)> = impl_re
+            let impls: Vec<(usize, usize, String)> = IMPL_RE
                 .captures_iter(src)
                 .filter_map(|c| {
                     let open = c.get(0).unwrap().end();
@@ -626,35 +698,69 @@ impl FnIndex {
                     braced(&src[open..]).map(|b| (open, open + b.len(), ty))
                 })
                 .collect();
-            for c in fn_re.captures_iter(src) {
-                let end = c.get(0).unwrap().end();
-                let Some(open) = src[end..].find(['{', ';']).filter(|&i| src.as_bytes()[end + i] == b'{') else { continue };
-                let open = end + open + 1;
+            let tests: Vec<(usize, usize)> = TEST_MOD_RE
+                .find_iter(src)
+                .filter_map(|m| braced(&src[m.end()..]).map(|b| (m.start(), m.end() + b.len())))
+                .collect();
+            for c in FN_RE.captures_iter(src) {
+                let start = c.get(0).unwrap().start();
+                // `#[cfg(test)]` on the fn, or a test module around it.
+                let attrs_from = src[..start].rfind(['}', ';', '{']).map_or(0, |i| i + 1);
+                if tests.iter().any(|(a, b)| *a <= start && start < *b) || CFG_TEST_RE.is_match(&src[attrs_from..start]) {
+                    continue;
+                }
+                let Some(open) = body_open(src, c.get(0).unwrap().end(), 0) else { continue };
                 let Some(body) = braced(&src[open..]) else { continue };
                 let expr_body = &exprs[file.as_str()][open..open + body.len()];
-                let start = c.get(0).unwrap().start();
                 // The innermost impl around it.
                 let ty = impls.iter().filter(|(a, b, _)| *a <= start && start < *b).max_by_key(|(a, _, _)| *a).map(|(_, _, t)| t.clone());
                 let (mut owner, mut discriminator, mut key) = (false, false, false);
-                for cond in failing_conditions(body, expr_body) {
-                    owner |= cond.contains(".owner") && (cond.contains("!=") || cond.contains("=="));
+                let mut key_names = HashSet::new();
+                for (demand, cond) in failing_conditions(body, expr_body) {
+                    // Only a condition that rejects unless two things are equal.
+                    if !demands_equal(demand, &cond) {
+                        continue;
+                    }
+                    owner |= cond.contains(".owner") && PROGRAM_ID_RE.is_match(&cond);
                     discriminator |= cond.to_lowercase().contains("discriminator");
-                    key |= cond.contains(".key") && (cond.contains("!=") || cond.contains("=="));
+                    if cond.contains(".key") {
+                        key = true;
+                        key_names.extend(HEAD_NAME_RE.captures_iter(&cond).map(|m| m[2].to_string()));
+                    }
                 }
-                let calls = calls_in(body).into_iter().map(|(t, n, _, _)| (t, n)).collect();
-                fns.push(FnInfo { name: c[1].to_string(), ty, owner, discriminator, key, calls });
+                let sig = &src[c.get(0).unwrap().end()..open];
+                let params = sig
+                    .find('(')
+                    .and_then(|i| closing_paren(&sig[i + 1..]).map(|e| params_of(&sig[i + 1..i + 1 + e])))
+                    .unwrap_or_default();
+                let calls = calls_in(body).into_iter().filter(|c| c.propagated).map(|c| (c.callee, c.name)).collect();
+                fns.push(FnInfo { name: c[1].to_string(), ty, owner, discriminator, key, params, key_names, calls });
             }
         }
-        FnIndex { fns }
+        let mut by_name: HashMap<String, Vec<usize>> = HashMap::new();
+        for (i, f) in fns.iter().enumerate() {
+            by_name.entry(f.name.clone()).or_default().push(i);
+        }
+        FnIndex { fns, by_name, mods, reached: RefCell::new(HashMap::new()) }
     }
 
-    /// The one fn a call names: by type when written `T::f`, else by a
-    /// name no other fn of the source has. None when it cannot be told.
-    fn resolve(&self, ty: &Option<String>, name: &str) -> Option<usize> {
-        let named: Vec<usize> = (0..self.fns.len()).filter(|&i| self.fns[i].name == name).collect();
-        let pick: Vec<usize> = match ty {
-            Some(t) => named.iter().copied().filter(|&i| self.fns[i].ty.as_deref() == Some(t)).collect(),
-            None => named,
+    /// The one fn a call names, or None when it cannot be told: a path
+    /// through a module this source does not declare (another crate), a
+    /// name two fns of that kind share.
+    fn resolve(&self, callee: &Callee, name: &str, caller_ty: Option<&str>) -> Option<usize> {
+        let local = |path: &[String]| path.iter().all(|m| matches!(m.as_str(), "crate" | "super" | "self") || self.mods.contains(m));
+        let named = self.by_name.get(name)?;
+        let pick: Vec<usize> = match callee {
+            Callee::Free(path) if local(path) => named.iter().copied().filter(|&i| self.fns[i].ty.is_none()).collect(),
+            Callee::Method => named.clone(),
+            Callee::Typed(path, t) if local(path) => {
+                named.iter().copied().filter(|&i| self.fns[i].ty.as_deref() == Some(t.as_str())).collect()
+            }
+            Callee::SelfTy => {
+                let t = caller_ty?;
+                named.iter().copied().filter(|&i| self.fns[i].ty.as_deref() == Some(t)).collect()
+            }
+            _ => return None,
         };
         match pick[..] {
             [only] => Some(only),
@@ -664,66 +770,163 @@ impl FnIndex {
 
     /// What the fn and those it reaches reject on.
     fn reach(&self, root: usize) -> (bool, bool, bool) {
+        if let Some(r) = self.reached.borrow().get(&root) {
+            return *r;
+        }
         let (mut seen, mut frontier) = (HashSet::from([root]), vec![root]);
         for _ in 0..HANDED_DEPTH {
             let next: Vec<usize> = frontier
                 .iter()
-                .flat_map(|&i| self.fns[i].calls.iter().filter_map(|(t, n)| self.resolve(t, n)))
+                .flat_map(|&i| {
+                    let ty = self.fns[i].ty.as_deref();
+                    self.fns[i].calls.iter().filter_map(move |(c, n)| self.resolve(c, n, ty))
+                })
                 .filter(|i| seen.insert(*i))
                 .collect();
             frontier = next;
         }
-        seen.iter().fold((false, false, false), |(o, d, k), &i| {
+        let r = seen.iter().fold((false, false, false), |(o, d, k), &i| {
             let f = &self.fns[i];
             (o || f.owner, d || f.discriminator, k || f.key)
-        })
+        });
+        self.reached.borrow_mut().insert(root, r);
+        r
     }
 
-    /// The slots a handler body passes to calls that reach a check:
-    /// (`ctx.accounts.` path, the call). `line0`: lines before the body.
+    /// The slots a handler body passes to calls that reach a check and
+    /// whose result it propagates: (`ctx.accounts.` path, the call).
+    /// `line0`: lines before the body.
     fn handed(&self, body: &str, file: &str, line0: usize) -> Vec<(String, Handed)> {
-        let account = Regex::new(r"\bctx\s*\.\s*accounts\s*\.\s*([a-z_]\w*(?:\s*\.\s*[a-z_]\w*)*)").unwrap();
         // `let w = &mut ctx.accounts.whirlpool;`: `w` passed is the slot.
-        // A name bound twice is not followed.
-        let alias = Regex::new(
-            r"\blet\s+(?:mut\s+)?([a-z_]\w*)\s*=\s*&?\s*(?:mut\s+)?ctx\s*\.\s*accounts\s*\.\s*([a-z_]\w*(?:\s*\.\s*[a-z_]\w*)*)\s*;",
-        )
-        .unwrap();
-        let mut aliases: HashMap<String, Option<String>> = HashMap::new();
-        for c in alias.captures_iter(body) {
-            let to: String = c[2].chars().filter(|c| !c.is_whitespace()).collect();
-            aliases.entry(c[1].to_string()).and_modify(|v| *v = None).or_insert(Some(to));
+        // A name bound by any other `let` too is not followed.
+        let mut lets: HashMap<&str, usize> = HashMap::new();
+        for c in LET_RE.captures_iter(body) {
+            *lets.entry(c.get(1).unwrap().as_str()).or_default() += 1;
         }
-        let word = Regex::new(r"(^|[^.\w])([a-z_]\w*)\b").unwrap();
+        let aliases: HashMap<String, String> = ALIAS_RE
+            .captures_iter(body)
+            .filter(|c| lets.get(&c[1]) == Some(&1))
+            .map(|c| (c[1].to_string(), c[2].chars().filter(|c| !c.is_whitespace()).collect()))
+            .collect();
         let mut out = Vec::new();
-        for (ty, name, at, args) in calls_in(body) {
-            let Some(i) = self.resolve(&ty, &name) else { continue };
+        for call in calls_in(body).into_iter().filter(|c| c.propagated) {
+            let Some(i) = self.resolve(&call.callee, &call.name, None) else { continue };
             let (owner, discriminator, key) = self.reach(i);
-            if !(owner || discriminator || key) {
+            if !(owner || discriminator || (key && self.fns[i].key)) {
                 continue;
             }
-            // `ctx.accounts.vault.to_account_info()`: the field read is not a slot.
-            let mut with: Vec<String> = account
-                .captures_iter(args)
-                .map(|c| c[1].chars().filter(|c| !c.is_whitespace()).collect::<String>())
-                .collect();
-            with.extend(word.captures_iter(args).filter_map(|c| aliases.get(&c[2]).cloned().flatten()));
+            let slots_in = |a: &str| -> Vec<String> {
+                let mut v: Vec<String> = ACCOUNT_RE
+                    .captures_iter(a)
+                    .map(|c| c[1].chars().filter(|c| !c.is_whitespace()).collect::<String>())
+                    .collect();
+                v.extend(WORD_RE.captures_iter(a).filter_map(|c| aliases.get(&c[2]).cloned()));
+                v
+            };
+            let mut with = slots_in(call.args);
             with.sort();
             with.dedup();
-            let call = match &ty {
-                Some(t) => format!("{t}::{name}"),
-                None => name.clone(),
+            // Argument i is parameter i: keyed when the callee compares that
+            // parameter's key itself (not only some fn it calls).
+            let f = &self.fns[i];
+            let args = top_level(call.args);
+            let keyed: Vec<String> = match args.len() == f.params.len() {
+                true => args
+                    .iter()
+                    .zip(&f.params)
+                    .filter(|(_, p)| f.key_names.contains(*p))
+                    .flat_map(|(a, _)| slots_in(a))
+                    .collect(),
+                false => Vec::new(),
             };
-            let line = line0 + body[..at].matches('\n').count() + 1;
+            let name = match &call.callee {
+                Callee::Typed(_, t) => format!("{t}::{}", call.name),
+                Callee::SelfTy => format!("Self::{}", call.name),
+                _ => call.name.clone(),
+            };
+            let line = line0 + body[..call.at].matches('\n').count() + 1;
             for p in &with {
                 out.push((
                     p.clone(),
-                    Handed { call: call.clone(), file: file.to_string(), line, with: with.clone(), owner, discriminator, key },
+                    Handed { call: name.clone(), file: file.to_string(), line, with: with.clone(), owner, discriminator, keyed: keyed.clone() },
                 ));
             }
         }
         out
     }
+}
+
+/// A fn's parameter names from the text between its parentheses, `self`
+/// left out: `whirlpool: &Account<Whirlpool>` → `whirlpool`.
+fn params_of(list: &str) -> Vec<String> {
+    top_level(list)
+        .iter()
+        .filter_map(|p| {
+            let name = p.split(':').next()?.trim().trim_start_matches('&').trim();
+            let name = name.strip_prefix("mut ").unwrap_or(name).trim();
+            (name != "self" && !name.ends_with(" self") && !name.is_empty()).then(|| name.to_string())
+        })
+        .collect()
+}
+
+/// A list split at its top-level commas, each part trimmed.
+fn top_level(list: &str) -> Vec<&str> {
+    let (mut depth, mut start, mut parts) = (0i32, 0usize, Vec::new());
+    for (i, ch) in list.char_indices() {
+        match ch {
+            '(' | '[' | '{' | '<' => depth += 1,
+            ')' | ']' | '}' | '>' => depth -= 1,
+            ',' if depth == 0 => {
+                parts.push(list[start..i].trim());
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(list[start..].trim());
+    parts.into_iter().filter(|p| !p.is_empty()).collect()
+}
+
+/// How a rejecting condition is written.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Demand {
+    /// `require!(cond)`: rejects unless `cond`.
+    Holds,
+    /// `require_eq!` / `require_keys_eq!`: rejects unless equal.
+    Equal,
+    /// `if cond { return Err(..) }`: rejects when `cond`.
+    RejectsIf,
+    /// Anything else: `require_neq!`, `require_gt!`.
+    Other,
+}
+
+/// The condition rejects unless two things are equal: `require!(a == b)`,
+/// `require_keys_eq!(a, b)`, `if a != b { return Err }`. Not `a != b`
+/// required, `a == b` rejected (an init guard), nor an `||` that lets
+/// either through or an `&&` that rejects only sometimes.
+fn demands_equal(d: Demand, cond: &str) -> bool {
+    match d {
+        Demand::Equal => true,
+        Demand::Holds => cond.contains("==") && !cond.contains("!=") && !cond.contains("||"),
+        Demand::RejectsIf => cond.contains("!=") && !cond.contains("==") && !cond.contains("&&"),
+        Demand::Other => false,
+    }
+}
+
+/// The `{` opening the body of the item whose signature starts at `from`,
+/// past brackets and parentheses (`seed: [u8; 32]`), `depth` already
+/// open. None for a declaration with no body (`fn f(..);`).
+fn body_open(src: &str, from: usize, mut depth: i32) -> Option<usize> {
+    for (i, c) in src[from..].char_indices() {
+        match c {
+            '(' | '[' => depth += 1,
+            ')' | ']' => depth -= 1,
+            '{' if depth <= 0 => return Some(from + i + 1),
+            ';' if depth <= 0 => return None,
+            _ => {}
+        }
+    }
+    None
 }
 
 /// `impl<'a> T<'a>` / `impl X for T` → `T`.
@@ -749,45 +952,77 @@ fn impl_type(header: &str) -> Option<String> {
         Some(i) => &h[i + 5..],
         None => h,
     };
-    let re = Regex::new(r"^\s*&?\s*(?:[A-Za-z_]\w*\s*::\s*)*([A-Za-z_]\w*)").unwrap();
-    re.captures(h).map(|c| c[1].to_string())
+    IMPL_TYPE_RE.captures(h).map(|c| c[1].to_string())
 }
 
-/// The calls in a body: (type when `T::f`, name, offset, arguments).
-/// Method calls are by name only.
-fn calls_in(blanked: &str) -> Vec<(Option<String>, String, usize, &str)> {
-    let call = Regex::new(r"(?:\b([A-Z]\w*)\s*::\s*)?\b([a-z_]\w*)\s*\(").unwrap();
+struct CallAt<'a> {
+    callee: Callee,
+    name: String,
+    at: usize,
+    args: &'a str,
+    /// Its result is propagated: `?`, `.unwrap()`, `.expect(..)`,
+    /// `.map_err(..)?`, returned, or the body's last expression.
+    propagated: bool,
+}
+
+/// The calls in a body.
+fn calls_in(blanked: &str) -> Vec<CallAt<'_>> {
     let mut out = Vec::new();
-    for c in call.captures_iter(blanked) {
+    for c in CALL_RE.captures_iter(blanked) {
         let name = &c[2];
         if matches!(name, "if" | "while" | "match" | "for" | "return" | "in" | "fn" | "let" | "move") {
             continue;
         }
-        // Not a declaration: `fn name(`.
         let start = c.get(0).unwrap().start();
-        if blanked[..start].trim_end().ends_with("fn") {
+        let before = blanked[..start].trim_end();
+        // Not a declaration: `fn name(`.
+        if before.ends_with("fn") && before[..before.len() - 2].chars().last().is_none_or(|c| !c.is_alphanumeric() && c != '_') {
             continue;
         }
+        let path: Vec<String> =
+            c[1].split("::").map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+        let callee = match path.split_last() {
+            None if before.ends_with('.') => Callee::Method,
+            None => Callee::Free(Vec::new()),
+            Some((t, _)) if t == "Self" => Callee::SelfTy,
+            Some((t, mods)) if t.starts_with(|c: char| c.is_ascii_uppercase()) => Callee::Typed(mods.to_vec(), t.clone()),
+            Some(_) => Callee::Free(path.clone()),
+        };
         let open = c.get(0).unwrap().end();
         let Some(close) = closing_paren(&blanked[open..]) else { continue };
-        out.push((c.get(1).map(|m| m.as_str().to_string()), name.to_string(), start, &blanked[open..open + close]));
+        let mut rest = blanked[open + close + 1..].trim_start();
+        // `.map_err(..)` / `.ok_or(..)` before the `?`.
+        while let Some(r) = rest.strip_prefix(".map_err(").or(rest.strip_prefix(".ok_or(")) {
+            let Some(e) = closing_paren(r) else { break };
+            rest = r[e + 1..].trim_start();
+        }
+        let propagated = rest.starts_with('?')
+            || rest.starts_with(".unwrap()")
+            || rest.starts_with(".expect(")
+            || rest.starts_with('}')
+            || rest.is_empty()
+            || before.ends_with("return");
+        out.push(CallAt { callee, name: name.to_string(), at: start, args: &blanked[open..open + close], propagated });
     }
     out
 }
 
 /// Every condition in a body, at any depth, that rejects the call: the
 /// arguments of a `require*!`, and `if <cond> { return Err(..) }`.
-fn failing_conditions(blanked: &str, expr: &str) -> Vec<String> {
-    let mac = Regex::new(r"\brequire(?:_keys)?(?:_eq|_neq|_gt|_gte)?\s*!\s*[(\[]").unwrap();
-    let iff = Regex::new(r"\bif\b").unwrap();
-    let fails = Regex::new(r"^(?:return\s+)?(?:Err\s*\(|err!\s*\()").unwrap();
+fn failing_conditions(blanked: &str, expr: &str) -> Vec<(Demand, String)> {
     let mut out = Vec::new();
-    for m in mac.find_iter(blanked) {
-        if let Some(close) = closing_paren(&blanked[m.end()..]) {
-            out.push(expr[m.end()..m.end() + close].to_string());
+    for m in REQUIRE_RE.captures_iter(blanked) {
+        let end = m.get(0).unwrap().end();
+        if let Some(close) = closing_paren(&blanked[end..]) {
+            let demand = match &m[1] {
+                "require" => Demand::Holds,
+                "require_eq" | "require_keys_eq" => Demand::Equal,
+                _ => Demand::Other,
+            };
+            out.push((demand, expr[end..end + close].to_string()));
         }
     }
-    for m in iff.find_iter(blanked) {
+    for m in IF_RE.find_iter(blanked) {
         let mut d = 0i32;
         let open = blanked[m.end()..].char_indices().find_map(|(j, c)| {
             match c {
@@ -801,8 +1036,8 @@ fn failing_conditions(blanked: &str, expr: &str) -> Vec<String> {
         });
         let Some(open) = open.filter(|&o| o != usize::MAX) else { continue };
         let Some(block) = braced(&blanked[open + 1..]) else { continue };
-        if fails.is_match(expr[open + 1..open + 1 + block.len()].trim_start()) {
-            out.push(expr[m.end()..open].to_string());
+        if FAILS_RE.is_match(expr[open + 1..open + 1 + block.len()].trim_start()) {
+            out.push((Demand::RejectsIf, expr[m.end()..open].to_string()));
         }
     }
     out

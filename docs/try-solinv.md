@@ -24,7 +24,7 @@ Keep a clock running: note the time you start each step.
 ## Step 1 — install (about 1–2 minutes)
 
 ```bash
-cargo install --git https://github.com/psyto/solinv --rev b27736a9b816 solinv-cli
+cargo install --git https://github.com/psyto/solinv --rev 19d7b50dd46b solinv-cli
 solinv --help
 ```
 
@@ -91,7 +91,7 @@ Pick one instruction from step 2, ideally one with a `U` slot. Most of the time 
    ```
 
    If the program is already deployed, fuzzing the deployed binary is usually better: `solana program dump -u m <program id> <program>.so`. Rebuilding a program whose Cargo.lock has solana-program below 1.16 (check it) with current platform-tools broke, in our tests, the one kind of CPI we tried (`init` calling System Program `create_account`), failing with "Access violation … 0xffffffffffffffff", on a real validator too ([why](https://github.com/psyto/solinv/blob/main/docs/phase5-day61-h1-was-the-build.md)).
-2. Start the harness from solinv's template: copy `Cargo.toml` and `src/main.rs` from [examples/escrow-demo/fuzz/escrow_clean](https://github.com/psyto/solinv/tree/b27736a9b816/examples/escrow-demo/fuzz/escrow_clean) into `fuzz/<program>/`. Delete its `escrow-clean` dependency and the `use escrow_clean::ID;` line, and point the `solinv-fuzz` / `solinv-core` path dependencies at `{ git = "https://github.com/psyto/solinv", rev = "b27736a9b816" }`.
+2. Start the harness from solinv's template: copy `Cargo.toml` and `src/main.rs` from [examples/escrow-demo/fuzz/escrow_clean](https://github.com/psyto/solinv/tree/19d7b50dd46b/examples/escrow-demo/fuzz/escrow_clean) into `fuzz/<program>/`. Delete its `escrow-clean` dependency and the `use escrow_clean::ID;` line, and point the `solinv-fuzz` / `solinv-core` path dependencies at `{ git = "https://github.com/psyto/solinv", rev = "19d7b50dd46b" }`.
 3. Print the spec stub and paste it into `instructions()`:
 
    ```bash

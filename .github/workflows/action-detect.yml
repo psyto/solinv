@@ -1,0 +1,38 @@
+# The action's program detection, run as the action runs it: on Linux,
+# with GNU find (which rejects a `{}` inside an -exec argument that macOS
+# find lets through).
+name: action detection
+
+on:
+  pull_request:
+    paths:
+      - action.yml
+      - .github/workflows/action-detect.yml
+  push:
+    branches: [main]
+    paths:
+      - action.yml
+      - .github/workflows/action-detect.yml
+
+permissions:
+  contents: read
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - shell: bash
+        run: |
+          eval "$(sed -n '/^        anchor() {/,/^        program() {/p' action.yml)"
+          type native anchor program >/dev/null
+          # `! f` does not stop a `set -e` script; this does.
+          not() { if "$@"; then echo "::error::unexpected: $*"; exit 1; fi; }
+          native crates/solinv-static/tests/native_cases/n03_logs_before_err
+          not anchor crates/solinv-static/tests/native_cases/n03_logs_before_err
+          anchor examples/escrow-demo/programs/escrow/src
+          not native examples/escrow-demo/programs/escrow/src
+          # An entrypoint only in a comment is not one.
+          d=$(mktemp -d); printf '// entrypoint!(process);\n/* program_entrypoint!(p); */\n' > "$d/lib.rs"
+          not native "$d"
+          echo "detection ok"

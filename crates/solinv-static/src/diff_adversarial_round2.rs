@@ -7,9 +7,9 @@ use super::*;
 fn kinds(src: &str) -> SourceKinds {
     SourceKinds::parse_files(&[("programs/x/src/lib.rs".into(), src.into())])
 }
-/// What each case must report on its slot. A warning only where the check
-/// plausibly survives: the control, a call under a condition (h7, p4), an
-/// argument of a gate swapped by design (g4), `!x` written `x.not()` (g6).
+/// What each case must report on its slot. A check handed to a fn is
+/// always a removal (the control h0 too); a warning only for a gate whose
+/// argument changed by design (g4) and `!x` written `x.not()` (g6).
 fn want(tag: &str) -> &'static [Severity] {
     let table: &[(&str, &[Severity])] = &[
         ("g1 ==false flip", &[Severity::Regression][..]),
@@ -18,18 +18,18 @@ fn want(tag: &str) -> &'static [Severity] {
         ("g4 enum arg", &[Severity::Warning][..]),
         ("g5 bool literal &&", &[Severity::Regression][..]),
         ("g6 not()", &[Severity::Warning][..]),
-        ("h0 control", &[Severity::Warning, Severity::Warning][..]),
-        ("h1 keyed pairs wrong", &[Severity::Regression, Severity::Warning][..]),
+        ("h0 control", &[Severity::Regression, Severity::Regression][..]),
+        ("h1 keyed pairs wrong", &[Severity::Regression, Severity::Regression][..]),
         ("h2 owner+disc on the other param", &[Severity::Regression, Severity::Regression][..]),
         ("h3 require!(!(..==..)) init guard", &[Severity::Regression, Severity::Regression][..]),
         ("h4 if !(a != b) init guard", &[Severity::Regression, Severity::Regression][..]),
         ("h5 single | bypass", &[Severity::Regression, Severity::Regression][..]),
-        ("h6 user const ID", &[Severity::Regression, Severity::Warning][..]),
-        ("h7 early return bypass", &[Severity::Warning, Severity::Warning][..]),
+        ("h6 user const ID", &[Severity::Regression, Severity::Regression][..]),
+        ("h7 early return bypass", &[Severity::Regression, Severity::Regression][..]),
         ("p1 block tail discarded", &[Severity::Regression, Severity::Regression][..]),
         ("p2 if-else value discarded", &[Severity::Regression, Severity::Regression][..]),
         ("p3 closure never called", &[Severity::Regression, Severity::Regression][..]),
-        ("p4 return unrelated", &[Severity::Warning, Severity::Warning][..]),
+        ("p4 return unrelated", &[Severity::Regression, Severity::Regression][..]),
         ("m1 turbofish external", &[Severity::Regression, Severity::Regression][..]),
         ("m2 method on external value", &[Severity::Regression, Severity::Regression][..]),
         ("m3 local mod name == external", &[Severity::Regression, Severity::Regression][..]),
@@ -37,7 +37,7 @@ fn want(tag: &str) -> &'static [Severity] {
         ("a2 shadow via tuple", &[Severity::Regression, Severity::Regression][..]),
         ("t1 lt in args", &[Severity::Regression, Severity::Regression][..]),
         ("t2 closure arg", &[Severity::Regression, Severity::Regression][..]),
-        ("t3 swapped args map", &[Severity::Warning, Severity::Warning][..]),
+        ("t3 swapped args map", &[Severity::Regression, Severity::Regression][..]),
     ];
     table.iter().find(|(t, _)| *t == tag).map(|(_, w)| *w).unwrap_or_else(|| panic!("no expectation for {tag}"))
 }

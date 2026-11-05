@@ -1,7 +1,8 @@
 //! Cases from an adversarial review of the rules that read a check as
-//! kept elsewhere (a gate swapped on the same account, a check handed to
-//! a fn): each a loosening that must stay a removal, or a warning that
-//! asks the reviewer to confirm.
+//! kept elsewhere: a gate swapped on the same account (a warning when it
+//! holds), a check handed to a fn (always a removal, with a hint). Each a
+//! loosening that must stay a removal, or a warning that asks the reviewer
+//! to confirm.
 
 use super::*;
 
@@ -197,7 +198,7 @@ fn verify(info: &AccountInfo, w: &AccountInfo) -> Result<()> {
 }
 "#;
     let h = unchecked(fns, "if false { verify(&ctx.accounts.tick_array, &ctx.accounts.whirlpool)?; }");
-    assert_eq!(show("b7 branch", HB, &h, "swap.tick_array"), [Severity::Warning, Severity::Warning]);
+    assert_eq!(show("b7 branch", HB, &h, "swap.tick_array"), [Severity::Regression, Severity::Regression]);
 }
 #[test]
 fn b8_self_transfer_guard_as_has_one() {
@@ -277,7 +278,7 @@ fn verify(v: &Account<Vault>, a: &Signer) -> Result<()> {
 }
 "#;
     for (tag, call, want) in [
-        ("d1 full paths", "verify(&ctx.accounts.inner.vault, &ctx.accounts.inner.authority)?;", Severity::Warning),
+        ("d1 full paths", "verify(&ctx.accounts.inner.vault, &ctx.accounts.inner.authority)?;", Severity::Regression),
         // Not followed: a composite aliased, or passed whole.
         ("d1 alias of composite", "let i = &ctx.accounts.inner;\n    verify(&i.vault, &i.authority)?;", Severity::Regression),
         ("d1 whole composite", "verify2(&ctx.accounts.inner)?;", Severity::Regression),
@@ -301,6 +302,6 @@ impl<'info> Swap<'info> {
     let h = unchecked(fns, "Self::verify(&ctx.accounts, &ctx.accounts.tick_array)?;");
     assert_eq!(show("d2 Self::", HB, &h, "swap.tick_array"), [Severity::Regression, Severity::Regression]);
     let h = unchecked(fns, "ctx.accounts.verify(&ctx.accounts.tick_array.to_account_info())?;");
-    assert_eq!(show("d2 method on accounts", HB, &h, "swap.tick_array"), [Severity::Regression, Severity::Warning]);
+    assert_eq!(show("d2 method on accounts", HB, &h, "swap.tick_array"), [Severity::Regression, Severity::Regression]);
 }
 

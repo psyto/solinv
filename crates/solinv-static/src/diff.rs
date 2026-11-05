@@ -153,9 +153,12 @@ pub fn diff(base: &SourceKinds, head: &SourceKinds) -> Vec<Change> {
         // A Signer loosened is reported as the signature it loses, below.
         // A check moved out of the declaration into a fn the handler hands
         // the account to (orca's sparse swap: the tick arrays go to a
-        // builder that compares owner, discriminator and whirlpool) is a
-        // warning naming that fn. Which account the fn checks is not
-        // followed: the reviewer confirms it is this one.
+        // builder that compares owner, discriminator and whirlpool) is
+        // still a removal, naming that fn as where to look. Which account a
+        // fn checks cannot be told from text: an intermediate `let`, a
+        // shadowed name, a `program_id` passed in, an import each hide it
+        // (three review rounds, diff_adversarial*.rs), so it never lowers
+        // the severity.
         let handed = |want: &dyn Fn(&crate::source::Handed) -> bool| h.attrs.handed.iter().find(|d| want(d));
         let handed_at = |d: &crate::source::Handed| format!("`{}` ({}:{})", d.call, d.file, d.line);
         // The call compares `target`'s key with a value it computed, or
@@ -166,10 +169,11 @@ pub fn diff(base: &SourceKinds, head: &SourceKinds) -> Vec<Change> {
         if b.kind == Some(SlotKind::Typed) && h.kind == Some(SlotKind::Unchecked) && b.ty != "Signer" {
             match handed(&|d| d.owner && d.discriminator && d.owner_on.as_ref().is_none_or(|v| v.contains(path))) {
                 Some(d) => push(
-                    Severity::Warning,
+                    Severity::Regression,
                     format!(
-                        "was {}, now {}; the handler passes it to {}, which compares an owner with a \
-                         program id and a discriminator: confirm they are this account's",
+                        "was {}, now {}: Anchor no longer checks its owner and type. The handler passes it \
+                         to {}, which compares an owner and a discriminator: if they are this account's, \
+                         the check moved there",
                         b.ty, h.ty, handed_at(d)
                     ),
                 ),
@@ -288,10 +292,11 @@ pub fn diff(base: &SourceKinds, head: &SourceKinds) -> Vec<Change> {
                     ),
                     None => match handed(&|d| keys(d, &sibling(path, target))) {
                         Some(d) => push(
-                            Severity::Warning,
+                            Severity::Regression,
                             format!(
-                                "`has_one = {target}` removed; the handler passes it and `{target}` to {}, \
-                                 which compares keys: confirm it compares these",
+                                "`has_one = {target}` removed: it no longer has to match `{target}`. The handler \
+                                 passes it and `{target}` to {}, which compares `{target}`'s key: if with this \
+                                 account's, the check moved there",
                                 handed_at(d)
                             ),
                         ),
@@ -343,10 +348,10 @@ pub fn diff(base: &SourceKinds, head: &SourceKinds) -> Vec<Change> {
                         None => match (expr.contains(".key"), others_named(base, base_ix, path, expr)) {
                             (true, others) if !others.is_empty() => match handed(&|d| others.iter().all(|o| keys(d, o))) {
                                 Some(d) => push(
-                                    Severity::Warning,
+                                    Severity::Regression,
                                     format!(
-                                        "`constraint = {expr}` removed; the handler passes the accounts it names to {}, \
-                                         which compares keys: confirm it compares these",
+                                        "`constraint = {expr}` removed. The handler passes the accounts it names to {}, \
+                                         which compares their keys: if with this account's, the check moved there",
                                         handed_at(d)
                                     ),
                                 ),
@@ -1738,10 +1743,16 @@ fn peek(a: AccountInfo) -> Result<TickArray> {
         let moved = base
             .replace("    #[account(mut, has_one = whirlpool)]\n    pub tick_array: AccountLoader<'info, TickArray>,", "    /// CHECK: checked in the handler\n    #[account(mut)]\n    pub tick_array: UncheckedAccount<'info>,")
             .replace("    Ok(())\n}\n#[derive", "    let b = Builder::try_from(whirlpool, vec![ctx.accounts.tick_array.to_account_info()])?;\n    Ok(())\n}\n#[derive");
+        // Still removals: the hint says where they may have gone.
         let at = |b: &str, h: &str| {
-            diff(&kinds(b), &kinds(h)).into_iter().filter(|c| c.slot() == "swap.tick_array").map(|c| c.severity).collect::<Vec<_>>()
+            diff(&kinds(b), &kinds(h))
+                .into_iter()
+                .filter(|c| c.slot() == "swap.tick_array")
+                .map(|c| (c.severity, c.message.contains("moved there")))
+                .collect::<Vec<_>>()
         };
-        assert_eq!(at(base, &moved), [Severity::Warning, Severity::Warning]);
+        let (r, hint, bare) = (Severity::Regression, true, false);
+        assert_eq!(at(base, &moved), [(r, hint), (r, hint)]);
         let k = kinds(&moved);
         let d = &k.slot("swap", "tick_array").unwrap().attrs.handed[0];
         assert_eq!((d.call.as_str(), d.owner, d.discriminator), ("Builder::try_from", true, true));
@@ -1750,19 +1761,19 @@ fn peek(a: AccountInfo) -> Result<TickArray> {
 
         // Not handed to it: both removed.
         let unhanded = moved.replace("vec![ctx.accounts.tick_array.to_account_info()]", "vec![]");
-        assert_eq!(at(base, &unhanded), [Severity::Regression, Severity::Regression]);
+        assert_eq!(at(base, &unhanded), [(r, bare), (r, bare)]);
         // The fn checks no discriminator: the type check is removed.
         let no_disc = moved.replace("TickArray::discriminator()", "[0u8; 8]");
-        assert_eq!(at(base, &no_disc), [Severity::Regression, Severity::Warning]);
+        assert_eq!(at(base, &no_disc), [(r, bare), (r, hint)]);
         // The whirlpool not handed with it: its `has_one` is removed.
         let alone = moved.replace("Builder::try_from(whirlpool,", "Builder::try_from(other,");
-        assert_eq!(at(base, &alone), [Severity::Regression, Severity::Warning]);
+        assert_eq!(at(base, &alone), [(r, hint), (r, bare)]);
         // A check that does not reject (a value read, `Ok` either way) is none.
         let soft = moved.replace("return Err(ErrorCode::AccountOwnedByWrongProgram.into());", "return Ok(default());");
-        assert_eq!(at(base, &soft), [Severity::Regression, Severity::Warning]);
+        assert_eq!(at(base, &soft), [(r, bare), (r, hint)]);
         // Two fns of the name, the call not saying which: not followed.
         let two = moved.replace("fn peek(a: AccountInfo)", "fn other() {}\nimpl X { fn try_from() {} }\nfn peek(a: AccountInfo)").replace("Builder::try_from(", "try_from(");
-        assert_eq!(at(base, &two), [Severity::Regression, Severity::Regression]);
+        assert_eq!(at(base, &two), [(r, bare), (r, bare)]);
     }
 
     #[test]

@@ -397,6 +397,7 @@ impl SourceKinds {
         let dup = |n: &str| names.iter().filter(|m| *m == n).count() > 1;
 
         let originals: HashMap<&str, &str> = files.iter().map(|(f, t)| (f.as_str(), t.as_str())).collect();
+        let block_comment = Regex::new(r"(?s)/\*.*?\*/").unwrap();
         let deprecated = Regex::new(r"(?im)^\s*///\s*CHECK\b.*\bdeprecated\b").unwrap();
         let mut structs: HashMap<String, Vec<RawField>> = HashMap::new();
         for (name, file, src, open, body) in &bodies {
@@ -422,7 +423,7 @@ impl SourceKinds {
                     ty: base_ident(&c[2]),
                     full_ty: full_type(&c[2]),
                     optional: c[2].trim().trim_start_matches("Box<").trim().starts_with("Option<"),
-                    deprecated: deprecated.is_match(doc),
+                    deprecated: deprecated.is_match(&block_comment.replace_all(doc.rsplit("*/").next().unwrap_or(doc), "")),
                     attrs,
                     file: file.to_string(),
                     line: src[..at].matches('\n').count() + 1,

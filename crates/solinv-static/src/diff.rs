@@ -136,6 +136,8 @@ pub fn diff(base: &SourceKinds, head: &SourceKinds) -> Vec<Change> {
             }
             continue;
         };
+        // This slot's changes start here; a placeholder's are merged below.
+        let start = out.len();
         let mut push = |severity: Severity, message: String| {
             out.push(Change {
                 severity,
@@ -147,35 +149,6 @@ pub fn diff(base: &SourceKinds, head: &SourceKinds) -> Vec<Change> {
             })
         };
         let leaf = path.rsplit('.').next().unwrap_or(path);
-        // Kept in the list as a placeholder (`/// CHECK: Deprecated …`):
-        // its lost checks are one removal that says so. Still a removal: a
-        // retired account's checks may have pinned one still in use — a
-        // `has_one`, an allowlist PDA seeded by another account — and the
-        // source cannot tell that from bookkeeping.
-        // Only when it becomes one, naming only what it lost: a placeholder
-        // that keeps its `seeds` has not lost them, and later versions
-        // compare as any slot does.
-        let became_placeholder = |s: &Slot| s.deprecated && s.kind == Some(SlotKind::Unchecked);
-        let kept = checks_of(h);
-        let lost: Vec<String> = checks_of(b).into_iter().filter(|c| c != "signer" && !kept.contains(c)).collect();
-        if became_placeholder(h) && !became_placeholder(b) && !lost.is_empty() {
-            if !b.optional && h.optional {
-                push(Severity::Warning, "now optional: the instruction runs without it".into());
-            }
-            push(
-                Severity::Regression,
-                format!(
-                    "now a placeholder its `/// CHECK:` calls deprecated; its checks ({}) went \
-                     with it. If nothing reads `{leaf}` they guard nothing of its own — confirm \
-                     none of them pinned another account still in use",
-                    lost.join(", ")
-                ),
-            );
-            if signs(b) && !signs(h) {
-                push(Severity::Regression, format!("was {}, now {}: no longer required to sign", label(b), label(h)));
-            }
-            continue;
-        }
         // A Signer loosened is reported as the signature it loses, below.
         if b.kind == Some(SlotKind::Typed) && h.kind == Some(SlotKind::Unchecked) && b.ty != "Signer" {
             push(
@@ -351,6 +324,34 @@ pub fn diff(base: &SourceKinds, head: &SourceKinds) -> Vec<Change> {
                     format!("`{check}` in validate() moved to `{other}`"),
                 ),
                 None => push(Severity::Regression, format!("`{check}` removed from validate()")),
+            }
+        }
+        // Made a placeholder (`/// CHECK: Deprecated …`): its removals are
+        // one that says so. Still a removal — a retired account's checks may
+        // have pinned one still in use (a `has_one`, an allowlist PDA seeded
+        // by another account), which the source cannot tell from
+        // bookkeeping. A lost signature stays on its own; warnings stay.
+        let placeholder = |s: &Slot| s.deprecated && s.kind == Some(SlotKind::Unchecked);
+        if placeholder(h) && !placeholder(b) {
+            let (lost, kept): (Vec<Change>, Vec<Change>) = out.drain(start..).partition(|c| {
+                c.severity == Severity::Regression && !c.message.contains("no longer required to sign")
+            });
+            out.extend(kept);
+            if !lost.is_empty() {
+                let what: Vec<&str> = lost.iter().map(|c| c.message.as_str()).collect();
+                out.push(Change {
+                    severity: Severity::Regression,
+                    ix: ix.clone(),
+                    path: path.clone(),
+                    message: format!(
+                        "now a placeholder its `/// CHECK:` calls deprecated, and with it: {}. If nothing \
+                         reads `{leaf}` these guard nothing of its own — confirm none of them pinned \
+                         another account still in use",
+                        what.join("; ")
+                    ),
+                    file: h.file.clone(),
+                    line: h.line,
+                });
             }
         }
     }
@@ -1452,6 +1453,14 @@ pub struct Act<'info> {
         let old: Vec<_> = c.iter().filter(|c| c.slot() == "act.old").collect();
         assert_eq!(old.len(), 1, "{c:?}");
         assert!(old[0].severity == Severity::Regression && old[0].message.contains("placeholder"), "{c:?}");
+        // What the normal comparison calls a warning stays one.
+        let raw = "pub fn act(ctx: Context<Act>) -> Result<()> {}\n#[derive(Accounts)]\npub struct Act<'info> {\n    /// CHECK: pda\n    #[account(seeds = [b\"old\"], bump)]\n    pub old: UncheckedAccount<'info>,\n}\n";
+        let moved = raw.replace("/// CHECK: pda\n    #[account(seeds = [b\"old\"], bump)]", "/// CHECK: Deprecated compatibility slot.\n    #[account(address = OLD)]");
+        let c = diff(&kinds(raw), &kinds(&moved));
+        assert!(!c.is_empty() && c.iter().all(|c| c.severity == Severity::Warning), "{c:?}");
+        // Inside a block comment it is not a doc comment.
+        let block = head.replace("/// CHECK: Deprecated: kept for compatibility.", "/*\n    /// CHECK: Deprecated\n    */");
+        assert!(diff(&kinds(base), &kinds(&block)).iter().filter(|c| c.slot() == "act.old").count() > 1);
         // Kept as it is in a later version: nothing to report.
         assert!(diff(&kinds(&head), &kinds(&head)).is_empty());
         let keeps = base.replace("pub old: Account<'info, Old>,", "/// CHECK: Deprecated\n    pub old: UncheckedAccount<'info>,");

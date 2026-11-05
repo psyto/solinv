@@ -44,7 +44,7 @@ instruction whose handler takes that struct as its `Context<..>`
 | `close` target changed | warning: that is where its lamports go |
 | typed → a different typed type (`Account<Config>` → `Signer`) | warning: type changed |
 | a slot wrapped in `Option<…>` | warning: now optional |
-| a slot kept as a placeholder: now `UncheckedAccount` / `AccountInfo` with a `/// CHECK:` comment that says deprecated | one removal listing the checks it lost, saying it is a placeholder. Still a removal: a retired account's checks may have pinned another still in use (a `has_one`, an allowlist PDA seeded by another account), which the source cannot tell from bookkeeping |
+| a slot kept as a placeholder: now `UncheckedAccount` / `AccountInfo` with a `/// CHECK:` comment that says deprecated | its removals merged into one that says it is a placeholder and quotes each (warnings and a lost signature stay as they are). Still a removal: a retired account's checks may have pinned another still in use (a `has_one`, an allowlist PDA seeded by another account), which the source cannot tell from bookkeeping |
 | a slot with checks gone from an instruction that remains | warning: renamed or removed, listing its checks |
 | an instruction renamed — gone, with a new instruction sharing at least half of the two's slot names (programs, sysvars, `authority` and `payer` not counted), best match first, ties left unpaired | warning naming the new name; the two are compared slot by slot, so a check the rename dropped is still removed |
 | an instruction gone with nothing that matches, and checks | warning: not compared, with how many checks it had |

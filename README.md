@@ -126,7 +126,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: psyto/solinv@7a4319f9a717fc4b42535557faa9f0830a34240c
+      - uses: psyto/solinv@eb75c260c1ff95ce18196ecde07a46779a142d42
         with:
           program-src: programs/my_program/src
 ```
@@ -145,15 +145,15 @@ program works too, but each job compiles solinv: they race to save the same cach
 The CLI (not on crates.io yet; pin a commit):
 
 ```bash
-cargo install --git https://github.com/psyto/solinv --rev 7a4319f9a717 solinv-cli
+cargo install --git https://github.com/psyto/solinv --rev eb75c260c1ff solinv-cli
 ```
 
 In your Crucible fuzz harness:
 
 ```toml
 [dependencies]
-solinv-fuzz = { git = "https://github.com/psyto/solinv", rev = "7a4319f9a717fc4b42535557faa9f0830a34240c" }
-solinv-core = { git = "https://github.com/psyto/solinv", rev = "7a4319f9a717fc4b42535557faa9f0830a34240c" }
+solinv-fuzz = { git = "https://github.com/psyto/solinv", rev = "eb75c260c1ff95ce18196ecde07a46779a142d42" }
+solinv-core = { git = "https://github.com/psyto/solinv", rev = "eb75c260c1ff95ce18196ecde07a46779a142d42" }
 crucible-test-context = { git = "https://github.com/asymmetric-research/crucible", tag = "v0.1.0" }
 ```
 ```rust

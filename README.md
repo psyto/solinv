@@ -31,6 +31,7 @@ upgrade in its history. To fail every pull request in CI, or to fuzz the checks,
 | I want to… | Use |
 |---|---|
 | fail a pull request that removes an account check, with a note on the line | the `psyto/solinv` GitHub Action, or `solinv diff --base-src <before> --head-src <after>` |
+| …in a native or Pinocchio program (a warning: what its code no longer checks) | the same; [what it reads](docs/native-diff.md) |
 | see which account checks a deployed program's upgrade dropped, without its source | `solinv diff --base-idl <audited.json> --head-idl <onchain.json>` (`anchor idl fetch`), or every upgrade at once in [solinv check](https://solinv-check.meowna-server.workers.dev); [how it decides](docs/idl-diff.md) |
 | see which instructions need a hand-checked account, before writing any harness | `solinv idl target/idl/<program>.json --src programs/<program>/src` |
 | get a paste-ready spec for one instruction | `solinv idl <idl> --rust <ix>` |
@@ -105,7 +106,8 @@ flagged instructions are the demo program's three planted account-validation bug
 | A removed check fails the PR | The demo above; [the demo pull request](https://github.com/psyto/solinv/pull/2) |
 | A check in vipers' `validate()` counts too | Cashio's real source, fixed → before the fix: the check its fix added is named, in both instructions ([details](docs/diff.md#checked-on)); the map marks 2 of its 26 typed accounts `t`, both validated by the program they are passed to (26 before vipers was read, [#8](https://github.com/psyto/solinv/issues/8)) |
 | …on the 11 classes of [sealevel-attacks](https://github.com/coral-xyz/sealevel-attacks) | Turning each fixed program into its insecure version: 11 of 11 caught where the check was declared, 9 of 11 where it was written in the handler (the other two change CPI seeds and zeroing code, not a check); 0 removed checks reported in the other direction ([details](docs/sealevel-attacks.md)) |
-| …on real merged pull requests | Over 1,133 merged PRs of ten public Anchor programs: two mango-v4 PRs dropped a `has_one` that an audit restored 7 and 17 days later, and solinv names each on the PR that dropped it. On a random sample of 40 removals it reported there, 5 were real loosenings and 35 the same check written another way or moved. solinv now reads `has_one` / `address` / `constraint ==` as one check, which takes it to 32 reports with the same 5 real (about 1 in 6) — still expect a reviewer to clear most failures as "moved" ([details](docs/history-scan.md)) |
+| …on real merged pull requests | Over 1,133 merged PRs of ten public Anchor programs: two mango-v4 PRs dropped a `has_one` that an audit restored 7 and 17 days later, and solinv names each on the PR that dropped it. On a random sample of 40 removals it reported there, 5 were real loosenings and 35 the same check written another way or moved. solinv now reads `has_one` / `address` / `constraint ==` as one check and a yes/no gate swapped on the same account as a warning, which takes it to 25 reports with the same 5 real (about 1 in 5) — still expect a reviewer to clear most failures as "moved" ([details](docs/history-scan.md)) |
+| …and in native and Pinocchio code | Over 1,068 commits of percolator-prog, SPL Token / p-token and princeps-solana: 42 warnings, 9 of them real loosenings (owner checks commented out, a signer requirement dropped, an oracle error swallowed), about 1 in 5. Three checks deleted by hand from princeps-solana's vault: 3 of 3 named ([details](docs/native-diff.md)) |
 | No noise on code that keeps its checks | Comparing Jito tip-payment, tip-distribution and Raydium cp-swap with themselves: 0 reports. Reformatting a constraint or renaming its error: 0 reports (tested) |
 | The fuzz detectors catch a check that is removed | Mutation test on the clean escrow: of the removed checks the harness reached, 5 of 6 were caught, each by the detector predicted for it — after setting aside 5 mutations that cannot change behaviour, each argued in the [report](examples/escrow-demo/campaigns/escrow-clean-report.md) (5 of 11 before) |
 | …but not every kind yet | On Raydium's native AMM, 0 of 18: its guards compare values computed inside the handler, which a declaration cannot name ([why](#mutation-testing--measuring-detector-power-on-a-real-target)) |
@@ -130,7 +132,8 @@ jobs:
 ```
 
 That is all ([on the GitHub Marketplace](https://github.com/marketplace/actions/solinv-diff)). It finds every Anchor program in the repository (each `programs/<name>/src` with a
-`#[derive(Accounts)]`, at any depth), compares each with the pull request's base (on a push, with
+`#[derive(Accounts)]`, at any depth) and every native or Pinocchio one (a `src` with an
+`entrypoint!`; what its code no longer checks is a warning, never a failure), compares each with the pull request's base (on a push, with
 the commit `main` was at before it, so a push of several commits is compared as one change), and
 fails the job when a check is removed, with an annotation on the line. No Solana toolchain, no
 build of your program: the job took 12 seconds on the demo program, downloading the release

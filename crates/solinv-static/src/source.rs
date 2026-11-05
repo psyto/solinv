@@ -630,8 +630,8 @@ impl SourceKinds {
 /// Every fn of the source, by name and the type of the `impl` it is in,
 /// with what it rejects on and the fns it calls. `#[cfg(test)]` code is
 /// left out: it never runs on chain.
-struct FnIndex {
-    fns: Vec<FnInfo>,
+pub(crate) struct FnIndex {
+    pub(crate) fns: Vec<FnInfo>,
     by_name: HashMap<String, Vec<usize>>,
     /// Lower-case module names declared in the source: `m::f` is followed
     /// only through these, `crate`, `super` and `self`.
@@ -639,28 +639,33 @@ struct FnIndex {
     reached: RefCell<HashMap<usize, (bool, bool, bool)>>,
 }
 
-struct FnInfo {
-    name: String,
-    ty: Option<String>,
+pub(crate) struct FnInfo {
+    pub(crate) name: String,
+    pub(crate) ty: Option<String>,
+    /// Where it is: its file, the byte range of its body there, the
+    /// line of its `fn`.
+    pub(crate) file: String,
+    pub(crate) body: std::ops::Range<usize>,
+    pub(crate) line: usize,
     owner: bool,
     discriminator: bool,
     key: bool,
     /// Parameter names, `self` left out.
-    params: Vec<String>,
+    pub(crate) params: Vec<String>,
     /// Each key comparison it rejects unless equal, as its two sides.
     key_atoms: Vec<(String, String)>,
     /// The parameters whose program owner it compares itself.
     owner_params: Vec<String>,
     /// The modules it is in: its file's path under `src/`, then any
     /// inline `mod` around it.
-    mods: Vec<String>,
+    pub(crate) mods: Vec<String>,
     /// Calls whose result is propagated: `?`, `.unwrap()`, returned.
     calls: Vec<(Callee, String)>,
 }
 
 /// How a call names its fn.
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum Callee {
+pub(crate) enum Callee {
     /// `f(..)` or `crate::m::f(..)`: a fn outside any `impl`.
     Free(Vec<String>),
     /// `self.f(..)`: a method of the caller's impl.
@@ -690,8 +695,8 @@ static CALL_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"((?:[A-Za-z_]\w*\s*::\s*)*)\b([a-z_]\w*)\s*\(").unwrap());
 static REQUIRE_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\b(require(?:_keys)?(?:_eq|_neq|_gt|_gte)?)\s*!\s*[(\[]").unwrap());
-static IF_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\bif\b").unwrap());
-static FAILS_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(?:return\s+)?(?:Err\s*\(|err!\s*\()").unwrap());
+pub(crate) static IF_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\bif\b").unwrap());
+pub(crate) static FAILS_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(?:return\s+)?(?:Err\s*\(|err!\s*\()").unwrap());
 /// What an account's owner is compared with when it is the program-owner
 /// check: this program's id, or a type's owner (`TickArray::owner()`).
 /// Not a user (`position.owner == authority.key()`), not another
@@ -723,7 +728,7 @@ static WORD_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(^|[^.\w])([a-z_
 static HEAD_NAME_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(^|[^.:\w])([a-z_]\w*)").unwrap());
 
 impl FnIndex {
-    fn new(stripped: &[(String, String)], exprs: &HashMap<&str, String>) -> Self {
+    pub(crate) fn new(stripped: &[(String, String)], exprs: &HashMap<&str, String>) -> Self {
         let mut fns = Vec::new();
         let mut mods = HashSet::new();
         for (file, src) in stripped {
@@ -794,7 +799,8 @@ impl FnIndex {
                     inline_mods.iter().filter(|(a, b, _)| *a <= start && start < *b).map(|(_, _, n)| n.clone()),
                 );
                 let calls = calls_in(body).into_iter().filter(|c| c.propagated).map(|c| (c.callee, c.name)).collect();
-                fns.push(FnInfo { name: c[1].to_string(), ty, owner, discriminator, key, params, key_atoms, owner_params, mods: fn_mods, calls });
+                let line = src[..start].matches('\n').count() + 1;
+                fns.push(FnInfo { name: c[1].to_string(), ty, file: file.clone(), body: open..open + body.len(), line, owner, discriminator, key, params, key_atoms, owner_params, mods: fn_mods, calls });
             }
         }
         let mut by_name: HashMap<String, Vec<usize>> = HashMap::new();
@@ -807,7 +813,7 @@ impl FnIndex {
     /// The one fn a call names, or None when it cannot be told: a path
     /// through a module this source does not declare (another crate), a
     /// name two fns of that kind share.
-    fn resolve(&self, callee: &Callee, name: &str, caller_ty: Option<&str>, accounts_ty: Option<&str>) -> Option<usize> {
+    pub(crate) fn resolve(&self, callee: &Callee, name: &str, caller_ty: Option<&str>, accounts_ty: Option<&str>) -> Option<usize> {
         let local = |path: &[String]| path.iter().all(|m| matches!(m.as_str(), "crate" | "super" | "self") || self.mods.contains(m));
         // `a::b::f`: a fn whose modules end with `a::b`.
         let under = |i: usize, path: &[String]| {
@@ -971,7 +977,7 @@ impl FnIndex {
 
 /// A fn's parameter names from the text between its parentheses, `self`
 /// left out: `whirlpool: &Account<Whirlpool>` → `whirlpool`.
-fn params_of(list: &str) -> Vec<String> {
+pub(crate) fn params_of(list: &str) -> Vec<String> {
     top_level(list)
         .iter()
         .filter_map(|p| {
@@ -983,7 +989,7 @@ fn params_of(list: &str) -> Vec<String> {
 }
 
 /// A list split at its top-level commas, each part trimmed.
-fn top_level(list: &str) -> Vec<&str> {
+pub(crate) fn top_level(list: &str) -> Vec<&str> {
     let (mut depth, mut start, mut parts) = (0i32, 0usize, Vec::new());
     for (i, ch) in list.char_indices() {
         match ch {
@@ -1002,7 +1008,7 @@ fn top_level(list: &str) -> Vec<&str> {
 
 /// How a rejecting condition is written.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Demand {
+pub(crate) enum Demand {
     /// `require!(cond)`: rejects unless `cond`.
     Holds,
     /// `require_eq!` / `require_keys_eq!`: rejects unless equal.
@@ -1059,7 +1065,7 @@ fn equalities(d: Demand, cond: &str) -> Vec<(String, String)> {
 }
 
 /// `(x)` → `x` when the parentheses wrap all of it.
-fn unparen(t: &str) -> String {
+pub(crate) fn unparen(t: &str) -> String {
     let mut t = t.to_string();
     while t.starts_with('(') && t.ends_with(')') && closing_paren(&t[1..]) == Some(t.len() - 2) {
         t = t[1..t.len() - 1].to_string();
@@ -1069,14 +1075,14 @@ fn unparen(t: &str) -> String {
 
 /// `t` split at each top-level `op` (not inside brackets, not part of a
 /// longer operator: `|` is not `||`, `&` not `&&` nor a leading borrow).
-fn split_at_top<'a>(t: &'a str, op: &str) -> Vec<&'a str> {
+pub(crate) fn split_at_top<'a>(t: &'a str, op: &str) -> Vec<&'a str> {
     let b = t.as_bytes();
     let (mut depth, mut start, mut out, mut i) = (0i32, 0usize, Vec::new(), 0usize);
     while i < b.len() {
         match b[i] {
             b'(' | b'[' | b'{' => depth += 1,
             b')' | b']' | b'}' => depth -= 1,
-            _ if depth == 0 && t[i..].starts_with(op) => {
+            _ if depth == 0 && b[i..].starts_with(op.as_bytes()) => {
                 let prev = if i == 0 { None } else { Some(b[i - 1]) };
                 let next = b.get(i + op.len()).copied();
                 let longer = match op {
@@ -1112,7 +1118,7 @@ fn depth_at(s: &str, at: usize) -> i32 {
 
 /// A file's modules from its path under `src/`: `src/util/sparse_swap.rs`
 /// → `util`, `sparse_swap`; `lib.rs` / `main.rs` / `mod.rs` add none.
-fn file_mods(file: &str) -> Vec<String> {
+pub(crate) fn file_mods(file: &str) -> Vec<String> {
     let rel = file.rsplit_once("/src/").map_or(file, |(_, r)| r);
     let mut segs: Vec<String> = rel.trim_end_matches(".rs").split('/').map(String::from).collect();
     if matches!(segs.last().map(String::as_str), Some("lib" | "main" | "mod")) {
@@ -1163,18 +1169,18 @@ fn impl_type(header: &str) -> Option<String> {
     IMPL_TYPE_RE.captures(h).map(|c| c[1].to_string())
 }
 
-struct CallAt<'a> {
-    callee: Callee,
-    name: String,
-    at: usize,
-    args: &'a str,
+pub(crate) struct CallAt<'a> {
+    pub(crate) callee: Callee,
+    pub(crate) name: String,
+    pub(crate) at: usize,
+    pub(crate) args: &'a str,
     /// Its result is propagated: `?`, `.unwrap()`, `.expect(..)`,
     /// `.map_err(..)?`, returned, or the body's last expression.
-    propagated: bool,
+    pub(crate) propagated: bool,
 }
 
 /// The calls in a body.
-fn calls_in(blanked: &str) -> Vec<CallAt<'_>> {
+pub(crate) fn calls_in(blanked: &str) -> Vec<CallAt<'_>> {
     let mut out = Vec::new();
     for c in CALL_RE.captures_iter(blanked) {
         let name = &c[2];
@@ -1190,7 +1196,8 @@ fn calls_in(blanked: &str) -> Vec<CallAt<'_>> {
         let path: Vec<String> =
             c[1].split("::").map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
         let callee = match path.split_last() {
-            _ if before.ends_with("::") || before.ends_with('>') => Callee::Unknown,
+            // A turbofish (`T::<u8>::f`), not a `match` arm's `=>`.
+            _ if before.ends_with("::") || (before.ends_with('>') && !before.ends_with("=>")) => Callee::Unknown,
             None if before.ends_with('.') => {
                 let recv: String = before.chars().filter(|c| !c.is_whitespace()).collect();
                 if recv.ends_with("ctx.accounts.") {
@@ -1229,7 +1236,12 @@ fn calls_in(blanked: &str) -> Vec<CallAt<'_>> {
 
 /// Every condition in a body, at any depth, that rejects the call: the
 /// arguments of a `require*!`, and `if <cond> { return Err(..) }`.
-fn failing_conditions(blanked: &str, expr: &str) -> Vec<(Demand, String)> {
+pub(crate) fn failing_conditions(blanked: &str, expr: &str) -> Vec<(Demand, String)> {
+    failing_conditions_at(blanked, expr).into_iter().map(|(d, c, _)| (d, c)).collect()
+}
+
+/// [`failing_conditions`], each with the byte it starts at.
+pub(crate) fn failing_conditions_at(blanked: &str, expr: &str) -> Vec<(Demand, String, usize)> {
     let mut out = Vec::new();
     for m in REQUIRE_RE.captures_iter(blanked) {
         let end = m.get(0).unwrap().end();
@@ -1239,17 +1251,21 @@ fn failing_conditions(blanked: &str, expr: &str) -> Vec<(Demand, String)> {
                 "require_eq" | "require_keys_eq" => Demand::Equal,
                 _ => Demand::Other,
             };
-            out.push((demand, expr[end..end + close].to_string()));
+            out.push((demand, expr[end..end + close].to_string(), m.get(0).unwrap().start()));
         }
     }
     for m in IF_RE.find_iter(blanked) {
-        let mut d = 0i32;
+        let (mut d, mut u) = (0i32, 0i32);
         let open = blanked[m.end()..].char_indices().find_map(|(j, c)| {
             match c {
                 '(' | '[' => d += 1,
                 ')' | ']' => d -= 1,
-                '{' if d == 0 => return Some(m.end() + j),
-                ';' if d == 0 => return Some(usize::MAX),
+                // `if unsafe { a.owner() } != ..`: a block inside the condition.
+                '{' if d == 0 && blanked[..m.end() + j].trim_end().ends_with("unsafe") => u += 1,
+                '{' if d == 0 && u > 0 => u += 1,
+                '}' if d == 0 && u > 0 => u -= 1,
+                '{' if d == 0 && u == 0 => return Some(m.end() + j),
+                ';' if d == 0 && u == 0 => return Some(usize::MAX),
                 _ => {}
             }
             None
@@ -1257,7 +1273,7 @@ fn failing_conditions(blanked: &str, expr: &str) -> Vec<(Demand, String)> {
         let Some(open) = open.filter(|&o| o != usize::MAX) else { continue };
         let Some(block) = braced(&blanked[open + 1..]) else { continue };
         if FAILS_RE.is_match(expr[open + 1..open + 1 + block.len()].trim_start()) {
-            out.push((Demand::RejectsIf, expr[m.end()..open].to_string()));
+            out.push((Demand::RejectsIf, expr[m.end()..open].to_string(), m.start()));
         }
     }
     out
@@ -1851,7 +1867,7 @@ fn attach_body_check(
 }
 
 /// Offset of the `)` that closes a parenthesis already opened.
-fn closing_paren(s: &str) -> Option<usize> {
+pub(crate) fn closing_paren(s: &str) -> Option<usize> {
     let mut depth = 0i32;
     for (i, ch) in s.char_indices() {
         match ch {
@@ -1932,13 +1948,13 @@ fn classify(ty: &str, accounts_structs: &[String]) -> Field {
 
 /// Blank out comments and string literals, keeping line structure, so
 /// text inside them is never read as a struct or a field.
-fn strip_comments_and_strings(src: &str) -> String {
+pub(crate) fn strip_comments_and_strings(src: &str) -> String {
     strip(src, false)
 }
 
 /// Blank out comments only: the text constraint expressions are read
 /// from, so a changed string literal in one is still a change.
-fn strip_comments(src: &str) -> String {
+pub(crate) fn strip_comments(src: &str) -> String {
     strip(src, true)
 }
 
@@ -2041,7 +2057,7 @@ fn raw_string_len(s: &str) -> Option<usize> {
 }
 
 /// The text up to the brace that closes one already opened.
-fn braced(s: &str) -> Option<&str> {
+pub(crate) fn braced(s: &str) -> Option<&str> {
     let mut depth = 1;
     for (i, ch) in s.char_indices() {
         match ch {
@@ -2058,7 +2074,7 @@ fn braced(s: &str) -> Option<&str> {
     None
 }
 
-fn collect(dir: &Path, out: &mut Vec<(String, String)>) -> Result<()> {
+pub(crate) fn collect(dir: &Path, out: &mut Vec<(String, String)>) -> Result<()> {
     if dir.is_file() {
         out.push((dir.display().to_string(), fs::read_to_string(dir)?));
         return Ok(());

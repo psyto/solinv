@@ -542,25 +542,36 @@ fn main() -> Result<()> {
                     let base = source::SourceKinds::read(&base_src)?;
                     let head = source::SourceKinds::read(&head_src)?;
                     if base.is_empty() {
-                        anyhow::bail!(
-                            "no #[derive(Accounts)] field under {} could be matched to an instruction. {NOT_ANCHOR}",
-                            base_src.display()
-                        );
-                    }
-                    // Every account struct gone: every check with it, which the
-                    // per-instruction comparison would only warn about.
-                    if head.is_empty() {
-                        let msg = format!(
-                            "{} has account structs, {} has none: every account check is gone",
-                            base_src.display(),
-                            head_src.display()
-                        );
-                        if !no_fail {
-                            anyhow::bail!(msg);
+                        // A native or Pinocchio program: the checks in its code.
+                        let nb = solinv_static::native::NativeChecks::read(&base_src)?;
+                        // A program with an entrypoint whose checks are not
+                        // read here (in another crate, say) compares as empty.
+                        if nb.is_empty() && !nb.has_entrypoint() {
+                            anyhow::bail!(
+                                "no #[derive(Accounts)] field under {} could be matched to an instruction, and no \
+                                 account check (`if !a.is_signer()`, `if a.owner() != ..`, `if a.key() != ..` \
+                                 returning Err) was found in its code",
+                                base_src.display()
+                            );
                         }
-                        eprintln!("warning: {msg}");
+                        let nh = solinv_static::native::NativeChecks::read(&head_src)?;
+                        solinv_static::native::diff(&nb, &nh)
+                    } else {
+                        // Every account struct gone: every check with it, which the
+                        // per-instruction comparison would only warn about.
+                        if head.is_empty() {
+                            let msg = format!(
+                                "{} has account structs, {} has none: every account check is gone",
+                                base_src.display(),
+                                head_src.display()
+                            );
+                            if !no_fail {
+                                anyhow::bail!(msg);
+                            }
+                            eprintln!("warning: {msg}");
+                        }
+                        diff::diff(&base, &head)
                     }
-                    diff::diff(&base, &head)
                 }
                 (None, None, Some(base_idl), Some(head_idl)) => {
                     let read = |p: &PathBuf| -> Result<solinv_static::idl::Idl> {

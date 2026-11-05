@@ -1,5 +1,5 @@
 name: solinv diff
-description: Fail a PR or push that removes an Anchor account check (has_one, seeds, signer, constraint), annotated on the line.
+description: Fail a PR or push that removes an Anchor account check (has_one, seeds, signer, constraint), annotated on the line; warn on one a native or Pinocchio program's code drops.
 branding:
   icon: shield
   color: purple
@@ -7,10 +7,13 @@ branding:
 inputs:
   program-src:
     description: >-
-      Path to the Anchor program's source, relative to the repository root
+      Path to the program's source, relative to the repository root
       (e.g. programs/my_program/src); several programs, one path per line.
       Left empty: every `programs/<name>/src` (at any depth) with a
-      `#[derive(Accounts)]` in it, at the base or the head.
+      `#[derive(Accounts)]` in it, and every `src` directory with a native
+      or Pinocchio entrypoint (`entrypoint!`, `program_entrypoint!`,
+      `lazy_program_entrypoint!`, or an `extern "C" fn entrypoint`), at the
+      base or the head.
     default: ''
   base-ref:
     description: >-
@@ -117,9 +120,17 @@ runs:
           find "$1" -name '*.rs' -type f -exec perl -0777 -ne \
             '$f = 1 if /#\[derive\([^)]*\bAccounts\b/; END { exit($f ? 0 : 1) }' {} + 2>/dev/null
         }
+        # A native or Pinocchio program: an entrypoint macro. Its checks are
+        # read from the code; what it drops is a warning, never a failure.
+        native() {
+          find "$1" -name '*.rs' -type f -exec perl -0777 -ne \
+            's{/\*.*?\*/}{}gs; s{//[^\n]*}{}g; $f = 1 if /\b(?:lazy_program_entrypoint|program_entrypoint|lazy_entrypoint|entrypoint|entrypoint_no_alloc)\s*!\s*\(|\bextern\s+"C"\s+fn\s+entrypoint\b/; END { exit($f ? 0 : 1) }' {} + 2>/dev/null
+        }
+        program() { anchor "$1" || native "$1"; }
         if [ -z "${SRC//[[:space:]]/}" ]; then
           # Every Anchor program: a `programs/<name>/src` with an accounts
           # struct, in either version (one the change emptied counts too).
+          # And every `src` directory with a native entrypoint.
           SRC=$(for root in "$RUNNER_TEMP/solinv-base" .; do
             ( cd "$root" && git ls-files -- '*programs/*/src/*.rs' \
                 | sed -E 's#^(.*programs/[^/]+/src)/.*#\1#' | sort -u \
@@ -127,10 +138,15 @@ runs:
                     # `if`, not `&&`: under `set -e` a last non-Anchor dir
                     # would end the step with status 1 and no word.
                     if anchor "$d"; then echo "$d"; fi
+                  done
+              git ls-files -- 'src/*.rs' '*/src/*.rs' \
+                | sed -E 's#^((.*/)?src)/.*#\1#' | sort -u \
+                | while IFS= read -r d; do
+                    if native "$d" && ! anchor "$d"; then echo "$d"; fi
                   done )
           done | sort -u)
           if [ -z "$SRC" ]; then
-            echo "::error title=solinv::no Anchor program found (a programs/<name>/src with #[derive(Accounts)]); set program-src"
+            echo "::error title=solinv::no program found (a programs/<name>/src with #[derive(Accounts)], or a src with a native entrypoint); set program-src"
             exit 1
           fi
           echo "solinv: comparing $(echo "$SRC" | wc -l | tr -d ' ') program(s):"
@@ -144,14 +160,15 @@ runs:
           src="${src#"${src%%[![:space:]]*}"}"
           src="${src%"${src##*[![:space:]]}"}"
           [ -n "$src" ] || continue
-          if [ ! -e "$RUNNER_TEMP/solinv-base/$src" ] || ! anchor "$RUNNER_TEMP/solinv-base/$src"; then
-            echo "::notice title=solinv::$src is new since the base (or newly Anchor); nothing to compare"
+          if [ ! -e "$RUNNER_TEMP/solinv-base/$src" ] || ! program "$RUNNER_TEMP/solinv-base/$src"; then
+            echo "::notice title=solinv::$src is new since the base (or newly a program); nothing to compare"
             continue
           fi
           # A program the change deleted takes every check it had: a failure,
-          # once (the next change's base no longer has it).
+          # once (the next change's base no longer has it). A native one's
+          # findings are warnings, so this is too.
           if [ ! -e "$src" ]; then
-            if [ "$FAIL" = "true" ]; then
+            if [ "$FAIL" = "true" ] && anchor "$RUNNER_TEMP/solinv-base/$src"; then
               echo "::error title=solinv::$src is gone from the head, with every account check it had"
               status=1
             else

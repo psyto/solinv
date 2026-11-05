@@ -150,11 +150,28 @@ pub fn diff(base: &SourceKinds, head: &SourceKinds) -> Vec<Change> {
         };
         let leaf = path.rsplit('.').next().unwrap_or(path);
         // A Signer loosened is reported as the signature it loses, below.
+        // A check moved out of the declaration into a fn the handler hands
+        // the account to (orca's sparse swap: the tick arrays go to a
+        // builder that compares owner, discriminator and whirlpool) is a
+        // warning naming that fn. Which account the fn checks is not
+        // followed: the reviewer confirms it is this one.
+        let handed = |want: &dyn Fn(&crate::source::Handed) -> bool| h.attrs.handed.iter().find(|d| want(d));
+        let handed_at = |d: &crate::source::Handed| format!("`{}` ({}:{})", d.call, d.file, d.line);
         if b.kind == Some(SlotKind::Typed) && h.kind == Some(SlotKind::Unchecked) && b.ty != "Signer" {
-            push(
-                Severity::Regression,
-                format!("was {}, now {}: Anchor no longer checks its owner and type", b.ty, h.ty),
-            );
+            match handed(&|d| d.owner && d.discriminator) {
+                Some(d) => push(
+                    Severity::Warning,
+                    format!(
+                        "was {}, now {}; the handler passes it to {}, which rejects on an owner and a \
+                         discriminator: confirm they are this account's",
+                        b.ty, h.ty, handed_at(d)
+                    ),
+                ),
+                None => push(
+                    Severity::Regression,
+                    format!("was {}, now {}: Anchor no longer checks its owner and type", b.ty, h.ty),
+                ),
+            }
         } else if b.kind == Some(SlotKind::Typed)
             && h.kind == Some(SlotKind::Typed)
             && b.full_ty != h.full_ty
@@ -263,10 +280,20 @@ pub fn diff(base: &SourceKinds, head: &SourceKinds) -> Vec<Change> {
                         Severity::Warning,
                         format!("`has_one = {target}` is still declared in other words once {r} is read as a rename: confirm it is the same account"),
                     ),
-                    None => push(
-                        Severity::Regression,
-                        format!("`has_one = {target}` removed: it no longer has to match `{target}`"),
-                    ),
+                    None => match handed(&|d| d.key && d.with.contains(&sibling(path, target))) {
+                        Some(d) => push(
+                            Severity::Warning,
+                            format!(
+                                "`has_one = {target}` removed; the handler passes it and `{target}` to {}, \
+                                 which compares keys: confirm it compares these",
+                                handed_at(d)
+                            ),
+                        ),
+                        None => push(
+                            Severity::Regression,
+                            format!("`has_one = {target}` removed: it no longer has to match `{target}`"),
+                        ),
+                    },
                 },
             }
         }
@@ -282,7 +309,39 @@ pub fn diff(base: &SourceKinds, head: &SourceKinds) -> Vec<Change> {
                         Severity::Warning,
                         format!("`constraint = {expr}` is still declared in other words once {r} is read as a rename: confirm it is the same account"),
                     ),
-                    None => push(Severity::Regression, format!("`constraint = {expr}` removed")),
+                    // A gate on this account's own state swapped for another
+                    // (`is_operational()` → `is_ix_enabled(IxGate::…)`): the
+                    // account still has to pass one. The new one must be a
+                    // yes/no the state answers, not a comparison: a changed
+                    // literal (`role == "admin"` → `"attacker"`) is a removal.
+                    // With `||` it may let a second way through.
+                    None => match ha.constraints.iter().find(|e| {
+                        !ba.constraints.contains(e)
+                            && !["||", "==", "!=", "<", ">"].iter().any(|op| e.contains(op))
+                            && gate_on(head, ix, path, e)
+                            && gate_on(base, base_ix, path, expr)
+                    }) {
+                        Some(e) => push(
+                            Severity::Warning,
+                            format!("`constraint = {expr}` replaced by `constraint = {e}` on the same account: confirm the new gate is as strict"),
+                        ),
+                        // A key comparison with other accounts, all of them
+                        // handed to one call with this one that compares keys.
+                        None => match (expr.contains(".key"), others_named(base, base_ix, path, expr)) {
+                            (true, others) if !others.is_empty() => match handed(&|d| d.key && others.iter().all(|o| d.with.contains(o))) {
+                                Some(d) => push(
+                                    Severity::Warning,
+                                    format!(
+                                        "`constraint = {expr}` removed; the handler passes the accounts it names to {}, \
+                                         which compares keys: confirm it compares these",
+                                        handed_at(d)
+                                    ),
+                                ),
+                                None => push(Severity::Regression, format!("`constraint = {expr}` removed")),
+                            },
+                            _ => push(Severity::Regression, format!("`constraint = {expr}` removed")),
+                        },
+                    },
                 },
             }
         }
@@ -574,6 +633,34 @@ fn constraint_eqs(k: &SourceKinds, ix: &str, path: &str, c: &str) -> Option<Vec<
         })
         .collect();
     (!eqs.is_empty() && eqs.len() == parts.len()).then_some(eqs)
+}
+
+/// A `constraint` on the slot at `path` that reads only that account's
+/// state (`group.load()?.is_operational()`, `g.testing == 1`): no other
+/// account of the instruction, and no key compared.
+fn gate_on(k: &SourceKinds, ix: &str, path: &str, c: &str) -> bool {
+    if c.contains(".key") {
+        return false;
+    }
+    let leaf = path.rsplit('.').next().unwrap_or(path);
+    // A name at the head of a path: not after `.` (a field) or `::`.
+    let name = regex::Regex::new(r"(^|[^.:\w])([A-Za-z_]\w*)").unwrap();
+    let named: BTreeSet<&str> = name
+        .captures_iter(c)
+        .map(|m| m.get(2).unwrap().as_str())
+        .filter(|n| k.slot(ix, &sibling(path, n)).is_some())
+        .collect();
+    named.len() == 1 && named.contains(leaf)
+}
+
+/// The slots beside `path` other than it that a `constraint` names, as
+/// full paths.
+fn others_named(k: &SourceKinds, ix: &str, path: &str, c: &str) -> BTreeSet<String> {
+    let name = regex::Regex::new(r"(^|[^.:\w])([A-Za-z_]\w*)").unwrap();
+    name.captures_iter(c)
+        .map(|m| sibling(path, m.get(2).unwrap().as_str()))
+        .filter(|p| p != path && k.slot(ix, p).is_some())
+        .collect()
 }
 
 /// A `token::mint` / `token::authority` value as a key: Anchor takes
@@ -1489,6 +1576,111 @@ pub struct Act<'info> {
         // Without the comment: each check on its own.
         let bare = head.replace("Deprecated: kept for compatibility.", "checked in the handler");
         assert!(diff(&kinds(base), &kinds(&bare)).iter().filter(|c| c.slot() == "act.old").count() > 1);
+    }
+
+    #[test]
+    fn a_gate_swapped_for_another_on_the_same_account() {
+        let base = r#"
+pub fn act(ctx: Context<Act>) -> Result<()> {}
+#[derive(Accounts)]
+pub struct Act<'info> {
+    #[account(constraint = group.load()?.is_operational() @ Err::Halted)]
+    pub group: AccountLoader<'info, Group>,
+    #[account(has_one = group)]
+    pub account: AccountLoader<'info, Account>,
+    pub owner: Signer<'info>,
+}
+"#;
+        let at = |h: &str| {
+            diff(&kinds(base), &kinds(h))
+                .into_iter()
+                .filter(|c| c.slot() == "act.group")
+                .map(|c| c.severity)
+                .collect::<Vec<_>>()
+        };
+        // A per-instruction gate in its place: a warning to look at.
+        let gate = base.replace("is_operational() @ Err::Halted", "is_ix_enabled(IxGate::Act) @ Err::Disabled");
+        assert_eq!(at(&gate), [Severity::Warning]);
+        let flag = base.replace("is_operational()", "testing == 1");
+        assert_eq!(diff(&kinds(&flag), &kinds(&base.replace("is_operational()", "is_testing()"))).into_iter().filter(|c| c.slot() == "act.group").map(|c| c.severity).collect::<Vec<_>>(), [Severity::Warning]);
+        // A comparison in its place is not a yes/no gate: removed.
+        assert_eq!(at(&flag), [Severity::Regression]);
+        // Gone, or made a way around it: still removed.
+        assert_eq!(at(&base.replace("constraint = group.load()?.is_operational() @ Err::Halted", "mut")), [Severity::Regression]);
+        let or = base.replace("is_operational()", "is_operational() || account.load()?.flag");
+        assert_eq!(at(&or), [Severity::Regression]);
+        let or_same = base.replace("is_operational()", "is_operational() || group.load()?.testing == 1");
+        assert_eq!(at(&or_same), [Severity::Regression]);
+        // A new constraint naming another account is not a gate on this one.
+        let other = base.replace("is_operational()", "admin == owner.key()");
+        assert_eq!(at(&other), [Severity::Regression]);
+        let other = base.replace("is_operational()", "is_owner(account.load()?.owner)");
+        assert_eq!(at(&other), [Severity::Regression]);
+    }
+
+    #[test]
+    fn checks_moved_into_a_fn_the_handler_hands_the_account_to() {
+        // orca's sparse swap: the tick array made unchecked, its owner,
+        // discriminator and whirlpool compared by a builder two calls deep.
+        let base = r#"
+pub fn swap(ctx: Context<Swap>) -> Result<()> {
+    let whirlpool = &mut ctx.accounts.whirlpool;
+    Ok(())
+}
+#[derive(Accounts)]
+pub struct Swap<'info> {
+    pub whirlpool: Account<'info, Whirlpool>,
+    #[account(mut, has_one = whirlpool)]
+    pub tick_array: AccountLoader<'info, TickArray>,
+}
+impl<'a> Builder<'a> {
+    pub fn try_from(whirlpool: &Account<Whirlpool>, arrays: Vec<AccountInfo>) -> Result<Self> {
+        for a in arrays {
+            let t = peek(a)?;
+            if t.whirlpool != whirlpool.key() {
+                return Err(ErrorCode::DifferentWhirlpool.into());
+            }
+        }
+        Ok(Self {})
+    }
+}
+fn peek(a: AccountInfo) -> Result<TickArray> {
+    if a.owner != &TickArray::owner() {
+        return Err(ErrorCode::AccountOwnedByWrongProgram.into());
+    }
+    if a.data.borrow()[..8] != TickArray::discriminator() {
+        return Err(ErrorCode::AccountDiscriminatorMismatch.into());
+    }
+    Ok(load(a))
+}
+"#;
+        let moved = base
+            .replace("    #[account(mut, has_one = whirlpool)]\n    pub tick_array: AccountLoader<'info, TickArray>,", "    /// CHECK: checked in the handler\n    #[account(mut)]\n    pub tick_array: UncheckedAccount<'info>,")
+            .replace("    Ok(())\n}\n#[derive", "    let b = Builder::try_from(whirlpool, vec![ctx.accounts.tick_array.to_account_info()])?;\n    Ok(())\n}\n#[derive");
+        let at = |b: &str, h: &str| {
+            diff(&kinds(b), &kinds(h)).into_iter().filter(|c| c.slot() == "swap.tick_array").map(|c| c.severity).collect::<Vec<_>>()
+        };
+        assert_eq!(at(base, &moved), [Severity::Warning, Severity::Warning]);
+        let k = kinds(&moved);
+        let d = &k.slot("swap", "tick_array").unwrap().attrs.handed[0];
+        assert_eq!((d.call.as_str(), d.owner, d.discriminator, d.key), ("Builder::try_from", true, true, true));
+        assert_eq!(d.with, ["tick_array", "whirlpool"]);
+
+        // Not handed to it: both removed.
+        let unhanded = moved.replace("vec![ctx.accounts.tick_array.to_account_info()]", "vec![]");
+        assert_eq!(at(base, &unhanded), [Severity::Regression, Severity::Regression]);
+        // The fn checks no discriminator: the type check is removed.
+        let no_disc = moved.replace("TickArray::discriminator()", "[0u8; 8]");
+        assert_eq!(at(base, &no_disc), [Severity::Regression, Severity::Warning]);
+        // The whirlpool not handed with it: its `has_one` is removed.
+        let alone = moved.replace("Builder::try_from(whirlpool,", "Builder::try_from(other,");
+        assert_eq!(at(base, &alone), [Severity::Regression, Severity::Warning]);
+        // A check that does not reject (a value read, `Ok` either way) is none.
+        let soft = moved.replace("return Err(ErrorCode::AccountOwnedByWrongProgram.into());", "return Ok(default());");
+        assert_eq!(at(base, &soft), [Severity::Regression, Severity::Warning]);
+        // Two fns of the name, the call not saying which: not followed.
+        let two = moved.replace("fn peek(a: AccountInfo)", "fn other() {}\nimpl X { fn try_from() {} }\nfn peek(a: AccountInfo)").replace("Builder::try_from(", "try_from(");
+        assert_eq!(at(base, &two), [Severity::Regression, Severity::Regression]);
     }
 
     #[test]

@@ -108,5 +108,20 @@ Two kinds of false removal found while reading are fixed:
   and a review found real loosenings that passes — a retired `config` whose `has_one = treasury`
   pinned the account fees go to, an allowlist PDA seeded by the mint.
 
+- A gate swapped on the same account (`group.load()?.is_operational()` →
+  `group.load()?.is_ix_enabled(IxGate::…)`, `testing == 1` → `is_testing()`, 7 of the 40) is now a
+  warning naming both. A new gate that compares anything (`==`, `.eq(`, `matches!`, a literal), has
+  `|`, `||` or `^`, or inverts the old one (`!`, `== false`, `.not()`, `is_none` / `is_some`,
+  `is_ok` / `is_err`) is still a removal, and one new gate stands in for one removed. Re-run on the
+  same 40: **25 reports, 5 of them real** — about 1 in 5. Over the whole history (solinv afdac15,
+  same 1,133 pull requests): 784 removals → 724, all 60 gone ones gate swaps (48 in mango's
+  "ix toggler"); the mango and openbook finds above are still named.
+- Checks moved into a fn the handler passes the account to (orca's sparse swap, 5 of the 40) stay
+  removals. We tried reading them as kept when the fn compares an owner, a discriminator or the key;
+  three rounds of review each found a way to make a fn look like it checks this account while it
+  checks another (a `let` in between, a shadowed parameter, a `program_id` passed in, `?` inside a
+  closure, an imported fn of the same name). The removal now names the fn as where to look
+  ("… if they are this account's, the check moved there").
+
 `x::id()` rewritten as `x::ID` (cp-swap's anchor-0.31 upgrade) is still a removal: Rust does not
 make the two the same.

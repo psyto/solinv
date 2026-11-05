@@ -22,7 +22,7 @@ stop. Apache-2.0.
 
 **Try it without installing:** paste a pull request or a program address into
 [solinv check](https://solinv-check.meowna-server.workers.dev). It runs `solinv diff` in the browser
-(solinv-static built to WebAssembly, at 7a4319f), and for a deployed program it reads its IDL
+(solinv-static built to WebAssembly, at dec5547, v0.1.3), and for a deployed program it reads its IDL
 (Anchor's IDL account, or the Program Metadata program) and, for an Anchor IDL account, diffs every
 upgrade in its history. To fail every pull request in CI, or to fuzz the checks, install it (below).
 
@@ -138,7 +138,7 @@ binary of solinv built for that tag. The action uses that binary only after
 `gh attestation verify` confirms solinv's own release workflow built it from that exact commit;
 otherwise (another runner OS, or a commit without a release) it compiles solinv, about 2 minutes.
 
-- `@v0` follows the latest `v0.x` release. To pin, use a release tag (`@v0.1.1`) or its commit.
+- `@v0` follows the latest `v0.x` release. To pin, use a release tag (`@v0.1.3`) or its commit.
 - `program-src:` lists the programs to compare instead, one path per line (one in a directory
   not named `programs/`, or only some of them). A path that is gone fails.
 - A program deleted by the change, or one left with no account struct, fails the job: every check
@@ -148,15 +148,15 @@ otherwise (another runner OS, or a commit without a release) it compiles solinv,
 The CLI (not on crates.io yet; pin a release tag):
 
 ```bash
-cargo install --git https://github.com/psyto/solinv --tag v0.1.2 solinv-cli
+cargo install --git https://github.com/psyto/solinv --tag v0.1.3 solinv-cli
 ```
 
 In your Crucible fuzz harness:
 
 ```toml
 [dependencies]
-solinv-fuzz = { git = "https://github.com/psyto/solinv", tag = "v0.1.2" }
-solinv-core = { git = "https://github.com/psyto/solinv", tag = "v0.1.2" }
+solinv-fuzz = { git = "https://github.com/psyto/solinv", tag = "v0.1.3" }
+solinv-core = { git = "https://github.com/psyto/solinv", tag = "v0.1.3" }
 crucible-test-context = { git = "https://github.com/asymmetric-research/crucible", tag = "v0.1.0" }
 ```
 ```rust
@@ -209,7 +209,7 @@ All installed from the pins above, the same way as for anyone else:
 | [psyto/openhl-solana](https://github.com/psyto/openhl-solana/tree/main/fuzz/positions) | a fourth harness, for the course's Chapter 11 position handlers (open, close, liquidate) across two markets in one quote mint | Its first run found a real hole: the handlers took any market's oracle and funding state, so a long opened at one market's price closed at another's (200 in, 1,200 out); fixed. Of 17 deleted checks, 12 caught; the two margin rules only tests catch, and the chapter traces the rest |
 | [psyto/openhl-solana](https://github.com/psyto/openhl-solana/tree/main/fuzz/matching) | cu-dos on the course's Chapter 8 matcher, with a 50,000 CU cap per match | A finding within seconds (58,148 CU on a full book); capping `max_fills` at a bound derived from the measurements removes it. Measuring for the exercise showed the chapter's CU table was from an older toolchain (about 3,500 CU per fill, measured 1,500) and that its "the budget breaks" exercises could not break at the book's 32 slots; the chapter now says so |
 | [psyto/openhl-solana](https://github.com/psyto/openhl-solana/tree/main/fuzz/slab) | cu-dos on the course's Chapter 15 slab (critbit) matcher, with a 100,000 CU cap | The chapter's cost table, written before measuring, had the slab dearer per place and the flat book cheaper below 8 orders; neither held. A first cap of 69 fills, derived from contiguous prices, was wrong: makers can pick prices that make the critbit deep (u64::MAX - 2^k), and the fuzzer then reported 157,245 CU; the cap that fits that shape is 31 |
-| [solinv check](https://solinv-check.meowna-server.workers.dev) | solinv-static (source, diff, idl, idl_diff, legacy) built to WebAssembly from the 7a4319f pin; `diff_idls` on every upgrade of a program's on-chain IDL | marginfi's IDL (10 versions since 2024-03): 3 of 9 upgrades drop a declared `has_one` (2, 8 and 2 findings); in the source the check moved into a `constraint` that also admits delegated and receivership signers |
+| [solinv check](https://solinv-check.meowna-server.workers.dev) | solinv-static (source, diff, idl, idl_diff, legacy) built to WebAssembly from the dec5547 (v0.1.3) pin; `diff_idls` on every upgrade of a program's on-chain IDL | marginfi's IDL (10 versions since 2024-03): 3 of 9 upgrades drop a declared `has_one` (2, 8 and 2 findings); in the source the check moved into a `constraint` that also admits delegated and receivership signers |
 
 What using it ourselves turned up: the `t` mark for typed accounts not tied to the instruction
 ([#3](https://github.com/psyto/solinv/issues/3); in veil it surrounds four real holes the earlier map showed as `T`),

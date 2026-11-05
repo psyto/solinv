@@ -113,7 +113,10 @@ runs:
       run: |
         # Has an accounts struct: read as solinv reads, whole files, so a
         # derive may span lines.
-        anchor() { grep -rlqzE '#\[derive\([^)]*\bAccounts\b' -- "$1" 2>/dev/null; }
+        anchor() {
+          find "$1" -name '*.rs' -type f -exec perl -0777 -ne \
+            '$f = 1 if /#\[derive\([^)]*\bAccounts\b/; END { exit($f ? 0 : 1) }' {} + 2>/dev/null
+        }
         if [ -z "${SRC//[[:space:]]/}" ]; then
           # Every Anchor program: a `programs/<name>/src` with an accounts
           # struct, in either version (one the change emptied counts too).
@@ -121,7 +124,9 @@ runs:
             ( cd "$root" && git ls-files -- '*programs/*/src/*.rs' \
                 | sed -E 's#^(.*programs/[^/]+/src)/.*#\1#' | sort -u \
                 | while IFS= read -r d; do
-                    anchor "$d" && echo "$d"
+                    # `if`, not `&&`: under `set -e` a last non-Anchor dir
+                    # would end the step with status 1 and no word.
+                    if anchor "$d"; then echo "$d"; fi
                   done )
           done | sort -u)
           if [ -z "$SRC" ]; then

@@ -8,9 +8,10 @@ inputs:
   program-src:
     description: >-
       Path to the Anchor program's source, relative to the repository root
-      (e.g. programs/my_program/src). Several programs: one path per line, so a
-      multi-program repository needs one job and one install.
-    required: true
+      (e.g. programs/my_program/src); several programs, one path per line.
+      Left empty: every `programs/<name>/src` (at any depth) with a
+      `#[derive(Accounts)]` in it, at the base or the head.
+    default: ''
   base-ref:
     description: >-
       Commit to compare against. Defaults to the pull request's base, the
@@ -38,7 +39,7 @@ runs:
           echo "::error title=solinv::set solinv-rev (no action ref to default to)"
           exit 1
         fi
-        # A branch or tag moves; install and cache by the commit it names
+        # A branch or tag moves; install by the commit it names
         # now, so a moved tag never restores an old binary.
         if ! [[ "$rev" =~ ^[0-9a-f]{7,40}$ ]]; then
           sha=$(git ls-remote https://github.com/psyto/solinv "$rev" "refs/tags/$rev^{}" \
@@ -51,30 +52,34 @@ runs:
         fi
         echo "rev=$rev" >> "$GITHUB_OUTPUT"
 
-    # Restore and save separately: actions/cache saves only when the job
-    # succeeds, and this job's purpose is to fail on a removed check.
-    - name: Restore the solinv binary
-      id: cache
-      uses: actions/cache/restore@v6
-      with:
-        path: ${{ runner.temp }}/solinv-bin
-        key: solinv-cli-${{ runner.os }}-${{ steps.rev.outputs.rev }}
-
     - name: Install solinv
-      if: steps.cache.outputs.cache-hit != 'true'
       shell: bash
       env:
         REV: ${{ steps.rev.outputs.rev }}
+        GH_TOKEN: ${{ github.token }}
       run: |
+        # The release binary built from this exact commit (Linux x64), used
+        # only with a build attestation that solinv's own release workflow
+        # built it from this commit. Otherwise, or if anything fails,
+        # compile. No cache: what a cache restores cannot be trusted.
+        name="solinv-${REV}-x86_64-unknown-linux-gnu.tar.gz"
+        if [ "$RUNNER_OS" = Linux ] && [ "$RUNNER_ARCH" = X64 ] && [ ${#REV} = 40 ]; then
+          url=$(gh api --paginate "repos/psyto/solinv/releases?per_page=100" \
+                  --jq ".[].assets[] | select(.name == \"$name\") | .browser_download_url" 2>/dev/null | head -n1)
+          if [ -n "$url" ] && (cd "$RUNNER_TEMP" && curl -fsSLO "$url" \
+               && gh attestation verify "$name" --repo psyto/solinv \
+                    --signer-workflow psyto/solinv/.github/workflows/release.yml \
+                    --source-digest "$REV" >/dev/null \
+               && mkdir -p solinv-bin && tar -C solinv-bin -xzf "$name" \
+               && solinv-bin/bin/solinv --version); then
+            echo "solinv: release binary for $REV, attested"
+            exit 0
+          fi
+          rm -rf "$RUNNER_TEMP/solinv-bin"
+          echo "solinv: no attested release binary for $REV; compiling"
+        fi
         cargo install --locked --git https://github.com/psyto/solinv --rev "$REV" \
           solinv-cli --root "$RUNNER_TEMP/solinv-bin"
-
-    - name: Save the solinv binary
-      if: steps.cache.outputs.cache-hit != 'true'
-      uses: actions/cache/save@v6
-      with:
-        path: ${{ runner.temp }}/solinv-bin
-        key: solinv-cli-${{ runner.os }}-${{ steps.rev.outputs.rev }}
 
     - name: Check out the base version
       id: base
@@ -106,6 +111,26 @@ runs:
         SRC: ${{ inputs.program-src }}
         FAIL: ${{ inputs.fail-on-removed }}
       run: |
+        # Has an accounts struct: read as solinv reads, whole files, so a
+        # derive may span lines.
+        anchor() { grep -rlqzE '#\[derive\([^)]*\bAccounts\b' -- "$1" 2>/dev/null; }
+        if [ -z "${SRC//[[:space:]]/}" ]; then
+          # Every Anchor program: a `programs/<name>/src` with an accounts
+          # struct, in either version (one the change emptied counts too).
+          SRC=$(for root in "$RUNNER_TEMP/solinv-base" .; do
+            ( cd "$root" && git ls-files -- '*programs/*/src/*.rs' \
+                | sed -E 's#^(.*programs/[^/]+/src)/.*#\1#' | sort -u \
+                | while IFS= read -r d; do
+                    anchor "$d" && echo "$d"
+                  done )
+          done | sort -u)
+          if [ -z "$SRC" ]; then
+            echo "::error title=solinv::no Anchor program found (a programs/<name>/src with #[derive(Accounts)]); set program-src"
+            exit 1
+          fi
+          echo "solinv: comparing $(echo "$SRC" | wc -l | tr -d ' ') program(s):"
+          echo "$SRC"
+        fi
         flag=""
         [ "$FAIL" = "true" ] || flag="--no-fail"
         # Every path is compared, even after one fails.
@@ -114,8 +139,19 @@ runs:
           src="${src#"${src%%[![:space:]]*}"}"
           src="${src%"${src##*[![:space:]]}"}"
           [ -n "$src" ] || continue
-          if [ ! -e "$RUNNER_TEMP/solinv-base/$src" ]; then
-            echo "::notice title=solinv::$src is new since the base; nothing to compare"
+          if [ ! -e "$RUNNER_TEMP/solinv-base/$src" ] || ! anchor "$RUNNER_TEMP/solinv-base/$src"; then
+            echo "::notice title=solinv::$src is new since the base (or newly Anchor); nothing to compare"
+            continue
+          fi
+          # A program the change deleted takes every check it had: a failure,
+          # once (the next change's base no longer has it).
+          if [ ! -e "$src" ]; then
+            if [ "$FAIL" = "true" ]; then
+              echo "::error title=solinv::$src is gone from the head, with every account check it had"
+              status=1
+            else
+              echo "::warning title=solinv::$src is gone from the head, with every account check it had"
+            fi
             continue
           fi
           echo "::group::solinv diff $src"

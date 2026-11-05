@@ -1,0 +1,43 @@
+# On a version tag, build solinv for the action's runners and attach it to
+# the tag's release, named by the commit it was built from. The action
+# downloads it instead of compiling (and compiles when there is none).
+name: release
+
+on:
+  push:
+    tags: ['v*.*.*']
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+jobs:
+  linux-x64:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build
+        run: cargo build --locked --release -p solinv-cli
+      - name: Package
+        id: pkg
+        run: |
+          name="solinv-${GITHUB_SHA}-x86_64-unknown-linux-gnu.tar.gz"
+          mkdir -p dist/bin && cp target/release/solinv dist/bin/
+          tar -C dist -czf "$name" bin
+          sha256sum "$name" > "$name.sha256"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+      # Signed provenance: this workflow built it from this commit. The
+      # action verifies it before using the binary.
+      - name: Attest
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: ${{ steps.pkg.outputs.name }}
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NAME: ${{ steps.pkg.outputs.name }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 \
+            || gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" --notes "solinv $GITHUB_REF_NAME ($GITHUB_SHA)"
+          gh release upload "$GITHUB_REF_NAME" "$NAME" "$NAME.sha256" --clobber

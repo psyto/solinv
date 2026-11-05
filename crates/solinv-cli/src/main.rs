@@ -547,6 +547,19 @@ fn main() -> Result<()> {
                             base_src.display()
                         );
                     }
+                    // Every account struct gone: every check with it, which the
+                    // per-instruction comparison would only warn about.
+                    if head.is_empty() {
+                        let msg = format!(
+                            "{} has account structs, {} has none: every account check is gone",
+                            base_src.display(),
+                            head_src.display()
+                        );
+                        if !no_fail {
+                            anyhow::bail!(msg);
+                        }
+                        eprintln!("warning: {msg}");
+                    }
                     diff::diff(&base, &head)
                 }
                 (None, None, Some(base_idl), Some(head_idl)) => {

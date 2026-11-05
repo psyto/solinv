@@ -126,21 +126,24 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: psyto/solinv@eb75c260c1ff95ce18196ecde07a46779a142d42
-        with:
-          program-src: programs/my_program/src
+      - uses: psyto/solinv@v0
 ```
 
-It installs solinv at that commit, compares the program's source with the pull request's base
-(on a push, with the commit `main` was at before it, so a push of several commits is compared as
-one change), and fails the job when a check is removed. In a merge queue, add `merge_group:` to
-`on:`; it compares with the queue's base. The first run compiles solinv (about 2 minutes on
-`ubuntu-latest` for the demo pull request); later runs restore it from the cache (the whole job took 7 seconds on a re-run). No Solana
-toolchain, no build of your program.
+That is all. It finds every Anchor program in the repository (each `programs/<name>/src` with a
+`#[derive(Accounts)]`, at any depth), compares each with the pull request's base (on a push, with
+the commit `main` was at before it, so a push of several commits is compared as one change), and
+fails the job when a check is removed, with an annotation on the line. No Solana toolchain, no
+build of your program: the job took 12 seconds on the demo program, downloading the release
+binary of solinv built for that tag. The action uses that binary only after
+`gh attestation verify` confirms solinv's own release workflow built it from that exact commit;
+otherwise (another runner OS, or a commit without a release) it compiles solinv, about 2 minutes.
 
-Several programs in one repository: give `program-src` one path per line. One job then installs
-solinv once and compares each program in turn, failing if any lost a check. A matrix with a job per
-program works too, but each job compiles solinv: they race to save the same cache entry.
+- `@v0` follows the latest `v0.x` release. To pin, use a release tag (`@v0.1.1`) or its commit.
+- `program-src:` lists the programs to compare instead, one path per line (one in a directory
+  not named `programs/`, or only some of them). A path that is gone fails.
+- A program deleted by the change, or one left with no account struct, fails the job: every check
+  it had is gone. `fail-on-removed: false` turns every failure into a warning.
+- In a merge queue, add `merge_group:` to `on:`; it compares with the queue's base.
 
 The CLI (not on crates.io yet; pin a commit):
 

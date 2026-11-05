@@ -28,7 +28,7 @@ instruction and account.
 | marinade-finance/liquid-staking-program | 8 | 2021-11 |
 | **Total** | **1,133** | |
 
-drift-labs/protocol-v2 (939 PRs) was still running when this was written and is not counted.
+drift-labs/protocol-v2 is left out: after its April 2026 hack it is no longer a target.
 
 ## Found: checks a pull request removed and an audit put back
 
@@ -54,12 +54,12 @@ was gone from `main` until an audit added it back.
   such as `CHECK: passing through, checks are done by spl-stake-pool` and `CHECK: TODO add
   validator list to config`; a later release gave `validator_list` an `address` constraint.
 - raydium-cp-swap widened `address = admin` to `constraint = (admin || another owner)` twice, and
-  Drift and stakenet titled such changes "allow whitelisted signer", "permissionless …", "Relax
-  Constrant". These are intentional; they are what a reviewer should be shown.
+  stakenet titled such a change "Relax Constrant" (#178). These are intentional; they are what a
+  reviewer should be shown.
 
 ## Noise: how many removals are real
 
-Of 847 removals reported (Drift aside), 563 were declared checks and 284 handler checks.
+Of 847 removals reported, 563 were declared checks and 284 handler checks.
 
 **A random sample of 40 declared-check removals** (fixed seed), each read against its diff:
 

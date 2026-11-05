@@ -141,7 +141,7 @@ binary of solinv built for that tag. The action uses that binary only after
 `gh attestation verify` confirms solinv's own release workflow built it from that exact commit;
 otherwise (another runner OS, or a commit without a release) it compiles solinv, about 2 minutes.
 
-- `@v0` follows the latest `v0.x` release. To pin, use a release tag (`@v0.1.5`) or its commit.
+- `@v0` follows the latest `v0.x` release. To pin, use a release tag (`@v0.1.6`) or its commit.
 - `program-src:` lists the programs to compare instead, one path per line (one in a directory
   not named `programs/`, or only some of them). A path that is gone fails.
 - A program deleted by the change, or one left with no account struct, fails the job: every check
@@ -151,15 +151,15 @@ otherwise (another runner OS, or a commit without a release) it compiles solinv,
 The CLI (not on crates.io yet; pin a release tag):
 
 ```bash
-cargo install --git https://github.com/psyto/solinv --tag v0.1.5 solinv-cli
+cargo install --git https://github.com/psyto/solinv --tag v0.1.6 solinv-cli
 ```
 
 In your Crucible fuzz harness:
 
 ```toml
 [dependencies]
-solinv-fuzz = { git = "https://github.com/psyto/solinv", tag = "v0.1.5" }
-solinv-core = { git = "https://github.com/psyto/solinv", tag = "v0.1.5" }
+solinv-fuzz = { git = "https://github.com/psyto/solinv", tag = "v0.1.6" }
+solinv-core = { git = "https://github.com/psyto/solinv", tag = "v0.1.6" }
 crucible-test-context = { git = "https://github.com/asymmetric-research/crucible", tag = "v0.1.0" }
 ```
 ```rust
@@ -205,6 +205,8 @@ All installed from the pins above, the same way as for anyone else:
 |---|---|---|
 | [fabrknt/veil](https://github.com/fabrknt/veil/blob/main/.github/workflows/solinv.yml) | the action at `@v0`, two lines, on pull requests and on pushes to `main`; it finds the 5 Anchor 0.30 programs itself | 10 seconds a run with the attested release binary. Earlier, a throwaway pull request that dropped a `has_one` failed with the annotation on the line ([fabrknt/veil#2](https://github.com/fabrknt/veil/pull/2)) |
 | [psyto/soldojo](https://github.com/psyto/soldojo/blob/main/.github/workflows/solinv.yml) | the action at `@v0`, two lines, on pull requests and on pushes to `main` — changes there go straight to `main`, which is why the action compares pushes | 9 seconds a run (0 removed). The same two lines on a throwaway branch of this repository found its 7 Anchor programs; a push that dropped a `has_one` failed with both annotations on the line, and its revert passed |
+| [psyto/princeps-solana](https://github.com/psyto/princeps-solana/blob/main/.github/workflows/solinv.yml) | the action at `@v0`, two lines; it finds the 6 native (Pinocchio) programs itself and warns on a dropped check | A borrower key check deleted from `repay_loan` on a pull request: warned on, job passed ([#4](https://github.com/psyto/princeps-solana/pull/4)) |
+| [psyto/openhl-solana](https://github.com/psyto/openhl-solana/blob/main/.github/workflows/solinv.yml) | the same, on the course's native `openhl-core` | Deleting `Deposit`'s signer check, which logs before it fails, was not seen at first: 78 of its 192 checks were not read (fixed in v0.1.5); now warned on ([#1](https://github.com/psyto/openhl-solana/pull/1)) |
 | [psyto/princeps-solana](https://github.com/psyto/princeps-solana/tree/main/fuzz/psol-vault) | a fuzz harness for a native (Pinocchio) vault: signer-skip, owner-skip, account-swap, 3 minutes per pull request | Deleting one check at a time: 6 of 6 caught; 0 findings on the current code. Two of them — the compliance-program pin in `deposit` and `withdraw` — need two accounts swapped together, which `account_swap::check_sets` does ([#4](https://github.com/psyto/solinv/issues/4), [psyto/princeps-solana#3](https://github.com/psyto/princeps-solana/pull/3)) |
 | [psyto/openhl-solana](https://github.com/psyto/openhl-solana/tree/main/fuzz/vault) | a fuzz harness for the native trading vault of the Solana Internals course, Chapter 12, which ends with it as an exercise ([§12.7](https://github.com/psyto/openhl-solana/blob/main/docs/chapter-12-vault/DRAFT.en.md)) | Its first run found a real hole: withdraw did not check that the share belonged to the vault, so shares minted cheaply in one vault drained another. Deleting the 9 account checks one at a time: 5 caught; the other 4 are refused anyway by the runtime's owner rule or by SPL Token, and the chapter explains each |
 | [psyto/openhl-solana](https://github.com/psyto/openhl-solana/tree/main/fuzz/basics) | a second harness for Chapters 3, 4 and 6 of the same course (CreateMarket, Bench, CreateVault, Deposit), each chapter ending with it as an exercise | Deleting 14 account checks one at a time: 1 caught (CreateVault's vault-authority PDA, the one nothing else backs); the chapters trace what refused each of the other 13 (the runtime's signer and owner rules, a missing callee account, SPL Token, another check). cu-dos on Bench with a 50,000 CU cap: a finding within seconds. Writing it turned up [#15](https://github.com/psyto/solinv/issues/15) |
@@ -222,8 +224,10 @@ action now has no cache and downloads an attested binary instead), that the acti
 requests while our repositories mostly push to `main` (it now compares pushes too), two misreads found
 by running `solinv idl --src` over 105 of our own Anchor programs (a field with its attribute on the
 same line was dropped; every module's `fn handler` merged into one phantom instruction; both fixed in
-[577ca4f](https://github.com/psyto/solinv/commit/577ca4f)), and that putting the action on a native
-program failed with an error that did not say why,
+[577ca4f](https://github.com/psyto/solinv/commit/577ca4f)), that putting the action on a native
+program failed with an error that did not say why (it now reads native programs), that once it did, it
+found none on GitHub's runners (GNU `find` rejects a `{}` in the detector that macOS `find` lets
+through; fixed in v0.1.6, with a job that runs the detector on ubuntu),
 two setup gaps in the docs ([#7](https://github.com/psyto/solinv/issues/7)), and `check_sets`
 skipping a set whose accounts are missing without saying so ([#13](https://github.com/psyto/solinv/issues/13)). Building
 solinv check turned up two bugs in `anchor idl convert`'s legacy-IDL conversion — string seeds keep

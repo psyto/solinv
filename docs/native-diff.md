@@ -129,7 +129,8 @@ Putting the action on openhl-solana then showed that a check whose block logs be
 (`{ msg!(".."); return Err(..) }`) was not read at all: 78 of the 192 account checks in its
 `openhl-core`, and deleting `if !user_ai.is_signer { msg!(..); return Err(..) }` from `Deposit` was
 not reported. v0.1.5 reads them (test `n03_logs_before_err`); the three histories above report
-exactly the same with it.
+exactly the same with it. And the action found no native program on GitHub's runners before v0.1.6
+(its detector had a `{}` that GNU `find` rejects).
 
 Nothing else in the three histories was reported; what it misses there is not measured. Planted
 removals: the unit tests in `crates/solinv-static/src/native.rs`, the three above on

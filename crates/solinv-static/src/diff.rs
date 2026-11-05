@@ -13,7 +13,7 @@
 //! level of each handler body; a declared check moved into the handler
 //! reads as removed, which is the right default for a reviewer to look at.
 
-use crate::source::{Slot, SourceKinds};
+use crate::source::{clauses, Slot, SourceKinds};
 use crate::idl::SlotKind;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -174,6 +174,24 @@ pub fn diff(base: &SourceKinds, head: &SourceKinds) -> Vec<Change> {
             );
         }
         let (ba, ha) = (&b.attrs, &h.attrs);
+        // A key equality still declared in other words — `has_one` on the
+        // holder, `address` on the target, a `constraint` — is not gone:
+        // `Some(None)`. `Some(Some(r))` when it holds only once a renamed
+        // slot `r` (`old → new`) is read as the old one.
+        let leaf = path.rsplit('.').next().unwrap_or(path);
+        let restated = |eqs: Vec<KeyEq>| -> Option<Option<String>> {
+            let held = declared_eqs(head, ix);
+            if eqs.iter().all(|e| held.contains(e)) {
+                return Some(None);
+            }
+            let renames = renamed_slots(base, head, base_ix, ix);
+            let used: Vec<String> = renames
+                .iter()
+                .filter(|&(o, n)| rename_eqs(&eqs, &BTreeMap::from([(o.clone(), n.clone())])) != eqs)
+                .map(|(o, n)| format!("`{o}` → `{n}`"))
+                .collect();
+            rename_eqs(&eqs, &renames).iter().all(|e| held.contains(e)).then(|| Some(used.join(", ")))
+        };
         // `seeds` and `address` each fix the account, when built from other
         // accounts or constants rather than an instruction argument: one
         // replacing the other is a change to look at, not a check gone.
@@ -194,7 +212,32 @@ pub fn diff(base: &SourceKinds, head: &SourceKinds) -> Vec<Change> {
         if ba.address && !ha.address {
             match fixed_seeds {
                 true => push(Severity::Warning, "`address` replaced by `seeds`: confirm it names the same account".into()),
-                false => push(Severity::Regression, "`address` constraint removed".into()),
+                false => match ba.address_expr.as_ref().and_then(|e| restated(vec![key_eq(base, base_ix, path, &format!("{leaf}.key()"), e)])) {
+                    Some(None) => {}
+                    Some(Some(r)) => push(Severity::Warning, format!("`address` is still declared in other words once {r} is read as a rename: confirm it is the same account")),
+                    None => push(Severity::Regression, "`address` constraint removed".into()),
+                },
+            }
+        }
+        if let (Some(x), Some(y)) = (&ba.address_expr, &ha.address_expr) {
+            if x != y && restated(vec![key_eq(base, base_ix, path, &format!("{leaf}.key()"), x)]).is_none() {
+                push(Severity::Warning, format!("`address` changed from `{x}` to `{y}`: confirm it names the account it should"));
+            }
+        }
+        // `token::mint` / `token::authority`: which mint, which owner.
+        for (key, field, was, now) in [
+            ("token::mint", "mint", &ba.token_mint, &ha.token_mint),
+            ("token::authority", "owner", &ba.token_owner, &ha.token_owner),
+        ] {
+            let Some(x) = was else { continue };
+            if now.as_ref() == Some(x) {
+                continue;
+            }
+            match (now, restated(vec![key_eq(base, base_ix, path, &format!("{leaf}.{field}"), &token_value(x))])) {
+                (_, Some(None)) => {}
+                (_, Some(Some(r))) => push(Severity::Warning, format!("`{key} = {x}` is still declared in other words once {r} is read as a rename: confirm it is the same account")),
+                (Some(y), None) => push(Severity::Warning, format!("`{key}` changed from `{x}` to `{y}`: confirm it names the account it should")),
+                (None, None) => push(Severity::Regression, format!("`{key} = {x}` removed: any {field} is accepted")),
             }
         }
         if ba.owner && !ha.owner {
@@ -212,10 +255,17 @@ pub fn diff(base: &SourceKinds, head: &SourceKinds) -> Vec<Change> {
                     Severity::Warning,
                     format!("`has_one = {target}` moved to `{other}`: confirm it checks the same account"),
                 ),
-                None => push(
-                    Severity::Regression,
-                    format!("`has_one = {target}` removed: it no longer has to match `{target}`"),
-                ),
+                None => match restated(vec![key_eq(base, base_ix, path, &format!("{leaf}.{target}"), &format!("{target}.key()"))]) {
+                    Some(None) => {}
+                    Some(Some(r)) => push(
+                        Severity::Warning,
+                        format!("`has_one = {target}` is still declared in other words once {r} is read as a rename: confirm it is the same account"),
+                    ),
+                    None => push(
+                        Severity::Regression,
+                        format!("`has_one = {target}` removed: it no longer has to match `{target}`"),
+                    ),
+                },
             }
         }
         for expr in ba.constraints.iter().filter(|e| !ha.constraints.contains(e)) {
@@ -224,7 +274,14 @@ pub fn diff(base: &SourceKinds, head: &SourceKinds) -> Vec<Change> {
                     Severity::Warning,
                     format!("`constraint = {expr}` moved to `{other}`"),
                 ),
-                None => push(Severity::Regression, format!("`constraint = {expr}` removed")),
+                None => match constraint_eqs(base, base_ix, path, expr).and_then(&restated) {
+                    Some(None) => {}
+                    Some(Some(r)) => push(
+                        Severity::Warning,
+                        format!("`constraint = {expr}` is still declared in other words once {r} is read as a rename: confirm it is the same account"),
+                    ),
+                    None => push(Severity::Regression, format!("`constraint = {expr}` removed")),
+                },
             }
         }
         match (&ba.close, &ha.close) {
@@ -428,6 +485,124 @@ fn checks_of(s: &Slot) -> Vec<String> {
     c.extend(a.body.iter().cloned());
     c.extend(a.validate.iter().cloned());
     c
+}
+
+/// One key said to equal another, in order. Each side is as written with
+/// spaces, `ctx.accounts.`, `.load()?` / `.load_mut()?` and a leading
+/// `&` / `*` dropped, and each name that is a slot beside `path` written
+/// `@` and its full path, so `state` in `left` is not `state` in `right`
+/// and an instruction argument is not the account of that name.
+/// `has_one = f` on `x`, `address = x.f` on `f` and
+/// `constraint = x.load()?.f == f.key()` are each `(@f.key(), @x.f)`.
+type KeyEq = (String, String);
+
+fn key_eq(k: &SourceKinds, ix: &str, path: &str, a: &str, b: &str) -> KeyEq {
+    // A name at the head of a path: not after `.` (a field) or `::`.
+    let name = regex::Regex::new(r"(^|[^.:\w@])([A-Za-z_]\w*)").unwrap();
+    let side = |e: &str| {
+        let mut t: String = e.chars().filter(|c| !c.is_whitespace()).collect();
+        for p in ["ctx.accounts.", ".load()?", ".load_mut()?"] {
+            t = t.replace(p, "");
+        }
+        let t = t.trim_start_matches(['&', '*']);
+        name.replace_all(t, |c: &regex::Captures| {
+            let full = sibling(path, &c[2]);
+            match k.slot(ix, &full) {
+                Some(_) => format!("{}@{full}", &c[1]),
+                None => c[0].to_string(),
+            }
+        })
+        .into_owned()
+    };
+    ordered(side(a), side(b))
+}
+
+fn ordered(a: String, b: String) -> KeyEq {
+    if a <= b { (a, b) } else { (b, a) }
+}
+
+/// What a `constraint` on the slot at `path` says, when it is nothing but
+/// `==` joined by `&&`.
+fn constraint_eqs(k: &SourceKinds, ix: &str, path: &str, c: &str) -> Option<Vec<KeyEq>> {
+    if c.contains("||") || c.contains("!=") {
+        return None;
+    }
+    let parts = clauses(c);
+    let eqs: Vec<KeyEq> = parts
+        .iter()
+        .filter_map(|p| match p.split("==").collect::<Vec<_>>()[..] {
+            [l, r] if !l.trim().is_empty() && !r.trim().is_empty() => Some(key_eq(k, ix, path, l, r)),
+            _ => None,
+        })
+        .collect();
+    (!eqs.is_empty() && eqs.len() == parts.len()).then_some(eqs)
+}
+
+/// A `token::mint` / `token::authority` value as a key: Anchor takes
+/// `m.key()`, so a plain name is an account.
+fn token_value(e: &str) -> String {
+    match e.chars().all(|c| c.is_alphanumeric() || c == '_') {
+        true => format!("{e}.key()"),
+        false => e.to_string(),
+    }
+}
+
+/// Every key equality the slots of `ix` declare. An `Option` slot's
+/// declarations are not checked when it is left out: not counted.
+fn declared_eqs(k: &SourceKinds, ix: &str) -> BTreeSet<KeyEq> {
+    let mut out = BTreeSet::new();
+    for ((i, path), s) in k.slots() {
+        if i != ix || s.optional {
+            continue;
+        }
+        let leaf = path.rsplit('.').next().unwrap_or(path);
+        let a = &s.attrs;
+        let eq = |x: &str, y: &str| key_eq(k, ix, path, x, y);
+        out.extend(a.has_one.iter().map(|t| eq(&format!("{leaf}.{t}"), &format!("{t}.key()"))));
+        out.extend(a.address_expr.iter().map(|e| eq(&format!("{leaf}.key()"), e)));
+        out.extend(a.token_mint.iter().map(|e| eq(&format!("{leaf}.mint"), &token_value(e))));
+        out.extend(a.token_owner.iter().map(|e| eq(&format!("{leaf}.owner"), &token_value(e))));
+        out.extend(a.constraints.iter().filter_map(|c| constraint_eqs(k, ix, path, c)).flatten());
+    }
+    out
+}
+
+/// Typed slots of `base_ix` gone from `ix`, each paired with the one new
+/// slot of `ix` of the same type when that pairing is the only one:
+/// `marginfi_group` renamed `group`. Full paths.
+fn renamed_slots(base: &SourceKinds, head: &SourceKinds, base_ix: &str, ix: &str) -> BTreeMap<String, String> {
+    let typed = |k: &SourceKinds, i: &str| -> BTreeMap<String, String> {
+        k.slots()
+            .into_iter()
+            .filter(|((x, _), s)| x == i && s.kind == Some(SlotKind::Typed))
+            .map(|((_, p), s)| (p.clone(), s.full_ty.clone()))
+            .collect()
+    };
+    let (b, h) = (typed(base, base_ix), typed(head, ix));
+    let gone: Vec<_> = b.iter().filter(|(n, _)| !h.contains_key(*n)).collect();
+    let new: Vec<_> = h.iter().filter(|(n, _)| !b.contains_key(*n)).collect();
+    let mut out = BTreeMap::new();
+    for (n, ty) in &gone {
+        let olds = gone.iter().filter(|(_, t)| t == ty).count();
+        let mut news = new.iter().filter(|(_, t)| t == ty);
+        if let (1, Some((m, _)), None) = (olds, news.next(), news.next()) {
+            out.insert(n.to_string(), m.to_string());
+        }
+    }
+    out
+}
+
+/// `eqs` with each renamed slot read as its new path.
+fn rename_eqs(eqs: &[KeyEq], renames: &BTreeMap<String, String>) -> Vec<KeyEq> {
+    let swap = |e: &str| {
+        let mut t = e.to_string();
+        for (old, new) in renames {
+            let re = regex::Regex::new(&format!(r"@{}\b", regex::escape(old))).unwrap();
+            t = re.replace_all(&t, format!("@{new}").as_str()).into_owned();
+        }
+        t
+    };
+    eqs.iter().map(|(a, b)| ordered(swap(a), swap(b))).collect()
 }
 
 /// `n` as named in an attribute of the slot at `path`: a sibling.
@@ -1062,5 +1237,168 @@ pub struct Act<'info> {
         let typed = base
             .replace("#[account(owner = spl_stake_pool::id())]\n    pub list: AccountInfo<'info>", "pub list: Account<'info, Local>");
         assert!(diff(&kinds(base), &kinds(&typed)).iter().any(|c| c.slot() == "act.list" && c.severity == Severity::Regression));
+    }
+
+    #[test]
+    fn one_key_equality_written_another_way_is_not_removed() {
+        let base = r#"
+pub fn act(ctx: Context<Act>) -> Result<()> {}
+#[derive(Accounts)]
+pub struct Act<'info> {
+    pub marginfi_group: AccountLoader<'info, Group>,
+    #[account(constraint = bank.load()?.group == marginfi_group.key())]
+    pub bank: AccountLoader<'info, Bank>,
+    #[account(has_one = authority)]
+    pub account: AccountLoader<'info, Account>,
+    #[account(address = account.load()?.admin)]
+    pub admin: Signer<'info>,
+    pub authority: Signer<'info>,
+    #[account(constraint = user_token.mint == vault.mint)]
+    pub user_token: Account<'info, TokenAccount>,
+    pub vault: Account<'info, TokenAccount>,
+    #[account(constraint = pool.config == config.key())]
+    pub pool: Account<'info, Pool>,
+    pub config: Account<'info, Config>,
+}
+"#;
+        let head = base
+            .replace("#[account(has_one = authority)]", "#[account(has_one = admin)]")
+            .replace("#[account(address = account.load()?.admin)]\n", "")
+            .replace("pub authority: Signer", "#[account(address = account.load()?.authority)]\n    pub authority: Signer")
+            .replace("constraint = user_token.mint == vault.mint", "token::mint = vault.mint")
+            .replace("constraint = pool.config == config.key())]\n    pub pool: Account<'info, Pool>",
+                "constraint = pool.load()?.config == config.key())]\n    pub pool: AccountLoader<'info, Pool>");
+        let c = diff(&kinds(base), &kinds(&head));
+        let gone = |c: &[Change]| c.iter().filter(|c| c.severity == Severity::Regression).map(|c| c.slot()).collect::<Vec<_>>();
+        assert_eq!(gone(&c), Vec::<String>::new(), "{c:?}");
+
+        // Held only by a renamed slot of the same type: a warning to look at.
+        let renamed = base
+            .replace("pub marginfi_group:", "pub group:")
+            .replace("constraint = bank.load()?.group == marginfi_group.key()", "has_one = group");
+        let c = diff(&kinds(base), &kinds(&renamed));
+        assert!(gone(&c).is_empty(), "{c:?}");
+        assert!(c.iter().any(|c| c.slot() == "act.bank" && c.message.contains("`marginfi_group` → `group`")), "{c:?}");
+
+        let changed = base.replace("address = account.load()?.admin", "address = admin_key");
+        assert!(diff(&kinds(base), &kinds(&changed)).iter().any(|c| c.slot() == "act.admin" && c.severity == Severity::Warning));
+
+        // Another key, or one branch of `||`: removed.
+        for loose in [
+            base.replace("#[account(has_one = authority)]", "").replace("pub authority: Signer", "#[account(address = account.load()?.owner)]\n    pub authority: Signer"),
+            base.replace("#[account(has_one = authority)]", "#[account(constraint = account.load()?.authority == authority.key() || open)]"),
+            base.replace("pub marginfi_group:", "pub group:").replace("constraint = bank.load()?.group == marginfi_group.key()", "has_one = other"),
+        ] {
+            assert!(!gone(&diff(&kinds(base), &kinds(&loose))).is_empty(), "{loose}");
+        }
+    }
+
+    #[test]
+    fn a_key_equality_counts_only_for_the_same_accounts() {
+        let gone = |b: &str, h: &str| diff(&kinds(b), &kinds(h)).into_iter().filter(|c| c.severity == Severity::Regression).count();
+        // `state` in `left` is not `state` in `right`.
+        let base = r#"
+pub fn act(ctx: Context<Act>) -> Result<()> {}
+#[derive(Accounts)]
+pub struct Left<'info> {
+    #[account(has_one = authority)]
+    pub state: Account<'info, State>,
+    pub authority: Signer<'info>,
+}
+#[derive(Accounts)]
+pub struct Right<'info> {
+    pub state: Account<'info, State>,
+    pub authority: Signer<'info>,
+}
+#[derive(Accounts)]
+pub struct Act<'info> {
+    pub left: Left<'info>,
+    pub right: Right<'info>,
+}
+"#;
+        let head = base
+            .replace("    #[account(has_one = authority)]\n", "")
+            .replace("pub struct Right<'info> {\n", "pub struct Right<'info> {\n    #[account(constraint = state.authority == authority.key())]\n");
+        assert_eq!(gone(base, &head), 1);
+
+        // An instruction argument is not the account of that name.
+        let base = r#"
+pub fn act(ctx: Context<Act>, expected: Pubkey) -> Result<()> {}
+#[derive(Accounts)]
+#[instruction(expected: Pubkey)]
+pub struct Act<'info> {
+    #[account(address = expected.key())]
+    pub target: UncheckedAccount<'info>,
+}
+"#;
+        let head = r#"
+pub fn act(ctx: Context<Act>) -> Result<()> {}
+#[derive(Accounts)]
+pub struct Act<'info> {
+    pub expected: UncheckedAccount<'info>,
+    #[account(constraint = target.key() == expected.key())]
+    pub target: UncheckedAccount<'info>,
+}
+"#;
+        assert_eq!(gone(base, head), 1);
+
+        // A new account of the same type standing in for a gone one is
+        // only read as a rename: a warning, never silence.
+        let base = r#"
+pub fn act(ctx: Context<Act>) -> Result<()> {}
+#[derive(Accounts)]
+pub struct Act<'info> {
+    pub old: Account<'info, Config>,
+    #[account(constraint = state.config == old.key())]
+    pub state: Account<'info, State>,
+}
+"#;
+        let head = base.replace("pub old:", "pub new:").replace("old.key()", "new.key()").replace("state.config ==", "state.other ==");
+        assert_eq!(gone(base, &head), 1);
+        let head = base.replace("pub old:", "pub new:").replace("old.key()", "new.key()");
+        let c = diff(&kinds(base), &kinds(&head));
+        assert!(c.iter().any(|c| c.slot() == "act.state" && c.severity == Severity::Warning), "{c:?}");
+
+        // An `Option` composite runs none of its checks when left out.
+        let base = r#"
+pub fn act(ctx: Context<Act>) -> Result<()> {}
+#[derive(Accounts)]
+pub struct Group<'info> {
+    #[account(has_one = authority)]
+    pub state: Account<'info, State>,
+    pub guard: UncheckedAccount<'info>,
+    pub authority: Signer<'info>,
+}
+#[derive(Accounts)]
+pub struct Act<'info> {
+    pub group: Group<'info>,
+}
+"#;
+        let head = base
+            .replace("    #[account(has_one = authority)]\n", "")
+            .replace("    pub guard:", "    #[account(constraint = state.authority == authority.key())]\n    pub guard:")
+            .replace("pub group: Group<'info>", "pub group: Option<Group<'info>>");
+        let c = diff(&kinds(base), &kinds(&head));
+        assert!(c.iter().any(|c| c.slot() == "act.group.state" && c.severity == Severity::Regression), "{c:?}");
+    }
+
+    #[test]
+    fn token_mint_and_authority_removed_or_changed() {
+        let base = r#"
+pub fn act(ctx: Context<Act>) -> Result<()> {}
+#[derive(Accounts)]
+pub struct Act<'info> {
+    pub mint: Account<'info, Mint>,
+    pub owner: Signer<'info>,
+    #[account(mut, token::mint = mint, token::authority = owner)]
+    pub vault: Account<'info, TokenAccount>,
+}
+"#;
+        let sev = |h: &str| diff(&kinds(base), &kinds(h)).iter().filter(|c| c.slot() == "act.vault").map(|c| c.severity).collect::<Vec<_>>();
+        assert_eq!(sev(&base.replace("token::mint = mint, ", "")), [Severity::Regression]);
+        assert_eq!(sev(&base.replace(", token::authority = owner", "")), [Severity::Regression]);
+        assert_eq!(sev(&base.replace("token::mint = mint", "token::mint = other")), [Severity::Warning]);
+        // Said as a constraint instead: the same check.
+        assert_eq!(sev(&base.replace("token::mint = mint, ", "constraint = vault.mint == mint.key(), ")), []);
     }
 }

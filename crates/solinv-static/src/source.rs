@@ -34,6 +34,12 @@ pub struct Attrs {
     pub address: bool,
     pub owner: bool,
     pub has_one: Vec<String>,
+    /// The `address`, `token::mint` and `token::authority` values, as
+    /// written (whitespace collapsed, error dropped): with `has_one` and
+    /// `constraint` they say one key equals another, in different words.
+    pub address_expr: Option<String>,
+    pub token_mint: Option<String>,
+    pub token_owner: Option<String>,
     /// Each `constraint = <expr>`, whitespace collapsed, error dropped.
     pub constraints: Vec<String>,
     /// `close = <target>`: when the instruction ends Anchor sends the
@@ -446,7 +452,7 @@ impl SourceKinds {
         for (file, src) in &stripped {
             for c in handler.captures_iter(src) {
                 let Some(ctx) = ident.captures_iter(&c[2]).last() else { continue };
-                walk(&structs, &ctx[1], &c[1], "", &mut map, 0);
+                walk(&structs, &ctx[1], &c[1], "", false, &mut map, 0);
                 let end = c.get(0).unwrap().end();
                 // A declaration with no body (`fn f(..) -> R;` in a trait) has none
                 // to read: never the next item's.
@@ -570,7 +576,6 @@ fn read_attrs(text: &str, expr: &str) -> Attrs {
             ("mut", _) => a.mutable = true,
             ("signer", _) => a.signer = true,
             ("seeds", Some(_)) => a.seeds = true,
-            ("address", Some(_)) => a.address = true,
             ("owner", Some(_)) => a.owner = true,
             ("close", Some(v)) => a.close = Some(v[..error_cut(v)].split_whitespace().collect()),
             ("has_one", Some(v)) => {
@@ -578,9 +583,18 @@ fn read_attrs(text: &str, expr: &str) -> Attrs {
                     v.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
                 a.has_one.push(target);
             }
-            ("constraint", Some(_)) => {
+            ("constraint" | "address" | "token::mint" | "token::authority", Some(_)) => {
                 let at = r.start + eq.unwrap() + 1..r.end;
-                a.constraints.push(normalise_expr(&text[at.clone()], &expr[at]));
+                let v = normalise_expr(&text[at.clone()], &expr[at]);
+                match bare {
+                    "constraint" => a.constraints.push(v),
+                    "address" => {
+                        a.address = true;
+                        a.address_expr = Some(v);
+                    }
+                    "token::mint" => a.token_mint = Some(v),
+                    _ => a.token_owner = Some(v),
+                }
             }
             _ => {}
         }
@@ -654,7 +668,7 @@ fn normalise_expr(blanked: &str, v: &str) -> String {
 /// at its top-level `&&`, wrapping parentheses removed, recursively. A
 /// part with a top-level `||` contributes nothing, since one branch
 /// alone can pass.
-fn clauses(v: &str) -> Vec<&str> {
+pub(crate) fn clauses(v: &str) -> Vec<&str> {
     let v = v.trim();
     let b = v.as_bytes();
     // `( … )` around the whole value, matched at its own depth.
@@ -725,11 +739,14 @@ fn full_type(ty: &str) -> String {
     t.to_string()
 }
 
+/// `optional`: under an `Option<…>` composite, so every slot in it may
+/// be left out.
 fn walk(
     structs: &HashMap<String, Vec<RawField>>,
     name: &str,
     ix: &str,
     prefix: &str,
+    optional: bool,
     out: &mut HashMap<(String, String), Slot>,
     depth: usize,
 ) {
@@ -741,7 +758,7 @@ fn walk(
         let path = if prefix.is_empty() { f.name.clone() } else { format!("{prefix}.{}", f.name) };
         let kind = match &f.field {
             Field::Composite(inner) => {
-                walk(structs, inner, ix, &path, out, depth + 1);
+                walk(structs, inner, ix, &path, optional || f.optional, out, depth + 1);
                 continue;
             }
             Field::Kind(k) => Some(*k),
@@ -758,7 +775,7 @@ fn walk(
                 kind,
                 ty: f.ty.clone(),
                 full_ty: f.full_ty.clone(),
-                optional: f.optional,
+                optional: optional || f.optional,
                 attrs: f.attrs.clone(),
                 file: f.file.clone(),
                 line: f.line,

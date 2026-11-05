@@ -95,5 +95,13 @@ Two kinds of false removal found while reading are fixed:
   reverse, is now a warning (stakenet's `address = get_validator_list(&config)?`). An address the
   caller passes, or a typed account in place of `owner`, is still a removal.
 
+- One relation written three ways is now one check ([diff.md](diff.md)): of the 11 such reports
+  in the sample, 8 are no longer reported — 6 moved between `has_one`, `address` and
+  `constraint ==` (three with `marginfi_group` renamed `group`, which is reported as a warning
+  naming the rename), one `Account` made `AccountLoader` with `.load()?` added, and one
+  `constraint = a.mint == b.mint` made `token::mint = b.mint`. The other 3 changed which field
+  or which account type, and are still removals. Re-run on the same 40: **32 reports, 5 of them
+  real** — about 1 in 6.
+
 `x::id()` rewritten as `x::ID` (cp-swap's anchor-0.31 upgrade) is still a removal: Rust does not
 make the two the same.

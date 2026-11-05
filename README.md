@@ -141,7 +141,7 @@ binary of solinv built for that tag. The action uses that binary only after
 `gh attestation verify` confirms solinv's own release workflow built it from that exact commit;
 otherwise (another runner OS, or a commit without a release) it compiles solinv, about 2 minutes.
 
-- `@v0` follows the latest `v0.x` release. To pin, use a release tag (`@v0.1.3`) or its commit.
+- `@v0` follows the latest `v0.x` release. To pin, use a release tag (`@v0.1.4`) or its commit.
 - `program-src:` lists the programs to compare instead, one path per line (one in a directory
   not named `programs/`, or only some of them). A path that is gone fails.
 - A program deleted by the change, or one left with no account struct, fails the job: every check
@@ -151,15 +151,15 @@ otherwise (another runner OS, or a commit without a release) it compiles solinv,
 The CLI (not on crates.io yet; pin a release tag):
 
 ```bash
-cargo install --git https://github.com/psyto/solinv --tag v0.1.3 solinv-cli
+cargo install --git https://github.com/psyto/solinv --tag v0.1.4 solinv-cli
 ```
 
 In your Crucible fuzz harness:
 
 ```toml
 [dependencies]
-solinv-fuzz = { git = "https://github.com/psyto/solinv", tag = "v0.1.3" }
-solinv-core = { git = "https://github.com/psyto/solinv", tag = "v0.1.3" }
+solinv-fuzz = { git = "https://github.com/psyto/solinv", tag = "v0.1.4" }
+solinv-core = { git = "https://github.com/psyto/solinv", tag = "v0.1.4" }
 crucible-test-context = { git = "https://github.com/asymmetric-research/crucible", tag = "v0.1.0" }
 ```
 ```rust

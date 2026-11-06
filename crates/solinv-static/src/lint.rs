@@ -25,6 +25,9 @@ pub enum Kind {
     /// A `fallback` that accepts the SPL Execute discriminator and returns
     /// without running `execute`'s checks.
     HookFallbackSkipsExecute,
+    /// An entry PDA created or written under a gate (a registry checked
+    /// against a signer) that its seeds do not name (#18).
+    EntryNotScopedToGate,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -45,6 +48,19 @@ pub fn read(dir: &Path) -> Result<Vec<Finding>> {
 
 pub fn parse_files(files: &[(String, String)]) -> Vec<Finding> {
     let mut out = Vec::new();
+    for (ix, entry, gate, file, line) in crate::source::SourceKinds::parse_files(files).unscoped_entries() {
+        out.push(Finding {
+            kind: Kind::EntryNotScopedToGate,
+            function: ix.clone(),
+            message: format!(
+                "`{ix}` writes `{entry}` under `{gate}`'s authority, but `{entry}`'s seeds do not name \
+                 `{gate}`: every `{gate}` writes the same addresses, so an entry made under one is found \
+                 under another (put `{gate}` in the seeds)"
+            ),
+            file,
+            line,
+        });
+    }
     for (file, src) in files {
         let text = strip_comments(src);
         signer_seeds(file, &text, &mut out);
@@ -75,7 +91,7 @@ pub fn diff(base: &[Finding], head: &[Finding]) -> Vec<crate::diff::Change> {
         .filter(|f| !seen.contains(&key(f)))
         .map(|f| crate::diff::Change {
             severity: match f.kind {
-                Kind::SignerSeedsWithoutBump => crate::diff::Severity::Warning,
+                Kind::SignerSeedsWithoutBump | Kind::EntryNotScopedToGate => crate::diff::Severity::Warning,
                 Kind::HookExecuteUnreachable | Kind::HookFallbackSkipsExecute => crate::diff::Severity::Regression,
             },
             ix: f.function.clone(),
@@ -507,6 +523,68 @@ mod tests {
 
     fn hook(attr: &str, fallback: &str) -> Vec<Finding> {
         findings(&HOOK.replace("ATTR", attr).replace("FALLBACK", fallback))
+    }
+
+    const REGISTRY: &str = r#"
+        #[program]
+        pub mod kyc {
+            pub fn add_to_whitelist(ctx: Context<AddToWhitelist>, params: P) -> Result<()> { Ok(()) }
+        }
+        #[derive(Accounts)]
+        #[instruction(params: P)]
+        pub struct AddToWhitelist<'info> {
+            #[account(mut)]
+            pub authority: Signer<'info>,
+            #[account(
+                seeds = [KycRegistry::SEED_PREFIX, registry.mint.as_ref()],
+                bump,
+                has_one = authority,
+            )]
+            pub registry: Account<'info, KycRegistry>,
+            #[account(
+                init,
+                payer = authority,
+                space = 8 + WhitelistEntry::INIT_SPACE,
+                SEEDS
+                bump,
+            )]
+            pub whitelist_entry: Account<'info, WhitelistEntry>,
+            pub system_program: Program<'info, System>,
+        }
+    "#;
+
+    #[test]
+    fn entry_not_scoped_to_its_registry_is_reported() {
+        let f = findings(&REGISTRY.replace("SEEDS", "seeds = [WhitelistEntry::SEED_PREFIX, params.wallet.as_ref()],"));
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert_eq!(f[0].kind, Kind::EntryNotScopedToGate);
+        assert_eq!(f[0].function, "add_to_whitelist");
+        let f = findings(&REGISTRY.replace(
+            "SEEDS",
+            "seeds = [WhitelistEntry::SEED_PREFIX, registry.key().as_ref(), params.wallet.as_ref()],",
+        ));
+        assert!(f.is_empty(), "{f:?}");
+        // The gate written on the signer instead.
+        let src = REGISTRY
+            .replace("has_one = authority,", "")
+            .replace("#[account(mut)]\n            pub authority", "#[account(mut, constraint = authority.key() == registry.authority @ E::X)]\n            pub authority")
+            .replace("SEEDS", "seeds = [WhitelistEntry::SEED_PREFIX, params.wallet.as_ref()],");
+        assert_eq!(findings(&src).len(), 1, "{:?}", findings(&src));
+    }
+
+    #[test]
+    fn singleton_gates_and_signer_owned_entries_pass() {
+        // A config at a constant address has no peers.
+        let src = REGISTRY
+            .replace("seeds = [KycRegistry::SEED_PREFIX, registry.mint.as_ref()],", "seeds = [b\"config\"],")
+            .replace("SEEDS", "seeds = [b\"entry\", params.wallet.as_ref()],");
+        assert!(findings(&src).is_empty());
+        // An entry seeded by the signer is the signer's own.
+        let src = REGISTRY.replace("SEEDS", "seeds = [b\"entry\", authority.key().as_ref()],");
+        assert!(findings(&src).is_empty());
+        // Seeded by what the registry is derived from (its mint).
+        let src = REGISTRY.replace("SEEDS", "seeds = [b\"entry\", registry.mint.as_ref(), params.wallet.as_ref()],");
+        assert!(findings(&src).is_empty(), "{:?}", findings(&src));
     }
 
     #[test]

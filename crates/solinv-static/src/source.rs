@@ -287,6 +287,111 @@ impl SourceKinds {
         })
     }
 
+    /// Entry PDAs written under a gate their seeds do not name (#18):
+    /// in one instruction, a data account `gate` checked against a signer
+    /// (`has_one = <signer>`, or a keyed `constraint` naming both), one of
+    /// many (no seeds, or seeds that are not all constants), and a data
+    /// account `entry` created or written there whose `seeds` carry a
+    /// non-constant but name neither `gate`, nor what `gate` is derived
+    /// from or tied to, nor the signer. Every gate's authority writes into
+    /// the same addresses, so one gate's entry is found by another's
+    /// reader. A written (not created) entry with a `has_one` or keyed
+    /// `constraint` naming the gate is checked against it and passes.
+    /// Returns (instruction, entry, gate, file, line).
+    pub fn unscoped_entries(&self) -> Vec<(String, String, String, String, usize)> {
+        let data = |s: &Slot| {
+            s.kind == Some(SlotKind::Typed)
+                && matches!(s.ty.as_str(), "Account" | "AccountLoader" | "InterfaceAccount")
+        };
+        let mut ixs: Vec<&String> = self.map.keys().map(|(i, _)| i).collect();
+        ixs.sort();
+        ixs.dedup();
+        let mut out = Vec::new();
+        for ix in ixs {
+            let slots: Vec<(&String, &Slot)> =
+                self.map.iter().filter(|((i, p), _)| i == ix && !p.contains('.')).map(|((_, p), s)| (p, s)).collect();
+            let is_signer = |n: &str| {
+                slots.iter().any(|(p, s)| p.as_str() == n && (s.ty == "Signer" || s.attrs.signer))
+            };
+            // Every keyed comparison in the instruction (`has_one`, a keyed
+            // `constraint` on any slot, an `assert_keys_eq!`, a handler
+            // `require_keys_eq!`): the slots it names together.
+            let mut compared: Vec<Vec<String>> = Vec::new();
+            for (p, s) in &slots {
+                let a = &s.attrs;
+                compared.extend(a.has_one.iter().map(|n| vec![(*p).clone(), n.clone()]));
+                compared.extend(a.keyed_constraints.iter().cloned());
+                compared.extend(a.validate_keys.iter().cloned());
+                compared.extend(a.body_keys.iter().cloned());
+            }
+            for (gp, g) in &slots {
+                // A token account or mint is checked against its owner, not
+                // a registry that writes entries for others.
+                if !data(g) || g.optional || g.full_ty.contains("TokenAccount") || g.full_ty.contains("Mint") {
+                    continue;
+                }
+                let ga = &g.attrs;
+                let signer = compared
+                    .iter()
+                    .filter(|c| c.iter().any(|n| n == gp.as_str()))
+                    .find_map(|c| c.iter().find(|n| is_signer(n)));
+                let Some(signer) = signer else { continue };
+                // A singleton gate (seeds of constants only) has no peers.
+                if ga.seeds && ga.seed_names.iter().all(|n| n == "::") {
+                    continue;
+                }
+                // What scopes an entry to this gate: the gate, what its
+                // seeds or `has_one`s name, or the signer itself.
+                let mut scope: Vec<&str> = vec![gp.as_str(), signer.as_str()];
+                scope.extend(ga.seed_names.iter().chain(&ga.has_one).filter(|n| *n != "::").map(String::as_str));
+                for (ep, e) in &slots {
+                    if ep == gp || !data(e) {
+                        continue;
+                    }
+                    let ea = &e.attrs;
+                    if !ea.seeds || !(ea.init || ea.init_if_needed || ea.mutable) {
+                        continue;
+                    }
+                    if !ea.seed_names.iter().any(|n| n != "::") {
+                        continue;
+                    }
+                    if ea.seed_names.iter().any(|n| scope.contains(&n.as_str())) {
+                        continue;
+                    }
+                    // An entry about a subject the caller picks: a seed from
+                    // an instruction argument (`params.wallet`) or from an
+                    // account that is neither a signer nor program data
+                    // (`wallet: UncheckedAccount`).
+                    // Seeds read from the entry itself (`entry.wallet`) also
+                    // let the caller pick which entry.
+                    let subject = ea.seed_names.iter().any(|n| {
+                        n != "::"
+                            && (n == ep.as_str() || match slots.iter().find(|(p, _)| p.as_str() == n) {
+                                None => true,
+                                Some((_, t)) => {
+                                    !(t.ty == "Signer" || t.attrs.signer)
+                                        && matches!(t.ty.as_str(), "AccountInfo" | "UncheckedAccount" | "SystemAccount")
+                                }
+                            })
+                    });
+                    if !subject {
+                        continue;
+                    }
+                    let checked = ea.has_one.iter().any(|n| n == gp.as_str())
+                        || ea.keyed_constraints.iter().any(|c| c.iter().any(|n| n == gp.as_str()))
+                        || ea.constraints.iter().any(|c| c.contains(&format!("{gp}.key()")));
+                    if !ea.init && !ea.init_if_needed && checked {
+                        continue;
+                    }
+                    out.push((ix.clone(), (*ep).clone(), (*gp).clone(), e.file.clone(), e.line));
+                }
+            }
+        }
+        out.sort();
+        out.dedup();
+        out
+    }
+
     /// The account lists as an IDL would give them, read from source
     /// alone, for programs with no IDL to hand (#11): signer from `Signer`
     /// or `#[account(signer)]`, writable from `mut` / `init`, a PDA from

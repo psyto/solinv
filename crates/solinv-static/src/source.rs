@@ -336,12 +336,18 @@ impl SourceKinds {
                 let with_gate: Vec<&Vec<String>> = compared.iter().filter(|c| c.iter().any(|n| n == gp.as_str())).collect();
                 let Some(signer) = with_gate.iter().find_map(|c| c.iter().find(|n| is_signer(n))) else { continue };
                 // A singleton gate (seeds of constants only, or a constant
-                // address) has no peers; a gate seeded by its signer is that
-                // signer's own account, not a registry for others.
+                // address) has no peers.
                 if (ga.seeds && ga.seed_names.iter().all(|n| n == "::"))
                     || (ga.address && ga.address_names.iter().all(|n| n == "::"))
-                    || ga.seed_names.contains(signer)
                 {
+                    continue;
+                }
+                // A gate seeded by its signer is read as that signer's own
+                // account (a margin account writing a shared market, a user
+                // creating an order), not a registry for others. Known gap: a
+                // registry per authority (`[b"registry", authority]`) is
+                // skipped too; telling the two apart needs argument types.
+                if ga.seed_names.contains(signer) {
                     continue;
                 }
                 // What scopes an entry to this gate: the gate, the signer,

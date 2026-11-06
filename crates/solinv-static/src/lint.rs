@@ -613,6 +613,11 @@ mod tests {
             #[account(init, payer = user, space = 8, seeds = [crate::seeds::ENTRY, pool.key().as_ref()], bump)]\npub a: Account<'info, A>,\n\
             #[account(init, payer = user, token::mint = m, token::authority = pool, seeds = [b\"v\", params.wallet.as_ref()], bump)]\npub v: InterfaceAccount<'info, TokenAccount>,"));
         assert!(f.is_empty(), "{f:?}");
+        // Known gap: a registry per authority creating global entries is
+        // read as the authority's own account and not reported.
+        let f = ix(&format!("{signer}#[account(seeds = [b\"registry\", user.key().as_ref()], bump, has_one = user)]\npub registry: Account<'info, Reg>,\n\
+            #[account(init, payer = user, space = 8, seeds = [b\"wl\", params.wallet.as_ref()], bump)]\npub entry: Account<'info, Entry>,"));
+        assert!(f.is_empty(), "{f:?}");
         // A registry keyed by one argument field, an entry by another: still unscoped.
         let f = ix(&format!("{signer}#[account(seeds = [b\"reg\", params.registry_id.as_ref()], bump, has_one = user)]\npub registry: Account<'info, Reg>,\n\
             #[account(init, payer = user, space = 8, seeds = [b\"wl\", params.wallet.as_ref()], bump)]\npub entry: Account<'info, Entry>,"));

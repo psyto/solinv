@@ -8,6 +8,10 @@ the declaration, so when the declaration goes the check goes too, and
 nothing else fails. `solinv diff` compares two versions of a program's
 source, slot by slot, and names every check that is gone.
 
+A native or Pinocchio program has no declaration to compare. For one,
+`solinv diff` reads the checks in its code instead and warns on each one
+a change drops: [native-diff.md](native-diff.md).
+
 ```bash
 solinv diff --base-src <before> --head-src <after>            # text; exit 1 if a check is removed
 solinv diff --base-src <before> --head-src <after> --format github   # Actions annotations

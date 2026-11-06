@@ -1,4 +1,4 @@
-# solinv — catch the Anchor account check a change drops
+# solinv — catch the account check a change drops (Anchor, native, Pinocchio)
 
 Some of Solana's largest losses came down to one account nobody checked:
 [Wormhole](https://www.certik.com/blog/wormhole-bridge-exploit-incident-analysis) (Feb 2022,
@@ -11,7 +11,8 @@ check that was never written is a reviewer's job: solinv would not have caught t
 Cashio's real source, see [#8](https://github.com/psyto/solinv/issues/8)). solinv covers the other
 half: a check that *was* written down and a later change removes. In Anchor that is one type or one
 `#[account(...)]` line, enforced only while it is there — and a refactor that loosens
-`Account<'info, Vault>` to `UncheckedAccount` or deletes a `has_one` fails no test. As more
+`Account<'info, Vault>` to `UncheckedAccount` or deletes a `has_one` fails no test. In a native or
+Pinocchio program it is one `if !a.is_signer() { return Err(..) }`, and deleting it fails no test either. As more
 programs are written and refactored by AI coding agents, that kind of change gets more common and
 easier to miss: it compiles, the tests the agent wrote pass, and a one-line deletion is easy to skim
 past in a large generated diff.
@@ -22,7 +23,7 @@ stop. Apache-2.0.
 
 **Try it without installing:** paste a pull request or a program address into
 [solinv check](https://solinv-check.meowna-server.workers.dev). It runs `solinv diff` in the browser
-(solinv-static built to WebAssembly, at dec5547, v0.1.3), and for a deployed program it reads its IDL
+(solinv-static built to WebAssembly, at dec5547, v0.1.3; Anchor programs only for now), and for a deployed program it reads its IDL
 (Anchor's IDL account, or the Program Metadata program) and, for an Anchor IDL account, diffs every
 upgrade in its history. To fail every pull request in CI, or to fuzz the checks, install it (below).
 
@@ -144,8 +145,8 @@ otherwise (another runner OS, or a commit without a release) it compiles solinv,
 - `@v0` follows the latest `v0.x` release. To pin, use a release tag (`@v0.1.6`) or its commit.
 - `program-src:` lists the programs to compare instead, one path per line (one in a directory
   not named `programs/`, or only some of them). A path that is gone fails.
-- A program deleted by the change, or one left with no account struct, fails the job: every check
-  it had is gone. `fail-on-removed: false` turns every failure into a warning.
+- An Anchor program deleted by the change, or one left with no account struct, fails the job: every
+  check it had is gone. A native program deleted is a warning. `fail-on-removed: false` turns every failure into a warning.
 - In a merge queue, add `merge_group:` to `on:`; it compares with the queue's base.
 
 The CLI (not on crates.io yet; pin a release tag):

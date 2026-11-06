@@ -99,7 +99,7 @@ fn load_position(info: &AccountInfo, whirlpool: &Account<Whirlpool>, authority: 
 }
 "#;
     let h = unchecked(fns, "let p = load_position(&ctx.accounts.tick_array.to_account_info(), &ctx.accounts.whirlpool, &ctx.accounts.authority)?;");
-    assert_eq!(show("b1 disc only + user owner field", HB, &h, "swap.tick_array"), [Severity::Regression, Severity::Regression]);
+    assert_eq!(show("b1 disc only + user owner field", HB, &h, "swap.tick_array"), [Severity::Regression]);
 }
 #[test]
 fn b2_rejects_when_initialized() {
@@ -119,7 +119,7 @@ fn ensure_fresh(info: &AccountInfo, whirlpool: &Account<Whirlpool>) -> Result<()
 }
 "#;
     let h = unchecked(fns, "ensure_fresh(&ctx.accounts.tick_array, &ctx.accounts.whirlpool)?;");
-    assert_eq!(show("b2 reversed polarity", HB, &h, "swap.tick_array"), [Severity::Regression, Severity::Regression]);
+    assert_eq!(show("b2 reversed polarity", HB, &h, "swap.tick_array"), [Severity::Regression]);
 }
 #[test]
 fn b3_only_key_passed() {
@@ -134,7 +134,7 @@ fn log_swap(tick: Pubkey, whirlpool: &Account<Whirlpool>) -> Result<()> {
 }
 "#;
     let h = unchecked(fns, "log_swap(ctx.accounts.tick_array.key(), &ctx.accounts.whirlpool)?;");
-    assert_eq!(show("b3 only key passed", HB, &h, "swap.tick_array"), [Severity::Regression, Severity::Regression]);
+    assert_eq!(show("b3 only key passed", HB, &h, "swap.tick_array"), [Severity::Regression]);
 }
 #[test]
 fn b4_external_fn_same_name() {
@@ -150,7 +150,7 @@ impl Config {
 }
 "#;
     let h = unchecked(fns, "other_crate::validate(&ctx.accounts.tick_array, &ctx.accounts.whirlpool)?;");
-    assert_eq!(show("b4 external fn same name", HB, &h, "swap.tick_array"), [Severity::Regression, Severity::Regression]);
+    assert_eq!(show("b4 external fn same name", HB, &h, "swap.tick_array"), [Severity::Regression]);
 }
 #[test]
 fn b5_array_param_fn_skipped_wrong_pick() {
@@ -170,9 +170,9 @@ impl Other {
 }
 "#;
     let h = unchecked(fns, "check(&ctx.accounts.tick_array, [0u8; 32])?; let _ = &ctx.accounts.whirlpool;");
-    assert_eq!(show("b5 skipped fn", HB, &h, "swap.tick_array"), [Severity::Regression, Severity::Regression]);
+    assert_eq!(show("b5 skipped fn", HB, &h, "swap.tick_array"), [Severity::Regression]);
     let h = unchecked(fns, "check(&ctx.accounts.tick_array, ctx.accounts.whirlpool.key().to_bytes())?;");
-    assert_eq!(show("b5b skipped fn with whirlpool", HB, &h, "swap.tick_array"), [Severity::Regression, Severity::Regression]);
+    assert_eq!(show("b5b skipped fn with whirlpool", HB, &h, "swap.tick_array"), [Severity::Regression]);
 }
 #[test]
 fn b6_shadowed_alias() {
@@ -185,7 +185,7 @@ fn verify(info: &AccountInfo, w: &AccountInfo) -> Result<()> {
 }
 "#;
     let h = unchecked(fns, "let t = &ctx.accounts.tick_array;\n    let t = &ctx.remaining_accounts[0];\n    verify(t, &ctx.accounts.whirlpool)?;");
-    assert_eq!(show("b6 shadowed alias", HB, &h, "swap.tick_array"), [Severity::Regression, Severity::Regression]);
+    assert_eq!(show("b6 shadowed alias", HB, &h, "swap.tick_array"), [Severity::Regression]);
 }
 #[test]
 fn b7_dead_branch() {
@@ -198,7 +198,7 @@ fn verify(info: &AccountInfo, w: &AccountInfo) -> Result<()> {
 }
 "#;
     let h = unchecked(fns, "if false { verify(&ctx.accounts.tick_array, &ctx.accounts.whirlpool)?; }");
-    assert_eq!(show("b7 branch", HB, &h, "swap.tick_array"), [Severity::Regression, Severity::Regression]);
+    assert_eq!(show("b7 branch", HB, &h, "swap.tick_array"), [Severity::Regression]);
 }
 #[test]
 fn b8_self_transfer_guard_as_has_one() {
@@ -239,7 +239,7 @@ mod tests {
 }
 "#;
     let h = unchecked(fns, "msg!(\"{}\", assert_tick(&ctx.accounts.tick_array, &ctx.accounts.whirlpool).is_ok());");
-    assert_eq!(show("c1 cfg(test) fn and result ignored", HB, &h, "swap.tick_array"), [Severity::Regression, Severity::Regression]);
+    assert_eq!(show("c1 cfg(test) fn and result ignored", HB, &h, "swap.tick_array"), [Severity::Regression]);
 }
 #[test]
 fn c2_result_discarded() {
@@ -252,7 +252,7 @@ fn verify(info: &AccountInfo, w: &AccountInfo) -> Result<()> {
 }
 "#;
     let h = unchecked(fns, "let _ = verify(&ctx.accounts.tick_array, &ctx.accounts.whirlpool);");
-    assert_eq!(show("c2 result discarded", HB, &h, "swap.tick_array"), [Severity::Regression, Severity::Regression]);
+    assert_eq!(show("c2 result discarded", HB, &h, "swap.tick_array"), [Severity::Regression]);
 }
 #[test]
 fn d1_nested_composite() {
@@ -300,8 +300,8 @@ impl<'info> Swap<'info> {
 }
 "#;
     let h = unchecked(fns, "Self::verify(&ctx.accounts, &ctx.accounts.tick_array)?;");
-    assert_eq!(show("d2 Self::", HB, &h, "swap.tick_array"), [Severity::Regression, Severity::Regression]);
+    assert_eq!(show("d2 Self::", HB, &h, "swap.tick_array"), [Severity::Regression]);
     let h = unchecked(fns, "ctx.accounts.verify(&ctx.accounts.tick_array.to_account_info())?;");
-    assert_eq!(show("d2 method on accounts", HB, &h, "swap.tick_array"), [Severity::Regression, Severity::Regression]);
+    assert_eq!(show("d2 method on accounts", HB, &h, "swap.tick_array"), [Severity::Regression]);
 }
 

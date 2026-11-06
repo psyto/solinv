@@ -429,6 +429,30 @@ pub fn diff(base: &SourceKinds, head: &SourceKinds) -> Vec<Change> {
                     line: h.line,
                 });
             }
+        } else if b.kind == Some(SlotKind::Typed) && h.kind == Some(SlotKind::Unchecked) && b.ty != "Signer" {
+            // Loosened to `UncheckedAccount`: the checks on its data go with
+            // the type, typically into code that loads it by hand (#17).
+            // Where they went cannot be told from text, so they stay a
+            // removal, but one: the type change, listing them. A lost
+            // signature stays on its own; warnings stay.
+            let was = format!("was {}, now {}", b.ty, h.ty);
+            if let Some(at) = out[start..].iter().position(|c| c.message.starts_with(&was)) {
+                let typed = out.remove(start + at);
+                let (lost, kept): (Vec<Change>, Vec<Change>) = out.drain(start..).partition(|c| {
+                    c.severity == Severity::Regression && !c.message.contains("no longer required to sign")
+                });
+                out.extend(kept);
+                let message = match lost.is_empty() {
+                    true => typed.message,
+                    false => format!(
+                        "{}; and the checks on its data no longer read it where solinv sees them: {}. If the \
+                         handler now loads `{leaf}` itself, confirm each still runs, on every path",
+                        typed.message,
+                        lost.iter().map(|c| c.message.as_str()).collect::<Vec<_>>().join("; ")
+                    ),
+                };
+                out.push(Change { message, ..typed });
+            }
         }
     }
 
@@ -996,9 +1020,13 @@ pub struct Withdraw<'info> {
             msgs,
             vec![
                 ("depositor", "was Signer, now AccountInfo: no longer required to sign"),
-                ("vault", "was Account, now UncheckedAccount: Anchor no longer checks its owner and type"),
-                ("vault", "`has_one = depositor` removed: it no longer has to match `depositor`"),
-                ("vault", "`constraint = vault.amount > 0` removed"),
+                (
+                    "vault",
+                    "was Account, now UncheckedAccount: Anchor no longer checks its owner and type; and the \
+                     checks on its data no longer read it where solinv sees them: `has_one = depositor` \
+                     removed: it no longer has to match `depositor`; `constraint = vault.amount > 0` removed. \
+                     If the handler now loads `vault` itself, confirm each still runs, on every path"
+                ),
             ]
         );
         let vault = changes.iter().find(|c| c.path == "vault").unwrap();
@@ -1677,7 +1705,7 @@ pub struct Act<'info> {
         assert!(!c.is_empty() && c.iter().all(|c| c.severity == Severity::Warning), "{c:?}");
         // Inside a block comment it is not a doc comment.
         let block = head.replace("/// CHECK: Deprecated: kept for compatibility.", "/*\n    /// CHECK: Deprecated\n    */");
-        assert!(diff(&kinds(base), &kinds(&block)).iter().filter(|c| c.slot() == "act.old").count() > 1);
+        assert!(diff(&kinds(base), &kinds(&block)).iter().all(|c| !c.message.contains("placeholder")));
         // Kept as it is in a later version: nothing to report.
         assert!(diff(&kinds(&head), &kinds(&head)).is_empty());
         let keeps = base.replace("pub old: Account<'info, Old>,", "/// CHECK: Deprecated\n    pub old: UncheckedAccount<'info>,");
@@ -1687,9 +1715,11 @@ pub struct Act<'info> {
         // Made optional: still said.
         let opt = head.replace("pub old: UncheckedAccount<'info>", "pub old: Option<UncheckedAccount<'info>>");
         assert!(diff(&kinds(&head), &kinds(&opt)).iter().any(|c| c.slot() == "act.old" && c.message.contains("optional")));
-        // Without the comment: each check on its own.
+        // Without the comment: the loosened type, listing each check.
         let bare = head.replace("Deprecated: kept for compatibility.", "checked in the handler");
-        assert!(diff(&kinds(base), &kinds(&bare)).iter().filter(|c| c.slot() == "act.old").count() > 1);
+        let c = diff(&kinds(base), &kinds(&bare));
+        let old: Vec<_> = c.iter().filter(|c| c.slot() == "act.old").collect();
+        assert!(old.len() == 1 && old[0].message.contains("`constraint = old.pool == pool.key()` removed"), "{c:?}");
     }
 
     #[test]
@@ -1789,7 +1819,18 @@ fn peek(a: AccountInfo) -> Result<TickArray> {
             diff(&kinds(b), &kinds(h))
                 .into_iter()
                 .filter(|c| c.slot() == "swap.tick_array")
-                .map(|c| (c.severity, c.message.contains("moved there")))
+                // A loosened type carries the checks on its data: one part each.
+                .flat_map(|c| {
+                    let parts: Vec<String> = match c.message.split_once("; and the checks on its data") {
+                        Some((typed, rest)) => {
+                            let list = rest.split_once("sees them: ").unwrap().1;
+                            let list = list.rsplit_once(". If the handler").unwrap().0;
+                            std::iter::once(typed.to_string()).chain(list.split("; `").map(String::from)).collect()
+                        }
+                        None => vec![c.message.clone()],
+                    };
+                    parts.into_iter().map(move |m| (c.severity, m.contains("moved there")))
+                })
                 .collect::<Vec<_>>()
         };
         let (r, hint, bare) = (Severity::Regression, true, false);

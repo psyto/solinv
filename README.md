@@ -35,6 +35,7 @@ upgrade in its history. To fail every pull request in CI, or to fuzz the checks,
 | …in a native or Pinocchio program (a warning: what its code no longer checks) | the same; [what it reads](docs/native-diff.md) |
 | see which account checks a deployed program's upgrade dropped, without its source | `solinv diff --base-idl <audited.json> --head-idl <onchain.json>` (`anchor idl fetch`), or every upgrade at once in [solinv check](https://solinv-check.meowna-server.workers.dev); [how it decides](docs/idl-diff.md) |
 | see which instructions need a hand-checked account, before writing any harness | `solinv idl target/idl/<program>.json --src programs/<program>/src` |
+| catch a PDA signature whose seeds have no bump, or a transfer hook `execute` Token-2022 can never reach | the same two commands: `solinv idl --src` lists them under "program-wide findings", and `solinv diff` reports one a change adds |
 | get a paste-ready spec for one instruction | `solinv idl <idl> --rust <ix>` |
 | fill an `InstructionSpec` from the IDL and fixture state instead of by hand | `solinv_fuzz::Idl` → `.spec()` → `.infer_from_state()` / `.infer_candidates()` |
 | check a signer is really required | `solinv_core::invariants::signer_skip::check` |
@@ -230,7 +231,10 @@ program failed with an error that did not say why (it now reads native programs)
 found none on GitHub's runners (GNU `find` rejects a `{}` in the detector that macOS `find` lets
 through; fixed in v0.1.6, with a job that runs the detector on ubuntu),
 two setup gaps in the docs ([#7](https://github.com/psyto/solinv/issues/7)), and `check_sets`
-skipping a set whose accounts are missing without saying so ([#13](https://github.com/psyto/solinv/issues/13)). Building
+skipping a set whose accounts are missing without saying so ([#13](https://github.com/psyto/solinv/issues/13)). Two
+shapes that review, not solinv, found in our own programs are now read too: signer seeds with no bump
+(the call cannot sign), and a transfer hook whose `execute` has neither the SPL Execute discriminator
+nor a `fallback` that runs it. Building
 solinv check turned up two bugs in `anchor idl convert`'s legacy-IDL conversion — string seeds keep
 their quotes ([otter-sec/anchor#5255](https://github.com/otter-sec/anchor/issues/5255)), and
 `has_one` relations land on the wrong account ([#5256](https://github.com/otter-sec/anchor/issues/5256))

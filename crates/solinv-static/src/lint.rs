@@ -1,0 +1,456 @@
+//! Program-wide findings that belong to no account slot: a PDA signature
+//! whose seeds carry no bump, and a Token-2022 transfer hook whose
+//! `execute` the token program can never reach.
+//!
+//! Text, like the rest of this crate. A seed list is only judged once
+//! every name in it is resolved to a `let` in the same file; one built by
+//! a call (`vault.signer_seeds()`) or passed in is left alone, never
+//! guessed.
+
+use crate::source::{collect, strip_comments};
+use anyhow::{Context, Result};
+use regex::Regex;
+use std::path::Path;
+use std::sync::LazyLock;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Kind {
+    /// `invoke_signed` / `with_signer` / `new_with_signer` seeds with no
+    /// bump: `find_program_address` addresses are off the curve only with
+    /// their bump, so the signature fails.
+    SignerSeedsWithoutBump,
+    /// A transfer hook `execute` with no SPL Execute discriminator and no
+    /// `fallback` that calls it: Token-2022's Execute never runs it.
+    HookExecuteUnreachable,
+    /// A `fallback` that accepts the SPL Execute discriminator and returns
+    /// without running `execute`'s checks.
+    HookFallbackSkipsExecute,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Finding {
+    pub kind: Kind,
+    /// The enclosing function.
+    pub function: String,
+    pub message: String,
+    pub file: String,
+    pub line: usize,
+}
+
+pub fn read(dir: &Path) -> Result<Vec<Finding>> {
+    let mut files = Vec::new();
+    collect(dir, &mut files).with_context(|| format!("failed to read sources under {}", dir.display()))?;
+    Ok(parse_files(&files))
+}
+
+pub fn parse_files(files: &[(String, String)]) -> Vec<Finding> {
+    let mut out = Vec::new();
+    for (file, src) in files {
+        let text = strip_comments(src);
+        signer_seeds(file, &text, &mut out);
+        transfer_hook(file, &text, &mut out);
+    }
+    out
+}
+
+/// The findings as a section for `solinv idl --src`, or "" if none.
+pub fn render(findings: &[Finding]) -> String {
+    if findings.is_empty() {
+        return String::new();
+    }
+    let mut out = format!("\nprogram-wide findings ({}):\n", findings.len());
+    for f in findings {
+        out += &format!("  {}:{} in `{}`: {}\n", f.file, f.line, f.function, f.message);
+    }
+    out
+}
+
+/// Findings in `head` that `base` does not have, as diff changes. A hook
+/// whose `execute` stops being reachable loses every check in it, so that
+/// is a regression; a new signature without a bump fails closed, a warning.
+pub fn diff(base: &[Finding], head: &[Finding]) -> Vec<crate::diff::Change> {
+    let key = |f: &Finding| (f.kind, f.function.clone(), f.message.clone());
+    let seen: std::collections::HashSet<_> = base.iter().map(key).collect();
+    head.iter()
+        .filter(|f| !seen.contains(&key(f)))
+        .map(|f| crate::diff::Change {
+            severity: match f.kind {
+                Kind::SignerSeedsWithoutBump => crate::diff::Severity::Warning,
+                Kind::HookExecuteUnreachable | Kind::HookFallbackSkipsExecute => crate::diff::Severity::Regression,
+            },
+            ix: f.function.clone(),
+            path: String::new(),
+            message: f.message.clone(),
+            file: f.file.clone(),
+            line: f.line,
+        })
+        .collect()
+}
+
+static SIGNED_CALL: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\b(invoke_signed|new_with_signer|with_signer)\s*\(").unwrap());
+static FN_DEF: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\bfn\s+([A-Za-z_]\w*)").unwrap());
+
+fn signer_seeds(file: &str, text: &str, out: &mut Vec<Finding>) {
+    for m in SIGNED_CALL.captures_iter(text) {
+        let call = m.get(0).unwrap();
+        let open = call.end() - 1;
+        let Some(close) = matching(text, open) else { continue };
+        let args = split_top(&text[open + 1..close]);
+        // The signer seeds: the last argument of all three.
+        let Some(arg) = args.last() else { continue };
+        let before = &text[..call.start()];
+        // Names resolve to `let`s in the enclosing function only.
+        let fn_start = FN_DEF.find_iter(before).last().map_or(0, |m| m.start());
+        let Some(sets) = seed_sets(arg, &before[fn_start..], 0) else { continue };
+        if sets.iter().any(|set| !set.iter().any(|e| is_bump(e))) {
+            let function = enclosing_fn(before);
+            out.push(Finding {
+                kind: Kind::SignerSeedsWithoutBump,
+                message: format!(
+                    "`{}` signs with seeds that carry no bump ({}): a PDA from find_program_address \
+                     only signs with its bump, so this call fails",
+                    &m[1],
+                    sets.iter().map(|s| format!("[{}]", s.join(", "))).collect::<Vec<_>>().join(", ")
+                ),
+                function,
+                file: file.to_string(),
+                line: line_of(text, call.start()),
+            });
+        }
+    }
+}
+
+/// The seed sets an expression stands for (`&[&[a, b]]`, `&[seeds]`,
+/// `signer`), each as its elements, or None if any part is not a literal
+/// list reachable through `let`s.
+fn seed_sets(expr: &str, before: &str, depth: usize) -> Option<Vec<Vec<String>>> {
+    if depth > 4 {
+        return None;
+    }
+    let e = expr.trim();
+    if let Some(inner) = list(e) {
+        let items = split_top(inner);
+        // A list of seed lists, or one seed list (`invoke_signed(.., &[seeds])`
+        // where `seeds` is itself the list).
+        let mut sets = Vec::new();
+        for item in &items {
+            sets.push(seed_list(item, before, depth + 1)?);
+        }
+        return Some(sets);
+    }
+    let name = ident(e)?;
+    seed_sets(let_init(before, name)?, before, depth + 1)
+}
+
+/// One seed list's elements: `&[b"x", k.as_ref(), &[bump]]`, `&seeds[..]`,
+/// `seeds`.
+fn seed_list(expr: &str, before: &str, depth: usize) -> Option<Vec<String>> {
+    if depth > 4 {
+        return None;
+    }
+    let e = expr.trim();
+    if let Some(inner) = list(e) {
+        return Some(split_top(inner).into_iter().map(|s| s.trim().to_string()).collect());
+    }
+    let e = e.trim_start_matches('&').trim();
+    let e = e.strip_suffix("[..]").unwrap_or(e).trim();
+    let name = ident(e)?;
+    seed_list(let_init(before, name)?, before, depth + 1)
+}
+
+/// A bump element: `&[bump]`, `[x.bump]`, `&bump.to_le_bytes()`, or any
+/// element naming a bump or nonce.
+fn is_bump(e: &str) -> bool {
+    let low = e.to_ascii_lowercase();
+    if low.contains("bump") || low.contains("nonce") {
+        return true;
+    }
+    list(e.trim()).is_some_and(|inner| split_top(inner).len() == 1)
+}
+
+/// The inside of `[..]` or `&[..]` (also `&[..][..]`), if `e` is one.
+fn list(e: &str) -> Option<&str> {
+    let e = e.trim().trim_start_matches('&').trim();
+    let e = e.strip_suffix("[..]").unwrap_or(e).trim();
+    if !e.starts_with('[') {
+        return None;
+    }
+    let close = matching(e, 0)?;
+    (close == e.len() - 1).then(|| &e[1..close])
+}
+
+fn ident(e: &str) -> Option<&str> {
+    let e = e.trim();
+    (!e.is_empty() && e.chars().all(|c| c.is_alphanumeric() || c == '_') && !e.starts_with(|c: char| c.is_ascii_digit()))
+        .then_some(e)
+}
+
+/// The initializer of the closest `let name` before the call, up to its `;`.
+fn let_init<'a>(before: &'a str, name: &str) -> Option<&'a str> {
+    let re = Regex::new(&format!(r"\blet\s+(?:mut\s+)?{}\b\s*(?::[^=]*)?=", regex::escape(name))).ok()?;
+    let m = re.find_iter(before).last()?;
+    let rest = &before[m.end()..];
+    let end = top_level_semicolon(rest)?;
+    Some(&rest[..end])
+}
+
+fn top_level_semicolon(s: &str) -> Option<usize> {
+    let mut depth = 0i32;
+    for (i, c) in s.char_indices() {
+        match c {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth -= 1,
+            ';' if depth == 0 => return Some(i),
+            _ => {}
+        }
+    }
+    None
+}
+
+static EXECUTE_FN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\bpub\s+fn\s+execute\s*(<[^>]*>)?\s*\(").unwrap());
+static FALLBACK_FN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\bpub\s+fn\s+fallback\s*(<[^>]*>)?\s*\(").unwrap());
+
+fn transfer_hook(file: &str, text: &str, out: &mut Vec<Finding>) {
+    // Only an Anchor program that implements the transfer hook interface.
+    if !text.contains("#[program]") || !(text.contains("ExecuteInstruction") || text.contains("spl_transfer_hook_interface")) {
+        return;
+    }
+    let Some(exec) = EXECUTE_FN.find(text) else { return };
+    // Attributes between the previous item and `pub fn execute`.
+    let head = &text[..exec.start()];
+    let attrs_from = head.rfind(['}', ';']).map_or(0, |i| i + 1);
+    // `#[instruction(discriminator = ..)]` (Anchor 0.31+) or
+    // `#[interface(spl_transfer_hook_interface::execute)]` (0.30).
+    let attrs = &text[attrs_from..exec.start()];
+    if attrs.contains("discriminator") || attrs.contains("#[interface(") {
+        return;
+    }
+    let exec_line = line_of(text, exec.start());
+    let Some(fb) = FALLBACK_FN.find(text) else {
+        out.push(Finding {
+            kind: Kind::HookExecuteUnreachable,
+            function: "execute".into(),
+            message: "transfer hook `execute` has no `#[instruction(discriminator = \
+                      ExecuteInstruction::SPL_DISCRIMINATOR_SLICE)]` and no `fallback` dispatches to it: \
+                      Token-2022's Execute call never reaches its checks"
+                .into(),
+            file: file.to_string(),
+            line: exec_line,
+        });
+        return;
+    };
+    let Some(open) = text[fb.end()..].find('{').map(|i| fb.end() + i) else { return };
+    let Some(close) = matching(text, open) else { return };
+    let body = &text[open..=close];
+    let dispatches = body.contains("__global::execute")
+        || body.contains("process_instruction")
+        || Regex::new(r"\bexecute\s*\(").unwrap().is_match(body);
+    if !dispatches {
+        out.push(Finding {
+            kind: Kind::HookFallbackSkipsExecute,
+            function: "fallback".into(),
+            message: "`fallback` receives Token-2022's Execute but never runs `execute` \
+                      (no `__private::__global::execute` call): transfers pass without the hook's checks"
+                .into(),
+            file: file.to_string(),
+            line: line_of(text, fb.start()),
+        });
+    }
+}
+
+fn enclosing_fn(before: &str) -> String {
+    FN_DEF.captures_iter(before).last().map(|c| c[1].to_string()).unwrap_or_default()
+}
+
+fn line_of(text: &str, at: usize) -> usize {
+    text[..at].matches('\n').count() + 1
+}
+
+/// The index of the bracket closing the one at `open`.
+fn matching(s: &str, open: usize) -> Option<usize> {
+    let b = s.as_bytes();
+    let (o, c) = match b.get(open)? {
+        b'(' => (b'(', b')'),
+        b'[' => (b'[', b']'),
+        b'{' => (b'{', b'}'),
+        _ => return None,
+    };
+    let mut depth = 0;
+    let mut i = open;
+    let mut in_str = false;
+    while i < b.len() {
+        let ch = b[i];
+        if in_str {
+            if ch == b'\\' {
+                i += 1;
+            } else if ch == b'"' {
+                in_str = false;
+            }
+        } else if ch == b'"' {
+            in_str = true;
+        } else if ch == o {
+            depth += 1;
+        } else if ch == c {
+            depth -= 1;
+            if depth == 0 {
+                return Some(i);
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Split on commas outside brackets and strings; empty trailing parts dropped.
+fn split_top(s: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut depth = 0i32;
+    let mut in_str = false;
+    let mut cur = String::new();
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if in_str {
+            cur.push(c);
+            if c == '\\' {
+                if let Some(n) = chars.next() {
+                    cur.push(n);
+                }
+            } else if c == '"' {
+                in_str = false;
+            }
+            continue;
+        }
+        match c {
+            '"' => in_str = true,
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth -= 1,
+            ',' if depth == 0 => {
+                parts.push(std::mem::take(&mut cur));
+                continue;
+            }
+            _ => {}
+        }
+        cur.push(c);
+    }
+    parts.push(cur);
+    parts.into_iter().map(|p| p.trim().to_string()).filter(|p| !p.is_empty()).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn findings(src: &str) -> Vec<Finding> {
+        parse_files(&[("lib.rs".into(), src.into())])
+    }
+
+    #[test]
+    fn seeds_without_a_bump_are_reported() {
+        let f = findings(
+            r#"
+            pub fn init_list(ctx: Context<I>) -> Result<()> {
+                let mint_key = ctx.accounts.mint.key();
+                let signer_seeds: &[&[u8]] = &[b"extra-account-metas", mint_key.as_ref()];
+                create_account(
+                    CpiContext::new(a, b).with_signer(&[signer_seeds]),
+                    1, 2, ctx.program_id,
+                )?;
+                Ok(())
+            }
+            "#,
+        );
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].kind, Kind::SignerSeedsWithoutBump);
+        assert_eq!(f[0].function, "init_list");
+    }
+
+    #[test]
+    fn seeds_with_a_bump_pass() {
+        let f = findings(
+            r#"
+            fn a(ctx: Context<A>) -> Result<()> {
+                let bump = ctx.bumps.list;
+                let seeds: &[&[u8]] = &[b"list", k.as_ref(), &[bump]];
+                CpiContext::new(a, b).with_signer(&[seeds]);
+                invoke_signed(&ix, &infos, &[&[b"vault", k.as_ref(), &[ctx.bumps.vault]]])?;
+                let s = &[b"cfg".as_ref(), &[cfg_bump]];
+                let signer = &[&s[..]];
+                CpiContext::new_with_signer(p, accts, signer);
+                invoke_signed(&ix, &infos, &[&[b"auth", &[self_nonce]]])?;
+            }
+            "#,
+        );
+        assert!(f.is_empty(), "{f:?}");
+    }
+
+    #[test]
+    fn seeds_from_a_call_or_parameter_are_not_judged() {
+        let f = findings(
+            r#"
+            fn a(signer: &[&[&[u8]]]) {
+                CpiContext::new(a, b).with_signer(signer);
+                invoke_signed(&ix, &infos, &[&vault.signer_seeds()])?;
+            }
+            "#,
+        );
+        assert!(f.is_empty(), "{f:?}");
+    }
+
+    const HOOK: &str = r#"
+        use spl_transfer_hook_interface::instruction::ExecuteInstruction;
+        #[program]
+        pub mod hook {
+            use super::*;
+            ATTR
+            pub fn execute(ctx: Context<Execute>, amount: u64) -> Result<()> { check(&ctx)?; Ok(()) }
+            FALLBACK
+        }
+    "#;
+
+    fn hook(attr: &str, fallback: &str) -> Vec<Finding> {
+        findings(&HOOK.replace("ATTR", attr).replace("FALLBACK", fallback))
+    }
+
+    #[test]
+    fn hook_with_the_spl_discriminator_passes() {
+        assert!(hook("#[instruction(discriminator = ExecuteInstruction::SPL_DISCRIMINATOR_SLICE)]", "").is_empty());
+        assert!(hook("#[interface(spl_transfer_hook_interface::execute)]", "").is_empty());
+    }
+
+    #[test]
+    fn hook_without_discriminator_or_fallback_is_unreachable() {
+        let f = hook("", "");
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].kind, Kind::HookExecuteUnreachable);
+    }
+
+    #[test]
+    fn fallback_that_only_logs_is_reported() {
+        let f = hook(
+            "",
+            r#"pub fn fallback<'info>(_p: &Pubkey, _a: &'info [AccountInfo<'info>], data: &[u8]) -> Result<()> {
+                if &data[..8] == ExecuteInstruction::SPL_DISCRIMINATOR.as_slice() {
+                    msg!("execute with amount {}", 1);
+                    Ok(())
+                } else { Err(ProgramError::InvalidInstructionData.into()) }
+            }"#,
+        );
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].kind, Kind::HookFallbackSkipsExecute);
+    }
+
+    #[test]
+    fn fallback_that_dispatches_passes() {
+        let f = hook(
+            "",
+            r#"pub fn fallback<'info>(p: &Pubkey, a: &'info [AccountInfo<'info>], data: &[u8]) -> Result<()> {
+                match TransferHookInstruction::unpack(data)? {
+                    TransferHookInstruction::Execute { amount } => __private::__global::execute(p, a, &amount.to_le_bytes()),
+                    _ => Err(ProgramError::InvalidInstructionData.into()),
+                }
+            }"#,
+        );
+        assert!(f.is_empty(), "{f:?}");
+    }
+}

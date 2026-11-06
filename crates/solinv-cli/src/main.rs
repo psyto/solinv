@@ -12,7 +12,7 @@ use clap::{Parser, Subcommand};
 use serde::Deserialize;
 use std::{fs, path::PathBuf};
 
-use solinv_static::{diff, source};
+use solinv_static::{diff, lint, source};
 
 #[derive(Parser)]
 #[command(
@@ -537,7 +537,13 @@ fn main() -> Result<()> {
         }
         Commands::Mutate { action } => run_mutate(action)?,
         Commands::Diff { base_src, head_src, base_idl, head_idl, format, no_fail } => {
-            let changes = match (base_src, head_src, base_idl, head_idl) {
+            // Program-wide findings the head adds (a hook `execute` that
+            // stops being reachable, a signature without a bump).
+            let lint_changes = match (&base_src, &head_src) {
+                (Some(b), Some(h)) => lint::diff(&lint::read(b)?, &lint::read(h)?),
+                _ => Vec::new(),
+            };
+            let mut changes = match (base_src, head_src, base_idl, head_idl) {
                 (Some(base_src), Some(head_src), None, None) => {
                     let base = source::SourceKinds::read(&base_src)?;
                     let head = source::SourceKinds::read(&head_src)?;
@@ -583,6 +589,7 @@ fn main() -> Result<()> {
                 }
                 _ => anyhow::bail!("pass --base-src and --head-src, or --base-idl and --head-idl"),
             };
+            changes.extend(lint_changes);
             match format.as_str() {
                 "github" => {
                     print!("{}", diff::render_github(&changes));
@@ -624,6 +631,7 @@ fn main() -> Result<()> {
                         |ix, path| !kinds.unbound(ix, path)
                     )
                 );
+                print!("{}", lint::render(&lint::read(&dir)?));
                 return Ok(());
             };
             let raw = fs::read_to_string(&path)
@@ -652,6 +660,7 @@ fn main() -> Result<()> {
                                 |ix, path| !kinds.unbound(ix, path)
                             )
                         );
+                        print!("{}", lint::render(&lint::read(&dir)?));
                     }
                     None => print!("{}", idl.report()),
                 },

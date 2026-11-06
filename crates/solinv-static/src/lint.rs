@@ -55,7 +55,7 @@ pub fn parse_files(files: &[(String, String)]) -> Vec<Finding> {
             message: format!(
                 "`{ix}` writes `{entry}` under `{gate}`'s authority, but `{entry}`'s seeds do not name \
                  `{gate}`: every `{gate}` writes the same addresses, so an entry made under one is found \
-                 under another (put `{gate}` in the seeds)"
+                 under another (put `{gate}` in the seeds, or tie `{entry}` to it)"
             ),
             file,
             line,
@@ -585,6 +585,38 @@ mod tests {
         // Seeded by what the registry is derived from (its mint).
         let src = REGISTRY.replace("SEEDS", "seeds = [b\"entry\", registry.mint.as_ref(), params.wallet.as_ref()],");
         assert!(findings(&src).is_empty(), "{:?}", findings(&src));
+    }
+
+    fn ix(fields: &str) -> Vec<Finding> {
+        findings(&format!(
+            "#[program]\npub mod m {{ pub fn go(ctx: Context<Go>, params: P) -> Result<()> {{ Ok(()) }} }}\n\
+             #[derive(Accounts)]\n#[instruction(params: P)]\npub struct Go<'info> {{\n{fields}\n}}"
+        ))
+        .into_iter()
+        .filter(|f| f.kind == Kind::EntryNotScopedToGate)
+        .collect()
+    }
+
+    #[test]
+    fn review_shapes_for_unscoped_entries() {
+        let signer = "#[account(mut)]\npub user: Signer<'info>,\n";
+        // The gate's own constraint pins the entry (sigma settle_option).
+        let f = ix(&format!("{signer}#[account(mut, constraint = option.owner == user.key(), constraint = option.vault == vault.key())]\npub option: Account<'info, Opt>,\n\
+            #[account(mut, seeds = [b\"vault\", vault.underlying_mint.as_ref()], bump)]\npub vault: Account<'info, Vault>,"));
+        assert!(f.is_empty(), "{f:?}");
+        // A gate seeded by its signer is the signer's own (tensor margin_account).
+        let f = ix(&format!("{signer}#[account(mut, seeds = [b\"margin\", user.key().as_ref()], bump, constraint = margin.owner == user.key())]\npub margin: Account<'info, Margin>,\n\
+            /// CHECK: x\npub who: UncheckedAccount<'info>,\n#[account(mut, seeds = [b\"market\", who.key().as_ref()], bump)]\npub market: Account<'info, Market>,"));
+        assert!(f.is_empty(), "{f:?}");
+        // Module-path seeds and token accounts are not entries for a subject (klend).
+        let f = ix(&format!("{signer}#[account(has_one = user)]\npub pool: Account<'info, Pool>,\n\
+            #[account(init, payer = user, space = 8, seeds = [crate::seeds::ENTRY, pool.key().as_ref()], bump)]\npub a: Account<'info, A>,\n\
+            #[account(init, payer = user, token::mint = m, token::authority = pool, seeds = [b\"v\", params.wallet.as_ref()], bump)]\npub v: InterfaceAccount<'info, TokenAccount>,"));
+        assert!(f.is_empty(), "{f:?}");
+        // A registry keyed by one argument field, an entry by another: still unscoped.
+        let f = ix(&format!("{signer}#[account(seeds = [b\"reg\", params.registry_id.as_ref()], bump, has_one = user)]\npub registry: Account<'info, Reg>,\n\
+            #[account(init, payer = user, space = 8, seeds = [b\"wl\", params.wallet.as_ref()], bump)]\npub entry: Account<'info, Entry>,"));
+        assert_eq!(f.len(), 1, "{f:?}");
     }
 
     #[test]

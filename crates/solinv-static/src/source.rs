@@ -324,71 +324,84 @@ impl SourceKinds {
                 compared.extend(a.validate_keys.iter().cloned());
                 compared.extend(a.body_keys.iter().cloned());
             }
+            let token = |t: &Slot| t.full_ty.contains("TokenAccount") || t.full_ty.contains("Mint");
+            let slot = |n: &str| slots.iter().find(|(p, _)| p.as_str() == n).map(|(_, t)| *t);
             for (gp, g) in &slots {
                 // A token account or mint is checked against its owner, not
                 // a registry that writes entries for others.
-                if !data(g) || g.optional || g.full_ty.contains("TokenAccount") || g.full_ty.contains("Mint") {
+                if !data(g) || g.optional || token(g) {
                     continue;
                 }
                 let ga = &g.attrs;
-                let signer = compared
-                    .iter()
-                    .filter(|c| c.iter().any(|n| n == gp.as_str()))
-                    .find_map(|c| c.iter().find(|n| is_signer(n)));
-                let Some(signer) = signer else { continue };
-                // A singleton gate (seeds of constants only) has no peers.
-                if ga.seeds && ga.seed_names.iter().all(|n| n == "::") {
+                let with_gate: Vec<&Vec<String>> = compared.iter().filter(|c| c.iter().any(|n| n == gp.as_str())).collect();
+                let Some(signer) = with_gate.iter().find_map(|c| c.iter().find(|n| is_signer(n))) else { continue };
+                // A singleton gate (seeds of constants only, or a constant
+                // address) has no peers; a gate seeded by its signer is that
+                // signer's own account, not a registry for others.
+                if (ga.seeds && ga.seed_names.iter().all(|n| n == "::"))
+                    || (ga.address && ga.address_names.iter().all(|n| n == "::"))
+                    || ga.seed_names.contains(signer)
+                {
                     continue;
                 }
-                // What scopes an entry to this gate: the gate, what its
-                // seeds or `has_one`s name, or the signer itself.
+                // What scopes an entry to this gate: the gate, the signer,
+                // the slots its seeds or `has_one`s name, and every slot a
+                // keyed comparison ties to it (`vault` in `vault.pool ==
+                // pool.key()`). Arguments do not count: `params.registry_id`
+                // and `params.wallet` share only their root.
                 let mut scope: Vec<&str> = vec![gp.as_str(), signer.as_str()];
-                scope.extend(ga.seed_names.iter().chain(&ga.has_one).filter(|n| *n != "::").map(String::as_str));
+                scope.extend(
+                    ga.seed_names
+                        .iter()
+                        .chain(&ga.has_one)
+                        .chain(with_gate.iter().flat_map(|c| c.iter()))
+                        .filter(|n| *n != "::" && slot(n).is_some())
+                        .map(String::as_str),
+                );
                 for (ep, e) in &slots {
-                    if ep == gp || !data(e) {
+                    if ep == gp || !data(e) || token(e) {
                         continue;
                     }
                     let ea = &e.attrs;
-                    if !ea.seeds || !(ea.init || ea.init_if_needed || ea.mutable) {
-                        continue;
-                    }
-                    if !ea.seed_names.iter().any(|n| n != "::") {
+                    let created = ea.init || ea.init_if_needed;
+                    if !ea.seeds || !(created || ea.mutable) {
                         continue;
                     }
                     if ea.seed_names.iter().any(|n| scope.contains(&n.as_str())) {
                         continue;
                     }
-                    // An entry about a subject the caller picks: a seed from
-                    // an instruction argument (`params.wallet`) or from an
-                    // account that is neither a signer nor program data
-                    // (`wallet: UncheckedAccount`).
-                    // Seeds read from the entry itself (`entry.wallet`) also
-                    // let the caller pick which entry.
-                    let subject = ea.seed_names.iter().any(|n| {
-                        n != "::"
-                            && (n == ep.as_str() || match slots.iter().find(|(p, _)| p.as_str() == n) {
-                                None => true,
-                                Some((_, t)) => {
-                                    !(t.ty == "Signer" || t.attrs.signer)
-                                        && matches!(t.ty.as_str(), "AccountInfo" | "UncheckedAccount" | "SystemAccount")
-                                }
-                            })
-                    });
-                    if !subject {
+                    // A written entry some keyed comparison checks against
+                    // the gate (an attribute, `assert_keys_eq!` or the
+                    // handler body) is bound to it.
+                    if !created && with_gate.iter().any(|c| c.iter().any(|n| n == ep.as_str())) {
                         continue;
                     }
-                    let checked = ea.has_one.iter().any(|n| n == gp.as_str())
-                        || ea.keyed_constraints.iter().any(|c| c.iter().any(|n| n == gp.as_str()))
-                        || ea.constraints.iter().any(|c| c.contains(&format!("{gp}.key()")));
-                    if !ea.init && !ea.init_if_needed && checked {
+                    // An entry about a subject the caller picks: its own
+                    // stored field (`entry.wallet`), an account that is
+                    // neither a signer nor program data, or, for one created
+                    // here, an instruction argument.
+                    let subject = ea.seed_names.iter().any(|n| {
+                        n != "::"
+                            && (n == ep.as_str()
+                                || match slot(n) {
+                                    None => created,
+                                    Some(t) => {
+                                        !(t.ty == "Signer" || t.attrs.signer)
+                                            && matches!(t.ty.as_str(), "AccountInfo" | "UncheckedAccount" | "SystemAccount")
+                                    }
+                                })
+                    });
+                    if !subject {
                         continue;
                     }
                     out.push((ix.clone(), (*ep).clone(), (*gp).clone(), e.file.clone(), e.line));
                 }
             }
         }
+        // One struct used by two handlers is one finding.
         out.sort();
-        out.dedup();
+        let mut seen = HashSet::new();
+        out.retain(|(_, ep, gp, file, line)| seen.insert((ep.clone(), gp.clone(), file.clone(), *line)));
         out
     }
 
@@ -1432,6 +1445,8 @@ fn read_attrs(text: &str, expr: &str) -> Attrs {
             .captures_iter(s)
             .filter_map(|c| c.get(1).or(c.get(2)))
             .filter(|m| !matches!(expr.as_bytes().get(at + m.end()), Some(b'"' | b'\'' | b'#')))
+            // The head of a module path (`crate::seeds::X`) names no slot.
+            .filter(|m| !s[m.end()..].trim_start().starts_with("::"))
             .map(|m| m.as_str().to_string())
             .collect();
         if constant.is_match(s) {

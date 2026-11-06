@@ -102,8 +102,9 @@ fn signer_seeds(file: &str, text: &str, out: &mut Vec<Finding>) {
         let before = &text[..call.start()];
         // Names resolve to `let`s in the enclosing function only.
         let fn_start = FN_DEF.find_iter(before).last().map_or(0, |m| m.start());
-        let Some(sets) = seed_sets(arg, &before[fn_start..], 0) else { continue };
-        if sets.iter().any(|set| !set.iter().any(|e| is_bump(e))) {
+        let scope = &before[fn_start..];
+        let Some(sets) = seed_sets(arg, scope, 0) else { continue };
+        if sets.iter().any(|set| !set.iter().any(|e| is_bump(e, scope))) {
             let function = enclosing_fn(before);
             out.push(Finding {
                 kind: Kind::SignerSeedsWithoutBump,
@@ -140,7 +141,8 @@ fn seed_sets(expr: &str, before: &str, depth: usize) -> Option<Vec<Vec<String>>>
         return Some(sets);
     }
     let name = ident(e)?;
-    seed_sets(let_init(before, name)?, before, depth + 1)
+    let (init, earlier) = let_init(before, name)?;
+    seed_sets(init, earlier, depth + 1)
 }
 
 /// One seed list's elements: `&[b"x", k.as_ref(), &[bump]]`, `&seeds[..]`,
@@ -156,17 +158,48 @@ fn seed_list(expr: &str, before: &str, depth: usize) -> Option<Vec<String>> {
     let e = e.trim_start_matches('&').trim();
     let e = e.strip_suffix("[..]").unwrap_or(e).trim();
     let name = ident(e)?;
-    seed_list(let_init(before, name)?, before, depth + 1)
+    let (init, earlier) = let_init(before, name)?;
+    seed_list(init, earlier, depth + 1)
 }
 
-/// A bump element: `&[bump]`, `[x.bump]`, `&bump.to_le_bytes()`, or any
-/// element naming a bump or nonce.
-fn is_bump(e: &str) -> bool {
-    let low = e.to_ascii_lowercase();
-    if low.contains("bump") || low.contains("nonce") {
+/// A bump element: `&[bump]`, `[x.bump]`, `&bump.to_le_bytes()`, any
+/// element naming a bump or nonce outside a string literal, or a name
+/// (`&b`) bound by a `let` to one of those.
+fn is_bump(e: &str, before: &str) -> bool {
+    let code: String = split_strings(e);
+    let low = code.to_ascii_lowercase();
+    if low.contains("bump") || low.contains("nonce") || low.contains("from_ref(") {
         return true;
     }
-    list(e.trim()).is_some_and(|inner| split_top(inner).len() == 1)
+    if list(e.trim()).is_some_and(|inner| split_top(inner).len() == 1) {
+        return true;
+    }
+    let bare = e.trim().trim_start_matches('&').trim();
+    match ident(bare).and_then(|n| let_init(before, n)) {
+        Some((init, earlier)) => is_bump(init, earlier),
+        None => false,
+    }
+}
+
+/// `e` with the contents of its string literals removed.
+fn split_strings(e: &str) -> String {
+    let mut out = String::new();
+    let mut in_str = false;
+    let mut chars = e.chars();
+    while let Some(c) = chars.next() {
+        if in_str {
+            if c == '\\' {
+                chars.next();
+            } else if c == '"' {
+                in_str = false;
+            }
+        } else if c == '"' {
+            in_str = true;
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// The inside of `[..]` or `&[..]` (also `&[..][..]`), if `e` is one.
@@ -186,13 +219,15 @@ fn ident(e: &str) -> Option<&str> {
         .then_some(e)
 }
 
-/// The initializer of the closest `let name` before the call, up to its `;`.
-fn let_init<'a>(before: &'a str, name: &str) -> Option<&'a str> {
+/// The initializer of the closest `let name` before the call, up to its
+/// `;`, and the text before that `let` (where names in the initializer
+/// resolve, so `let seeds = &[&seeds[..]];` reads the earlier `seeds`).
+fn let_init<'a>(before: &'a str, name: &str) -> Option<(&'a str, &'a str)> {
     let re = Regex::new(&format!(r"\blet\s+(?:mut\s+)?{}\b\s*(?::[^=]*)?=", regex::escape(name))).ok()?;
     let m = re.find_iter(before).last()?;
     let rest = &before[m.end()..];
     let end = top_level_semicolon(rest)?;
-    Some(&rest[..end])
+    Some((&rest[..end], &before[..m.start()]))
 }
 
 fn top_level_semicolon(s: &str) -> Option<usize> {
@@ -208,54 +243,115 @@ fn top_level_semicolon(s: &str) -> Option<usize> {
     None
 }
 
-static EXECUTE_FN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\bpub\s+fn\s+execute\s*(<[^>]*>)?\s*\(").unwrap());
-static FALLBACK_FN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\bpub\s+fn\s+fallback\s*(<[^>]*>)?\s*\(").unwrap());
+static AMOUNT_ARG: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\bamount\s*:\s*u64\b").unwrap());
+static PUB_FN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\bpub\s+fn\s+([A-Za-z_]\w*)\b").unwrap());
 
 fn transfer_hook(file: &str, text: &str, out: &mut Vec<Finding>) {
-    // Only an Anchor program that implements the transfer hook interface.
-    if !text.contains("#[program]") || !(text.contains("ExecuteInstruction") || text.contains("spl_transfer_hook_interface")) {
+    // An Anchor program that implements the transfer hook interface: it
+    // builds the ExtraAccountMetaList and names the Execute instruction,
+    // not one that only imports a CPI helper.
+    let Some(prog) = text.find("#[program]") else { return };
+    if !text.contains("ExtraAccountMetaList")
+        || !(text.contains("ExecuteInstruction") || text.contains("TransferHookInstruction"))
+    {
         return;
     }
-    let Some(exec) = EXECUTE_FN.find(text) else { return };
-    // Attributes between the previous item and `pub fn execute`.
-    let head = &text[..exec.start()];
-    let attrs_from = head.rfind(['}', ';']).map_or(0, |i| i + 1);
-    // `#[instruction(discriminator = ..)]` (Anchor 0.31+) or
-    // `#[interface(spl_transfer_hook_interface::execute)]` (0.30).
-    let attrs = &text[attrs_from..exec.start()];
-    if attrs.contains("discriminator") || attrs.contains("#[interface(") {
-        return;
+    // The `#[program]` module's body.
+    let Some(open) = text[prog..].find('{').map(|i| prog + i) else { return };
+    let Some(close) = matching(text, open) else { return };
+    let mut handler = None;
+    let mut fallback = None;
+    for c in PUB_FN.captures_iter(&text[open..close]) {
+        let m = c.get(0).unwrap();
+        let at = open + m.start();
+        let name = c[1].to_string();
+        // `#[instruction(discriminator = ..)]` (Anchor 0.31+) or
+        // `#[interface(spl_transfer_hook_interface::execute)]` (0.30) on
+        // any handler: Token-2022's Execute is routed to it.
+        let attrs = attrs_before(text, at);
+        if attrs.contains("discriminator") || attrs.contains("#[interface(") {
+            return;
+        }
+        if name == "fallback" {
+            fallback = Some(at);
+            continue;
+        }
+        // The handler Execute should reach: one taking the amount.
+        let params = text[open + m.end()..close]
+            .find('(')
+            .map(|i| open + m.end() + i)
+            .and_then(|p| matching(text, p).map(|q| &text[p..q]));
+        if handler.is_none() && params.is_some_and(|p| AMOUNT_ARG.is_match(p)) {
+            handler = Some((name, at));
+        }
     }
-    let exec_line = line_of(text, exec.start());
-    let Some(fb) = FALLBACK_FN.find(text) else {
+    let Some((name, at)) = handler else { return };
+    let Some(fb) = fallback else {
         out.push(Finding {
             kind: Kind::HookExecuteUnreachable,
-            function: "execute".into(),
-            message: "transfer hook `execute` has no `#[instruction(discriminator = \
-                      ExecuteInstruction::SPL_DISCRIMINATOR_SLICE)]` and no `fallback` dispatches to it: \
-                      Token-2022's Execute call never reaches its checks"
-                .into(),
+            function: name.clone(),
+            message: format!(
+                "transfer hook `{name}` has no `#[instruction(discriminator = \
+                 ExecuteInstruction::SPL_DISCRIMINATOR_SLICE)]` and no `fallback` dispatches to it: \
+                 Token-2022's Execute call never reaches its checks"
+            ),
             file: file.to_string(),
-            line: exec_line,
+            line: line_of(text, at),
         });
         return;
     };
-    let Some(open) = text[fb.end()..].find('{').map(|i| fb.end() + i) else { return };
-    let Some(close) = matching(text, open) else { return };
-    let body = &text[open..=close];
-    let dispatches = body.contains("__global::execute")
+    let Some(b_open) = text[fb..close].find('{').map(|i| fb + i) else { return };
+    let Some(b_close) = matching(text, b_open) else { return };
+    let body = &text[b_open..=b_close];
+    let dispatches = body.contains("__global::")
         || body.contains("process_instruction")
-        || Regex::new(r"\bexecute\s*\(").unwrap().is_match(body);
+        || Regex::new(&format!(r"\b{}\s*\(", regex::escape(&name))).unwrap().is_match(body);
     if !dispatches {
         out.push(Finding {
             kind: Kind::HookFallbackSkipsExecute,
             function: "fallback".into(),
-            message: "`fallback` receives Token-2022's Execute but never runs `execute` \
-                      (no `__private::__global::execute` call): transfers pass without the hook's checks"
-                .into(),
+            message: format!(
+                "`fallback` receives Token-2022's Execute but never runs `{name}` \
+                 (no `__private::__global::{name}` call): transfers pass without the hook's checks"
+            ),
             file: file.to_string(),
-            line: line_of(text, fb.start()),
+            line: line_of(text, fb),
         });
+    }
+}
+
+/// The `#[...]` attributes directly above the item starting at `at`.
+fn attrs_before(text: &str, at: usize) -> &str {
+    let b = text.as_bytes();
+    let mut start = at;
+    loop {
+        let mut i = start;
+        while i > 0 && b[i - 1].is_ascii_whitespace() {
+            i -= 1;
+        }
+        if i == 0 || b[i - 1] != b']' {
+            return &text[start..at];
+        }
+        // Back to the `[` that opens this attribute.
+        let mut depth = 0;
+        let mut j = i;
+        while j > 0 {
+            j -= 1;
+            match b[j] {
+                b']' => depth += 1,
+                b'[' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if depth != 0 || j == 0 || b[j - 1] != b'#' {
+            return &text[start..at];
+        }
+        start = j - 1;
     }
 }
 
@@ -399,6 +495,7 @@ mod tests {
 
     const HOOK: &str = r#"
         use spl_transfer_hook_interface::instruction::ExecuteInstruction;
+        use spl_tlv_account_resolution::state::ExtraAccountMetaList;
         #[program]
         pub mod hook {
             use super::*;
@@ -416,6 +513,54 @@ mod tests {
     fn hook_with_the_spl_discriminator_passes() {
         assert!(hook("#[instruction(discriminator = ExecuteInstruction::SPL_DISCRIMINATOR_SLICE)]", "").is_empty());
         assert!(hook("#[interface(spl_transfer_hook_interface::execute)]", "").is_empty());
+    }
+
+    #[test]
+    fn review_probes() {
+        // Another name for the handler is still checked.
+        let src = HOOK.replace("ATTR", "").replace("FALLBACK", "").replace("pub fn execute", "pub fn transfer_hook");
+        let f = findings(&src);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].function, "transfer_hook");
+        // A program that only imports a CPI helper is not a hook.
+        let f = findings(
+            "use spl_transfer_hook_interface::onchain::add_extra_accounts_for_execute_cpi;\n\
+             #[program] mod m { pub fn execute(ctx: Context<E>, amount: u64) -> Result<()> { Ok(()) } }",
+        );
+        assert!(f.is_empty(), "{f:?}");
+        // An `execute` outside the module, and a brace in a later attribute.
+        let src = HOOK
+            .replace("ATTR", "#[instruction(discriminator = ExecuteInstruction::SPL_DISCRIMINATOR_SLICE)]\n#[access_control(check(&ctx, Foo { a: 1 }))]")
+            .replace("FALLBACK", "")
+            .replace("#[program]", "impl Foo { pub fn execute(&self, amount: u64) {} }\n#[program]");
+        assert!(findings(&src).is_empty());
+        // Nested generics on the fallback.
+        let src = HOOK.replace("ATTR", "").replace(
+            "FALLBACK",
+            "pub fn fallback<'info, T: Into<u8>>(p: &Pubkey, a: &'info [AccountInfo<'info>], d: &[u8]) -> Result<()> { __private::__global::execute(p, a, d) }",
+        );
+        assert!(findings(&src).is_empty());
+    }
+
+    #[test]
+    fn shadowed_and_renamed_bumps_pass() {
+        let f = findings(
+            r#"
+            fn a() {
+                let seeds = &[b"vault".as_ref(), &[bump]];
+                let seeds = &[&seeds[..]];
+                invoke_signed(&ix, &infos, seeds)?;
+                let b = [ctx.bumps.vault];
+                let s2 = &[b"v".as_ref(), k.as_ref(), &b];
+                invoke_signed(&ix, &infos, &[s2])?;
+                invoke_signed(&ix, &infos, &[&[b"v", core::slice::from_ref(&b)]])?;
+            }
+            "#,
+        );
+        assert!(f.is_empty(), "{f:?}");
+        // A seed literal that says "bump" is not a bump.
+        let f = findings(r#"fn a() { invoke_signed(&ix, &infos, &[&[b"bump", k.as_ref()]])?; }"#);
+        assert_eq!(f.len(), 1);
     }
 
     #[test]

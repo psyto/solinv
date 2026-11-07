@@ -22,7 +22,7 @@ on any CI runner. `action.yml` wraps it for pull requests; see the
 [README](../README.md#use-it-in-your-own-project). Live example:
 [a demo pull request](https://github.com/psyto/solinv/pull/2) that makes
 the change in [`examples/escrow-demo/diff/drop-a-check`](../examples/escrow-demo/diff/drop-a-check/lib.rs)
-and fails with both findings on the line.
+and fails with the finding on the line.
 
 ## What it reports
 

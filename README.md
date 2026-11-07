@@ -60,13 +60,15 @@ cargo run -q -p solinv-cli -- diff \
     --head-src examples/escrow-demo/diff/drop-a-check
 ```
 ```
-solinv diff: 2 removed check(s), 0 warning(s)
-REMOVED withdraw.vault (examples/escrow-demo/diff/drop-a-check/lib.rs:153): was Account, now UncheckedAccount: Anchor no longer checks its owner and type
-REMOVED withdraw.vault (examples/escrow-demo/diff/drop-a-check/lib.rs:153): `has_one = depositor` removed: it no longer has to match `depositor`
+solinv diff: 1 removed check(s), 0 warning(s)
+REMOVED withdraw.vault (examples/escrow-demo/diff/drop-a-check/lib.rs:153): was Account, now UncheckedAccount: Anchor no longer checks its owner and type; and the checks on its data no longer read it where solinv sees them: `has_one = depositor` removed: it no longer has to match `depositor`. If the handler now loads `vault` itself, confirm each still runs, on every path
 ```
 
-It exits 1, so CI fails. In a pull request the same findings appear as annotations on the changed
-line — [the demo pull request](https://github.com/psyto/solinv/pull/2) makes this change to the real program and fails with both,
+The two losses are one finding: once the vault is unchecked, its `has_one` goes with the type, and
+whether the handler now checks it by hand is the question to answer.
+
+It exits 1, so CI fails. In a pull request the same finding appears as an annotation on the changed
+line — [the demo pull request](https://github.com/psyto/solinv/pull/2) makes this change to the real program and fails with the finding (two annotations in runs before v0.1.9),
 on line 146.
 
 Second, the map of a whole program — which instructions have hand-checked accounts:
@@ -109,7 +111,7 @@ flagged instructions are the demo program's three planted account-validation bug
 | A check in vipers' `validate()` counts too | Cashio's real source, fixed → before the fix: the check its fix added is named, in both instructions ([details](docs/diff.md#checked-on)); the map marks 2 of its 26 typed accounts `t`, both validated by the program they are passed to (26 before vipers was read, [#8](https://github.com/psyto/solinv/issues/8)) |
 | …on the 11 classes of [sealevel-attacks](https://github.com/coral-xyz/sealevel-attacks) | Turning each fixed program into its insecure version: 11 of 11 caught where the check was declared, 9 of 11 where it was written in the handler (the other two change CPI seeds and zeroing code, not a check); 0 removed checks reported in the other direction ([details](docs/sealevel-attacks.md)) |
 | …on real merged pull requests | Over 1,133 merged PRs of ten public Anchor programs: two mango-v4 PRs dropped a `has_one` that an audit restored 7 and 17 days later, and solinv names each on the PR that dropped it. On a random sample of 40 removals it reported there, 5 were real loosenings and 35 the same check written another way or moved. solinv now reads `has_one` / `address` / `constraint ==` as one check and a yes/no gate swapped on the same account as a warning, which takes it to 25 reports with the same 5 real (about 1 in 5) — still expect a reviewer to clear most failures as "moved" ([details](docs/history-scan.md)) |
-| …on open pull requests | Over 121 open PRs of 13 public Anchor programs (marginfi, Orca, Squads, Meteora, OpenBook, Raydium and others), every report read against its diff: no dropped check, which is the expected answer for well-reviewed teams. Of the 48 removals, 37 were deliberate changes of meaning that a reviewer has to clear: marginfi's new borrow-order signer, openbook's `\|\| janitor`. The other 11 were checks moved into a helper, a call given one more argument, or an instruction retired. On `main`, 43 are left, 38 of them saying what the check became ("the same call with other arguments", "widened") ([details](docs/open-pr-scan.md)) |
+| …on open pull requests | Over 121 open PRs of 13 public Anchor programs (marginfi, Orca, Squads, Meteora, OpenBook, Raydium and others), every report read against its diff: no dropped check, which is the expected answer for well-reviewed teams. Of the 48 removals, 37 were deliberate changes of meaning that a reviewer has to clear: marginfi's new borrow-order signer, openbook's `\|\| janitor`. The other 11 were checks moved into a helper, a call given one more argument, or an instruction retired. Since v0.1.9, 43 are left, 38 of them saying what the check became ("the same call with other arguments", "widened") ([details](docs/open-pr-scan.md)) |
 | …and in native and Pinocchio code | Over 1,164 commits of percolator-prog, SPL Token / p-token, princeps-solana and openhl-solana: 43 warnings, 10 of them real loosenings (owner checks commented out, a signer requirement dropped, an oracle error swallowed), about 1 in 4. Checks deleted by hand from princeps-solana's vault and openhl-solana's core: 4 of 4 named ([details](docs/native-diff.md)) |
 | No noise on code that keeps its checks | Comparing Jito tip-payment, tip-distribution and Raydium cp-swap with themselves: 0 reports. Reformatting a constraint or renaming its error: 0 reports (tested) |
 | The fuzz detectors catch a check that is removed | Mutation test on the clean escrow: of the removed checks the harness reached, 5 of 6 were caught, each by the detector predicted for it — after setting aside 5 mutations that cannot change behaviour, each argued in the [report](examples/escrow-demo/campaigns/escrow-clean-report.md) (5 of 11 before) |
@@ -144,7 +146,7 @@ binary of solinv built for that tag. The action uses that binary only after
 `gh attestation verify` confirms solinv's own release workflow built it from that exact commit;
 otherwise (another runner OS, or a commit without a release) it compiles solinv, about 2 minutes.
 
-- `@v0` follows the latest `v0.x` release. To pin, use a release tag (`@v0.1.8`) or its commit.
+- `@v0` follows the latest `v0.x` release. To pin, use a release tag (`@v0.1.9`) or its commit.
 - `program-src:` lists the programs to compare instead, one path per line (one in a directory
   not named `programs/`, or only some of them). A path that is gone fails.
 - An Anchor program deleted by the change, or one left with no account struct, fails the job: every
@@ -154,15 +156,15 @@ otherwise (another runner OS, or a commit without a release) it compiles solinv,
 The CLI (not on crates.io yet; pin a release tag):
 
 ```bash
-cargo install --git https://github.com/psyto/solinv --tag v0.1.8 solinv-cli
+cargo install --git https://github.com/psyto/solinv --tag v0.1.9 solinv-cli
 ```
 
 In your Crucible fuzz harness:
 
 ```toml
 [dependencies]
-solinv-fuzz = { git = "https://github.com/psyto/solinv", tag = "v0.1.8" }
-solinv-core = { git = "https://github.com/psyto/solinv", tag = "v0.1.8" }
+solinv-fuzz = { git = "https://github.com/psyto/solinv", tag = "v0.1.9" }
+solinv-core = { git = "https://github.com/psyto/solinv", tag = "v0.1.9" }
 crucible-test-context = { git = "https://github.com/asymmetric-research/crucible", tag = "v0.1.0" }
 ```
 ```rust

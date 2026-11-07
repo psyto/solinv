@@ -150,6 +150,7 @@ pub fn diff(base: &SourceKinds, head: &SourceKinds) -> Vec<Change> {
             })
         };
         let leaf = path.rsplit('.').next().unwrap_or(path);
+        let is_slot = |n: &str| head.slot(ix, &sibling(path, n)).is_some() || base.slot(base_ix, &sibling(path, n)).is_some();
         // A Signer loosened is reported as the signature it loses, below.
         // A check moved out of the declaration into a fn the handler hands
         // the account to (orca's sparse swap: the tick arrays go to a
@@ -290,8 +291,15 @@ pub fn diff(base: &SourceKinds, head: &SourceKinds) -> Vec<Change> {
                         Severity::Warning,
                         format!("`has_one = {target}` is still declared in other words once {r} is read as a rename: confirm it is the same account"),
                     ),
-                    None => match handed(&|d| keys(d, &sibling(path, target))) {
-                        Some(d) => push(
+                    None => match (widened_has_one(head, ix, path, target, &ba.constraints, &ha.constraints), handed(&|d| keys(d, &sibling(path, target)))) {
+                        (Some((e, added)), _) => push(
+                            Severity::Regression,
+                            format!(
+                                "`has_one = {target}` widened into `constraint = {e}`: it still has to match \
+                                 `{target}`, unless `{added}` — confirm who can take that way"
+                            ),
+                        ),
+                        (None, Some(d)) => push(
                             Severity::Regression,
                             format!(
                                 "`has_one = {target}` removed: it no longer has to match `{target}`. The handler \
@@ -300,7 +308,7 @@ pub fn diff(base: &SourceKinds, head: &SourceKinds) -> Vec<Change> {
                                 handed_at(d)
                             ),
                         ),
-                        None => push(
+                        (None, None) => push(
                             Severity::Regression,
                             format!("`has_one = {target}` removed: it no longer has to match `{target}`"),
                         ),
@@ -327,6 +335,23 @@ pub fn diff(base: &SourceKinds, head: &SourceKinds) -> Vec<Change> {
                     // yes/no the state answers, not a comparison: a changed
                     // literal (`role == "admin"` → `"attacker"`) is a removal.
                     // With `||` it may let a second way through.
+                    // The old check kept as one side of a new `||` (#22): still a
+                    // loosening, said as what now gets past it.
+                    None if let Some(added) = ha.constraints.iter().filter(|e| !ba.constraints.contains(e)).find_map(|e| widened(expr, e)) => push(
+                        Severity::Regression,
+                        format!("`constraint = {expr}` widened: still checked, unless `{added}` — confirm who can take that way"),
+                    ),
+                    // The same call with other arguments (#20).
+                    None if let Some(e) = ha.constraints.iter().find(|e| {
+                        !ba.constraints.contains(e)
+                            && !used_gates.contains(*e)
+                            && args_changed(expr, e, &is_slot)
+                            // A gate swapped for another is said below.
+                            && !(yes_no(e) && !negated(expr, e) && gate_on(head, ix, path, e) && gate_on(base, base_ix, path, expr))
+                    }) => {
+                        used_gates.insert(e.clone());
+                        push(Severity::Regression, args_message(&format!("constraint = {expr}"), &format!("constraint = {e}")))
+                    }
                     None => match ha.constraints.iter().find(|e| {
                         !ba.constraints.contains(e)
                             && !used_gates.contains(*e)
@@ -383,14 +408,20 @@ pub fn diff(base: &SourceKinds, head: &SourceKinds) -> Vec<Change> {
         // only when the instruction as a whole has fewer: an alias can
         // move one to another account or to the instruction.
         let mut seen = BTreeSet::new();
+        let mut used_body: BTreeSet<&String> = BTreeSet::new();
         for check in ba.body.iter().filter(|c| seen.insert(*c)) {
             let lost = count(&ba.body, check) > count(&ha.body, check);
             if !lost || body_total(head, ix, check) >= body_total(base, base_ix, check) {
                 continue;
             }
-            match declared_instead(base, head, base_ix, ix, check, Some(path)) {
-                Some(slot) => push(Severity::Warning, moved_message(check, &slot)),
-                None => push(Severity::Regression, format!("`{check}` removed from the handler")),
+            let rewritten = ha.body.iter().find(|e| !ba.body.contains(e) && !used_body.contains(e) && args_changed(check, e, &is_slot));
+            match (declared_instead(base, head, base_ix, ix, check, Some(path)), rewritten) {
+                (Some(slot), _) => push(Severity::Warning, moved_message(check, &slot)),
+                (None, Some(e)) => {
+                    used_body.insert(e);
+                    push(Severity::Regression, args_message(check, e))
+                }
+                (None, None) => push(Severity::Regression, format!("`{check}` removed from the handler")),
             }
         }
         for check in ba.validate.iter().filter(|e| !ha.validate.contains(e)) {
@@ -466,10 +497,23 @@ pub fn diff(base: &SourceKinds, head: &SourceKinds) -> Vec<Change> {
             count(base.ix_checks(base_ix), c) > count(head.ix_checks(ix), c)
                 && body_total(head, ix, c) < body_total(base, base_ix, c)
         };
+        let is_slot = |n: &str| {
+            head.slots().iter().any(|((i, p), _)| i == ix && p.rsplit('.').next() == Some(n))
+                || base.slots().iter().any(|((i, p), _)| i == base_ix && p.rsplit('.').next() == Some(n))
+        };
+        let mut used: BTreeSet<&String> = BTreeSet::new();
         for check in base.ix_checks(base_ix).iter().filter(|c| seen.insert(*c) && lost(c)) {
-            let (severity, message) = match declared_instead(base, head, base_ix, ix, check, None) {
-                Some(slot) => (Severity::Warning, moved_message(check, &slot)),
-                None => (Severity::Regression, format!("`{check}` removed from the handler")),
+            let rewritten = head
+                .ix_checks(ix)
+                .iter()
+                .find(|e| !base.ix_checks(base_ix).contains(e) && !used.contains(e) && args_changed(check, e, &is_slot));
+            let (severity, message) = match (declared_instead(base, head, base_ix, ix, check, None), rewritten) {
+                (Some(slot), _) => (Severity::Warning, moved_message(check, &slot)),
+                (None, Some(e)) => {
+                    used.insert(e);
+                    (Severity::Regression, args_message(check, e))
+                }
+                (None, None) => (Severity::Regression, format!("`{check}` removed from the handler")),
             };
             out.push(Change { severity, ix: ix.clone(), path: String::new(), message, file: file.clone(), line });
         }
@@ -493,7 +537,239 @@ pub fn diff(base: &SourceKinds, head: &SourceKinds) -> Vec<Change> {
             });
         }
     }
+    // An instruction that now only fails (`err!(DeprecatedEndpoint)`,
+    // #21): what it checked guards nothing that runs. Its removals are
+    // one notice; a later change that revives it is compared again.
+    for ix in &head_ixs {
+        let base_ix = renamed.iter().find(|(_, n)| *n == ix).map_or(ix, |(o, _)| o);
+        if !head.disabled(ix) || base.disabled(base_ix) || !base_ixs.contains(base_ix) {
+            continue;
+        }
+        let before = out.len();
+        out.retain(|c| !(c.ix == *ix && c.severity == Severity::Regression));
+        let (file, line) = head.handler_at(ix).map_or((String::new(), 0), |(f, l)| (f.to_string(), l));
+        out.push(Change {
+            severity: Severity::Warning,
+            ix: ix.clone(),
+            path: String::new(),
+            message: format!(
+                "instruction now always fails: its handler only returns an error, so its checks guard nothing \
+                 that runs{}",
+                match before - out.len() {
+                    0 => String::new(),
+                    n => format!(" ({n} removal(s) not reported)"),
+                }
+            ),
+            file,
+            line,
+        });
+    }
     out.sort_by(|a, b| (a.severity, &a.ix, &a.path).cmp(&(b.severity, &b.ix, &b.path)));
+    out
+}
+
+/// `new` is `old` with `|| <more>` (either side, at the top level): what
+/// it now also lets through, or `None`.
+fn widened(old: &str, new: &str) -> Option<String> {
+    let parts: Vec<String> = top_ors(new).iter().map(|p| bare(p)).collect();
+    // The old one whole, or each side of its own `||`.
+    let olds: Vec<String> = match parts.iter().any(|p| *p == bare(old)) {
+        true => vec![bare(old)],
+        false => top_ors(&bare(old)).iter().map(|p| bare(p)).collect(),
+    };
+    let added: Vec<&String> = parts.iter().filter(|p| !olds.contains(p)).collect();
+    (olds.iter().all(|o| parts.contains(o)) && !added.is_empty())
+        .then(|| added.iter().map(|p| p.as_str()).collect::<Vec<_>>().join(" || "))
+}
+
+/// A `has_one = target` on `path` now written as a `constraint` whose
+/// `||` keeps that key equality as one side: (the constraint, the rest).
+fn widened_has_one(
+    head: &SourceKinds,
+    ix: &str,
+    path: &str,
+    target: &str,
+    was: &[String],
+    now: &[String],
+) -> Option<(String, String)> {
+    let leaf = path.rsplit('.').next().unwrap_or(path);
+    let want = vec![key_eq(head, ix, path, &format!("{leaf}.{target}"), &format!("{target}.key()"))];
+    now.iter().filter(|e| !was.contains(e)).find_map(|e| {
+        let parts = top_ors(e);
+        let at = parts.iter().position(|p| constraint_eqs(head, ix, path, p).as_ref() == Some(&want))?;
+        (parts.len() > 1).then(|| {
+            let rest: Vec<String> = parts.iter().enumerate().filter(|(i, _)| *i != at).map(|(_, p)| bare(p)).collect();
+            (e.clone(), rest.join(" || "))
+        })
+    })
+}
+
+/// Outer parentheses and extra spaces dropped.
+fn bare(t: &str) -> String {
+    let mut t = t.trim();
+    while t.starts_with('(') && closing_paren_at(t) == Some(t.len() - 1) {
+        t = t[1..t.len() - 1].trim();
+    }
+    t.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// An expression split at its top-level `||`.
+fn top_ors(e: &str) -> Vec<&str> {
+    let (b, mut depth, mut start, mut parts) = (e.as_bytes(), 0i32, 0usize, Vec::new());
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth -= 1,
+            b'|' if depth == 0 && b.get(i + 1) == Some(&b'|') => {
+                parts.push(&e[start..i]);
+                start = i + 2;
+                i += 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    parts.push(&e[start..]);
+    parts
+}
+
+fn args_message(old: &str, new: &str) -> String {
+    format!("`{old}` now `{new}`: the same call with other arguments — confirm they are as strict")
+}
+
+/// `new` is `old` with only arguments of fn calls changed (#20), said as
+/// such. Still a removal: an argument can switch any check off (a limit
+/// set to 0, `x` for the account through a local, `| true`), which no
+/// reading of the tokens tells apart (independent review, 10 cases):
+/// `is_signer_authorized(&a, k, false, false, true)` →
+/// `is_signer_authorized(&a, k, ALLOW_REBALANCE)`. Not when a change is
+/// outside a call's parentheses, inside a macro's (`require_keys_eq!`:
+/// those are the comparison), names an account (`is_slot`), or is a
+/// logical or comparison operator (a `|` combining flags is neither),
+/// or when every change is one literal for another, one for one (`allows(false)` → `allows(true)`: a value, like
+/// `role == "admin"` → `"attacker"`). Comparison methods (`.eq(`,
+/// `.ge(`) are comparisons, not calls. `.unwrap()` and `?` read alike.
+fn args_changed(old: &str, new: &str, is_slot: &dyn Fn(&str) -> bool) -> bool {
+    let (a, b) = (tokens(old), tokens(new));
+    if a == b || a.len() > 400 || b.len() > 400 {
+        return false;
+    }
+    // Longest common subsequence: what is kept in order.
+    let (n, m) = (a.len(), b.len());
+    let mut l = vec![vec![0u16; m + 1]; n + 1];
+    for i in (0..n).rev() {
+        for j in (0..m).rev() {
+            l[i][j] = if a[i] == b[j] { l[i + 1][j + 1] + 1 } else { l[i + 1][j].max(l[i][j + 1]) };
+        }
+    }
+    let (mut ka, mut kb) = (vec![false; n], vec![false; m]);
+    let (mut i, mut j) = (0, 0);
+    while i < n && j < m {
+        if a[i] == b[j] {
+            (ka[i], kb[j]) = (true, true);
+            (i, j) = (i + 1, j + 1);
+        } else if l[i + 1][j] >= l[i][j + 1] {
+            i += 1;
+        } else {
+            j += 1;
+        }
+    }
+    let fine = |t: &[String], kept: &[bool]| {
+        let args = in_call_args(t);
+        t.iter().zip(kept).zip(&args).all(|((tok, k), inside)| {
+            *k || (*inside
+                && !matches!(tok.as_str(), "||" | "&&" | "!" | "==" | "!=" | "<" | ">" | "<=" | ">=" | "^")
+                && !(tok.starts_with(|c: char| c.is_alphabetic() || c == '_') && is_slot(tok)))
+        })
+    };
+    let literal = |t: &String| {
+        t.starts_with(|c: char| c.is_ascii_digit() || c == '"' || c == '\'') || t == "true" || t == "false"
+    };
+    let changed = |t: &[String], kept: &[bool]| -> Vec<String> {
+        t.iter().zip(kept).filter(|(t, k)| !**k && !matches!(t.as_str(), "," | "&" | "(" | ")")).map(|(t, _)| t.clone()).collect()
+    };
+    let (gone, came) = (changed(&a, &ka), changed(&b, &kb));
+    // Literals swapped one for one in place: a value flipped.
+    let flipped = gone.len() == came.len() && gone.iter().chain(&came).all(literal);
+    fine(&a, &ka) && fine(&b, &kb) && !flipped
+}
+
+/// Words, numbers and operators, whitespace dropped; `.unwrap()` read as `?`.
+fn tokens(e: &str) -> Vec<String> {
+    let c: Vec<char> = e.chars().collect();
+    let mut out: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < c.len() {
+        let ch = c[i];
+        if ch.is_whitespace() {
+            i += 1;
+        } else if ch == '"' || (ch == '\'' && c.get(i + 2) == Some(&'\'')) {
+            // A string or char literal is one token.
+            let s = i;
+            i += 1;
+            while i < c.len() && c[i] != ch {
+                i += if c[i] == '\\' { 2 } else { 1 };
+            }
+            i = (i + 1).min(c.len());
+            out.push(c[s..i].iter().collect());
+        } else if ch.is_alphanumeric() || ch == '_' {
+            let s = i;
+            while i < c.len() && (c[i].is_alphanumeric() || c[i] == '_') {
+                i += 1;
+            }
+            out.push(c[s..i].iter().collect());
+        } else {
+            let two: String = c[i..(i + 2).min(c.len())].iter().collect();
+            if matches!(two.as_str(), "||" | "&&" | "==" | "!=" | "<=" | ">=" | "::" | "=>" | "->") {
+                out.push(two);
+                i += 2;
+            } else {
+                out.push(ch.to_string());
+                i += 1;
+            }
+        }
+    }
+    let mut norm: Vec<String> = Vec::new();
+    for t in out {
+        norm.push(t);
+        let k = norm.len();
+        if k >= 4 && norm[k - 4] == "." && norm[k - 3] == "unwrap" && norm[k - 2] == "(" && norm[k - 1] == ")" {
+            norm.truncate(k - 4);
+            norm.push("?".into());
+        }
+    }
+    norm
+}
+
+/// For each token, whether it sits inside the parentheses of a fn call
+/// (`f(`, not `if (`, not a macro's `m!(`).
+fn in_call_args(t: &[String]) -> Vec<bool> {
+    let mut stack: Vec<bool> = Vec::new();
+    let mut out = Vec::with_capacity(t.len());
+    for (i, tok) in t.iter().enumerate() {
+        match tok.as_str() {
+            "(" | "[" | "{" => {
+                out.push(stack.iter().any(|x| *x));
+                let method = i > 1 && t[i - 2] == ".";
+                let call = tok == "("
+                    && i > 0
+                    && t[i - 1].starts_with(|c: char| c.is_alphabetic() || c == '_')
+                    && !matches!(t[i - 1].as_str(), "if" | "while" | "match" | "return" | "in" | "for")
+                    && !(method
+                        && matches!(
+                            t[i - 1].as_str(),
+                            "eq" | "ne" | "ge" | "gt" | "le" | "lt" | "cmp" | "partial_cmp" | "contains" | "starts_with" | "ends_with"
+                        ));
+                stack.push(call);
+            }
+            ")" | "]" | "}" => {
+                stack.pop();
+                out.push(stack.iter().any(|x| *x));
+            }
+            _ => out.push(stack.iter().any(|x| *x)),
+        }
+    }
     out
 }
 
@@ -1949,5 +2225,278 @@ mod t {
         let removed = wrappers.replace(in_handler, "    pub fn handler(ctx: Context<Shared>) -> Result<()> {\n");
         assert_eq!(regressions(&wrappers, &removed), 1, "{:?}", diff(&kinds(&wrappers), &kinds(&removed)));
         assert_eq!(regressions(&wrappers, &wrappers), 0);
+    }
+
+    fn report(b: &str, h: &str) -> Vec<(Severity, String)> {
+        diff(&kinds(b), &kinds(h)).into_iter().map(|c| (c.severity, c.message)).collect()
+    }
+
+    /// #20: marginfi#668 folded three bools into a bit set; raydium gained
+    /// an argument. The same call with other arguments is said as such,
+    /// and stays a removal: an argument can switch the check off.
+    #[test]
+    fn the_same_call_with_other_arguments_is_named_and_still_removed() {
+        let src = |c: &str| {
+            format!(
+                r#"
+pub fn borrow(ctx: Context<Borrow>) -> Result<()> {{ Ok(()) }}
+#[derive(Accounts)]
+pub struct Borrow<'info> {{
+    pub group: AccountLoader<'info, Group>,
+    #[account(
+        mut,
+        constraint = {{ let a = acct.load()?; let g = group.load()?; {c} }} @ E::Unauthorized
+    )]
+    pub acct: AccountLoader<'info, Acct>,
+    pub authority: Signer<'info>,
+    pub other: Signer<'info>,
+}}
+"#
+            )
+        };
+        let base = src("is_signer_authorized(&a, g.admin, authority.key(), false, false, true)");
+        let r = report(&base, &src("is_signer_authorized(&a, g.admin, authority.key(), ALLOW_REBALANCE)"));
+        assert_eq!(r.len(), 1, "{r:?}");
+        assert_eq!(r[0].0, Severity::Regression);
+        assert!(r[0].1.contains("the same call with other arguments"), "{r:?}");
+        // A limit set to nothing reads alike, and so must stay a removal.
+        let r = report(&src("check_slippage(out, min_out)"), &src("check_slippage(out, 0)"));
+        assert_eq!(r[0].0, Severity::Regression, "{r:?}");
+        // Another account passed: a removal.
+        let r = report(&base, &src("is_signer_authorized(&a, g.admin, other.key(), false, false, true)"));
+        assert_eq!(r[0].0, Severity::Regression, "{r:?}");
+        // An operator in the arguments: a removal.
+        let r = report(&base, &src("is_signer_authorized(&a, g.admin, authority.key(), false, false, true) || true"));
+        assert!(r.iter().all(|x| x.0 == Severity::Regression), "{r:?}");
+        let r = report(&base, &src("is_signer_authorized(&a, g.admin, authority.key(), false || x, false, true)"));
+        assert_eq!(r[0].0, Severity::Regression, "{r:?}");
+        // Outside any call: a removal.
+        let r = report(&src("a.flags == 1"), &src("a.flags == 2"));
+        assert_eq!(r[0].0, Severity::Regression, "{r:?}");
+
+        // In the handler: one more argument, `.unwrap()` now `?`.
+        let h = |c: &str| {
+            format!(
+                r#"
+pub fn create(ctx: Context<Create>) -> Result<()> {{
+    if !(is_supported_mint(&ctx.accounts.mint_0, {c} && is_supported_mint(&ctx.accounts.mint_1, true).unwrap()) {{
+        return err!(E::NotSupported);
+    }}
+    Ok(())
+}}
+#[derive(Accounts)]
+pub struct Create<'info> {{
+    pub mint_0: InterfaceAccount<'info, Mint>,
+    pub mint_1: InterfaceAccount<'info, Mint>,
+    pub payer: Signer<'info>,
+}}
+"#
+            )
+        };
+        let base = h("init_0).unwrap()");
+        let r = report(&base, &h("init_0, hook_0)?"));
+        assert!(!r.is_empty() && r.iter().all(|x| x.0 == Severity::Regression && x.1.contains("other arguments")), "{r:?}");
+        // The mint swapped for another account: a removal.
+        let r = report(&base, &h("init_0).unwrap()").replace("&ctx.accounts.mint_0", "&ctx.accounts.payer"));
+        assert!(r.iter().any(|x| x.0 == Severity::Regression), "{r:?}");
+        // A macro's arguments are the comparison: a removal.
+        let m = |c: &str| format!(
+            "pub fn act(ctx: Context<Act>) -> Result<()> {{\n    require_keys_eq!({c}, ctx.accounts.boss.key());\n    Ok(())\n}}\n\
+             #[derive(Accounts)]\npub struct Act<'info> {{\n    pub vault: Account<'info, V>,\n    pub boss: Signer<'info>,\n}}\n"
+        );
+        let r = report(&m("ctx.accounts.vault.boss"), &m("ctx.accounts.vault.owner"));
+        assert!(r.iter().any(|x| x.0 == Severity::Regression), "{r:?}");
+    }
+
+    /// #21: damm-v2#237 retired an instruction to `err!(DeprecatedEndpoint)`.
+    #[test]
+    fn an_instruction_that_only_fails_is_one_notice() {
+        let src = |body: &str| {
+            format!(
+                r#"
+pub mod cp_amm {{
+    pub fn create_badge(ctx: Context<CreateBadge>) -> Result<()> {{ instructions::handle_create_badge(ctx) }}
+}}
+pub mod instructions {{
+    pub fn handle_create_badge(ctx: Context<CreateBadge>) -> Result<()> {{
+        {body}
+    }}
+}}
+#[derive(Accounts)]
+pub struct CreateBadge<'info> {{
+    #[account(has_one = operator)]
+    pub config: Account<'info, Config>,
+    pub operator: Signer<'info>,
+    pub mint: InterfaceAccount<'info, Mint>,
+}}
+"#
+            )
+        };
+        let base = src("require!(!is_permissionless(&ctx.accounts.mint)?, E::Supported);\n        Ok(())");
+        let r = report(&base, &src("err!(E::DeprecatedEndpoint)"));
+        assert!(r.iter().all(|x| x.0 == Severity::Warning), "{r:?}");
+        assert!(r.iter().any(|x| x.1.starts_with("instruction now always fails")), "{r:?}");
+        // Failing only on a path: still compared.
+        let r = report(&base, &src("if ctx.accounts.config.off {\n            return err!(E::Off);\n        }\n        Ok(())"));
+        assert!(r.iter().any(|x| x.0 == Severity::Regression), "{r:?}");
+        // Logs, then fails: retired.
+        let r = report(&base, &src("msg!(\"deprecated\");\n        return Err(E::DeprecatedEndpoint.into());"));
+        assert!(r.iter().all(|x| x.0 == Severity::Warning), "{r:?}");
+        // Review d01/d05: another fn of the same name and accounts fails (a
+        // cfg variant, a mock) while the one dispatched to runs.
+        let mock = src("Ok(())").replace("#[derive(Accounts)]", "pub mod mock {\n    pub fn handle_create_badge(_ctx: Context<CreateBadge>) -> Result<()> { err!(E::X) }\n}\n#[derive(Accounts)]");
+        let r = report(&base, &mock);
+        assert!(r.iter().any(|x| x.0 == Severity::Regression) && r.iter().all(|x| !x.1.contains("always fails")), "{r:?}");
+        // Review d02: the call names a local fn of other accounts that fails.
+        let other = src("legacy::process(ctx)").replace(
+            "#[derive(Accounts)]",
+            "pub mod legacy {\n    pub fn process(ctx: Context<Old>) -> Result<()> { err!(E::X) }\n}\n#[derive(Accounts)]",
+        );
+        let r = report(&base, &other);
+        assert!(r.iter().any(|x| x.0 == Severity::Regression) && r.iter().all(|x| !x.1.contains("always fails")), "{r:?}");
+    }
+
+    /// #22: openbook-v2#296 kept each owner check and added `|| janitor`.
+    #[test]
+    fn a_check_kept_as_one_side_of_a_new_or_is_widened() {
+        let src = |c: &str, h: &str| {
+            format!(
+                r#"
+pub fn cancel(ctx: Context<Cancel>) -> Result<()> {{ Ok(()) }}
+#[derive(Accounts)]
+pub struct Cancel<'info> {{
+    pub signer: Signer<'info>,
+    #[account(mut, constraint = {c} @ E::NoOwner)]
+    pub orders: AccountLoader<'info, Orders>,
+    #[account(mut, {h})]
+    pub market: AccountLoader<'info, Market>,
+    pub fee_admin: Signer<'info>,
+}}
+"#
+            )
+        };
+        let base = src("orders.load()?.is_owner(signer.key())", "has_one = fee_admin");
+        let head = src(
+            "orders.load()?.is_owner(signer.key()) || (signer.key() == JANITOR && janitor_active()?)",
+            "constraint = market.load()?.fee_admin == fee_admin.key() || (fee_admin.key() == JANITOR && janitor_active()?)",
+        );
+        let r = report(&base, &head);
+        assert_eq!(r.len(), 2, "{r:?}");
+        assert!(r.iter().all(|x| x.0 == Severity::Regression), "{r:?}");
+        assert!(r.iter().any(|x| x.1.contains("widened: still checked, unless `signer.key() == JANITOR && janitor_active()?`")), "{r:?}");
+        assert!(r.iter().any(|x| x.1.starts_with("`has_one = fee_admin` widened into")), "{r:?}");
+        // Not the same check on either side of the `||`: removed.
+        let other = src("orders.load()?.is_delegate(signer.key()) || janitor_active()?", "has_one = fee_admin");
+        let r = report(&base, &other);
+        assert!(r.iter().any(|x| x.1.ends_with("removed")), "{r:?}");
+        // Review f01: the old check had its own `||`.
+        let r = report(&src("a.x || a.y", "has_one = fee_admin"), &src("a.x || a.y || true", "has_one = fee_admin"));
+        assert!(r.iter().any(|x| x.1.contains("widened: still checked, unless `true`")), "{r:?}");
+        // `&&` is not a widening.
+        let narrowed = src("orders.load()?.is_owner(signer.key()) && x", "has_one = fee_admin");
+        assert!(report(&base, &narrowed).iter().all(|x| !x.1.contains("widened")));
+    }
+
+    /// #17: cp-swap#79 moved the handler's body into a fn it hands
+    /// `ctx.accounts` to; checks there are the instruction's.
+    #[test]
+    fn checks_in_a_fn_handed_the_accounts_are_the_handlers() {
+        let base = r#"
+pub fn swap(ctx: Context<Swap>, amount: u64) -> Result<()> {
+    let pool = &mut ctx.accounts.pool.load_mut()?;
+    require_gt!(amount, 0);
+    require_gte!(after, before);
+    Ok(())
+}
+#[derive(Accounts)]
+pub struct Swap<'info> {
+    pub pool: AccountLoader<'info, Pool>,
+    pub payer: Signer<'info>,
+}
+"#;
+        let head = |tail: &str, inner: &str| {
+            format!(
+                r#"
+pub fn swap(ctx: Context<Swap>, amount: u64) -> Result<()> {{
+    {tail}
+}}
+pub fn swap_with_fee<'info>(accounts: &mut Swap<'info>, amount: u64, fee: u64) -> Result<()> {{
+    let pool = &mut accounts.pool.load_mut()?;
+    require_gt!(amount, 0);
+    {inner}
+    Ok(())
+}}
+impl<'info> Swap<'info> {{
+    pub fn run(&mut self, amount: u64) -> Result<()> {{
+        require_gt!(amount, 0);
+        {inner}
+        Ok(())
+    }}
+}}
+#[derive(Accounts)]
+pub struct Swap<'info> {{
+    pub pool: AccountLoader<'info, Pool>,
+    pub payer: Signer<'info>,
+}}
+"#
+            )
+        };
+        assert_eq!(report(base, &head("swap_with_fee(ctx.accounts, amount, 3)", "require_gte!(after, before);")), vec![]);
+        assert_eq!(report(base, &head("ctx.accounts.run(amount)", "require_gte!(after, before);")), vec![]);
+        // Removed in the callee: still a removal.
+        let r = report(base, &head("swap_with_fee(ctx.accounts, amount, 3)", ""));
+        assert_eq!(r.len(), 1, "{r:?}");
+        assert_eq!(r[0].0, Severity::Regression);
+        // Result not propagated: the callee's checks do not stop the handler.
+        let r = report(base, &head("let _ = swap_with_fee(ctx.accounts, amount, 3);\n    Ok(())", "require_gte!(after, before);"));
+        assert_eq!(r.len(), 2, "{r:?}");
+        // Review e27/e19: called only on a path, or in a closure: not read.
+        for tail in [
+            "if amount > 9 {\n        swap_with_fee(ctx.accounts, amount, 3)?;\n    }\n    Ok(())",
+            "let _f = || -> Result<()> { swap_with_fee(ctx.accounts, amount, 3)?; Ok(()) };\n    Ok(())",
+            "let f = |a: u64| swap_with_fee(ctx.accounts, a, 3);\n    f(amount)",
+        ] {
+            let r = report(base, &head(tail, "require_gte!(after, before);"));
+            assert_eq!(r.len(), 2, "{tail}: {r:?}");
+        }
+        // Review e17: the parameter bound again in the callee.
+        let shadow = head("swap_with_fee(ctx.accounts, amount, 3)", "require_gte!(after, before);")
+            .replace("    let pool = &mut accounts.pool.load_mut()?;", "    let accounts = mirror();");
+        assert_eq!(report(base, &shadow).len(), 2);
+        // Review round 2: past an early success, under `#[cfg]`, the param
+        // reassigned, an early success in the callee: not read.
+        for tail in [
+            "return Ok(());\n    swap_with_fee(ctx.accounts, amount, 3)",
+            "let Some(x) = Some(amount) else { return Ok(()) };\n    swap_with_fee(ctx.accounts, x, 3)",
+            "#[cfg(feature = \"never\")]\n    swap_with_fee(ctx.accounts, amount, 3)?;\n    Ok(())",
+        ] {
+            assert_eq!(report(base, &head(tail, "require_gte!(after, before);")).len(), 2, "{tail}");
+        }
+        // A glob import never shadows the file's own fn: still read.
+        let glob = format!("use anchor_lang::prelude::*;\n{}", head("swap_with_fee(ctx.accounts, amount, 3)", "require_gte!(after, before);"));
+        assert_eq!(report(base, &glob), vec![]);
+        let early = head("swap_with_fee(ctx.accounts, amount, 3)", "require_gte!(after, before);")
+            .replace("    require_gt!(amount, 0);\n    require_gte", "    if fee == 0 { return Ok(()); }\n    require_gt!(amount, 0);\n    require_gte");
+        assert_eq!(report(base, &early).len(), 2);
+        let moved = head("swap_with_fee(ctx.accounts, amount, 3)", "require_gte!(after, before);")
+            .replace("pub fn swap_with_fee<'info>(accounts: &mut Swap<'info>, amount: u64, fee: u64) -> Result<()> {\n    let pool = &mut accounts.pool.load_mut()?;",
+                "pub fn swap_with_fee<'info>(mut accounts: &mut Swap<'info>, amount: u64, fee: u64) -> Result<()> {\n    accounts = other();");
+        assert_eq!(report(base, &moved).len(), 2);
+        // A fn of that name inside an inline `mod` of the file is not in scope.
+        let inner = head("swap_with_fee(ctx.accounts, amount, 3)", "require_gte!(after, before);")
+            .replace("pub fn swap_with_fee<'info>", "mod unused {\npub fn swap_with_fee<'info>")
+            .replace("impl<'info> Swap<'info>", "}\nimpl<'info> Swap<'info>");
+        assert_eq!(report(base, &inner).len(), 2);
+        // Review e15: imported from another crate, not the local fn.
+        let imported = format!("use other_crate::swap_with_fee;\n{}", head("swap_with_fee(ctx.accounts, amount, 3)", "require_gte!(after, before);"));
+        assert_eq!(report(base, &imported).len(), 2);
+    }
+
+    /// Review p05/p06: a non-ASCII character in a check panicked.
+    #[test]
+    fn non_ascii_in_a_check_does_not_panic() {
+        let src = |c: &str| format!("pub fn act(ctx: Context<Act>) -> Result<()> {{\n    require!({c}, E::X);\n    helper(ctx.accounts)?;\n    Ok(())\n}}\nfn helper(accounts: &mut Act) -> Result<()> {{\n    require!(k(日) && accounts.vault.c != 'é', E::Y);\n    Ok(())\n}}\n#[derive(Accounts)]\npub struct Act<'info> {{\n    pub vault: Account<'info, V>,\n}}\n");
+        let r = report(&src("ctx.accounts.vault.c != 'é'"), &src("ctx.accounts.vault.ü != 'é'"));
+        assert!(r.iter().any(|x| x.0 == Severity::Regression), "{r:?}");
     }
 }

@@ -37,6 +37,8 @@ instruction whose handler takes that struct as its `Context<..>`
 | `seeds`, `address` or `owner` constraint deleted | removed |
 | `has_one = x` deleted | removed — or *moved* (warning) if another slot of the instruction now has it |
 | `constraint = <expr>` deleted or replaced | removed, naming the expression — or *moved* (warning) |
+| `constraint = <expr>` (or `has_one = x`) kept as one side of a new top-level `\|\|` (`is_owner(signer.key()) \|\| (signer.key() == JANITOR && active()?)`) | removed, said as *widened*: still checked, unless the added side — the part a reviewer has to judge |
+| a constraint or handler check rewritten as the same call with other arguments (`is_signer_authorized(&a, admin, authority.key(), false, false, true)` → `…, ALLOW_REBALANCE)`, `is_supported_mint(&m, init)` → `is_supported_mint(&m, init, hook)?`) | removed, said as *the same call with other arguments*, quoting both. Still a removal: an argument can switch a check off (a limit set to `0`, the account swapped through a local, `\| true`) in ways the text does not tell apart from a refactor. Not said so when a change is outside a call's parentheses or inside a macro's (`require_keys_eq!(a, b)`) |
 | `token::mint` / `token::authority` deleted | removed: any mint / owner is accepted |
 | `address`, `token::mint` or `token::authority` value changed | warning: confirm it names the account it should |
 | a `has_one`, `address`, `constraint` or `token::*` deleted while the instruction still declares the same key equality another way — `has_one = f` on `x`, `address = x.f` on `f`, `constraint = x.load()?.f == f.key()`, `token::mint = m` and `constraint = t.mint == m.key()` are one check | not reported. Each name is read as the account it is in its own struct, so `state` in one composite is not `state` in another and an instruction argument is not the account of that name; declarations on an `Option` account, or inside an `Option` composite, do not count, since they do not run when it is left out. `.load()?` and spaces do not matter |
@@ -53,6 +55,7 @@ instruction whose handler takes that struct as its `Context<..>`
 | an instruction renamed — gone, with a new instruction sharing at least half of the two's slot names (programs, sysvars, `authority` and `payer` not counted), best match first, ties left unpaired | warning naming the new name; the two are compared slot by slot, so a check the rename dropped is still removed |
 | an instruction gone with nothing that matches, and checks | warning: not compared, with how many checks it had |
 | a new instruction with no signer that writes an account | warning: permissionless by design, or a missing authority check? |
+| an instruction whose handler now only fails — every fn read as it is nothing but `err!(..)` / `Err(..)` (after any `msg!`), or a call to such a fn taking the same `Context` — so a cfg variant, mock or test fn that fails does not count | its removals replaced by one warning: it always fails, so its checks guard nothing that runs |
 
 Removals exit 1 (unless `--no-fail`); warnings do not. Annotations sit on
 the line that declares the slot in the new version.
@@ -98,7 +101,15 @@ It reads text, not types, line by line as rustfmt lays fields out:
   inside a loop, a `match`, an `if … else` chain, or a function the
   handler calls under another name (a helper `auth(&ctx)`) is not; a
   function of the same name taking the same `Context` (lib.rs delegating
-  to `instructions::swap(ctx, …)`) is read as part of the instruction. A
+  to `instructions::swap(ctx, …)`) is read as part of the instruction, and
+  so is a fn the handler hands `ctx.accounts` itself to and whose result
+  it returns or `?`s (`swap_with_fee(ctx.accounts, ..)`,
+  `ctx.accounts.process(..)`), one call deep, with its parameter read as
+  `ctx.accounts` — only when the call runs on every path (top level, not
+  after a `return Ok`, not under `#[cfg]`, not in a closure), the fn has
+  no early success of its own and does not rebind the parameter, and a
+  bare name is the top-level fn of the same file with no `use` from
+  outside the source that could mean another. A
   top-level `let x = &ctx.accounts.y;` is followed; a local built from an
   account's data (`let token = unpack(..)`) is not, so a check on it
   counts for the instruction, not the account. `if !x.is_signer {

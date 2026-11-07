@@ -153,6 +153,9 @@ pub struct SourceKinds {
     ix_checks: HashMap<String, Vec<String>>,
     /// Where each instruction's handler is declared.
     handlers: HashMap<String, (String, usize)>,
+    /// Instructions a fn of which does nothing but fail (`err!(..)`), or
+    /// hands off to one that does: retired, nothing they guarded runs.
+    disabled: HashSet<String>,
 }
 
 /// One check read from a handler body, before it is attached.
@@ -467,6 +470,12 @@ impl SourceKinds {
         self.ix_checks.get(ix).map_or(&[], |v| v.as_slice())
     }
 
+    /// `ix` always fails: a fn read as it is nothing but `err!(..)` /
+    /// `Err(..)`, or a call to such a fn.
+    pub fn disabled(&self, ix: &str) -> bool {
+        self.disabled.contains(ix)
+    }
+
     /// Where `ix`'s handler is declared, if it was found.
     pub fn handler_at(&self, ix: &str) -> Option<(&str, usize)> {
         self.handlers.get(ix).map(|(f, l)| (f.as_str(), *l))
@@ -658,6 +667,7 @@ impl SourceKinds {
         let fns = FnIndex::new(&stripped, &exprs);
         let mut handed: Vec<(String, String, Handed)> = Vec::new();
         let mut implemented: HashSet<String> = HashSet::new();
+        let (mut failing, mut running): (HashSet<String>, HashSet<String>) = Default::default();
         for (file, src) in &stripped {
             for c in handler.captures_iter(src) {
                 let Some(ctx) = ident.captures_iter(&c[2]).last() else { continue };
@@ -676,6 +686,18 @@ impl SourceKinds {
                         for (path, h) in fns.handed(body, &ctx[1], file, src[..open].matches('\n').count()) {
                             handed.push((ix.clone(), path, h));
                         }
+                        // The handler hands its accounts whole to a fn that does
+                        // the work (#17): that fn's checks are the instruction's.
+                        for (blanked, expr) in fns.accounts_callees(body, &ctx[1], &stripped, &exprs) {
+                            body_checks.push((ix.clone(), read_body(&blanked, &expr)));
+                        }
+                        // Retired only when every fn read as it fails: a cfg
+                        // variant, a test or a mock of the same name that fails
+                        // says nothing of the one dispatched to.
+                        match fns.always_fails(body, expr_body, &ctx[1], &stripped, &exprs) {
+                            true => failing.insert(ix.clone()),
+                            false => running.insert(ix.clone()),
+                        };
                     }
                 }
                 let line = src[..c.get(0).unwrap().start()].matches('\n').count() + 1;
@@ -747,7 +769,8 @@ impl SourceKinds {
                 }
             }
         }
-        SourceKinds { map, ix_checks, handlers }
+        let disabled = failing.difference(&running).cloned().collect();
+        SourceKinds { map, ix_checks, handlers, disabled }
     }
 }
 
@@ -776,6 +799,8 @@ pub(crate) struct FnInfo {
     key: bool,
     /// Parameter names, `self` left out.
     pub(crate) params: Vec<String>,
+    /// The signature, between the name and the body.
+    pub(crate) sig: String,
     /// Each key comparison it rejects unless equal, as its two sides.
     key_atoms: Vec<(String, String)>,
     /// The parameters whose program owner it compares itself.
@@ -928,7 +953,7 @@ impl FnIndex {
                 );
                 let calls = calls_in(body).into_iter().filter(|c| c.propagated).map(|c| (c.callee, c.name)).collect();
                 let line = src[..start].matches('\n').count() + 1;
-                fns.push(FnInfo { name: c[1].to_string(), ty, file: file.clone(), body: open..open + body.len(), line, owner, discriminator, key, params, key_atoms, owner_params, mods: fn_mods, calls });
+                fns.push(FnInfo { name: c[1].to_string(), ty, file: file.clone(), body: open..open + body.len(), line, owner, discriminator, key, params, sig: sig.to_string(), key_atoms, owner_params, mods: fn_mods, calls });
             }
         }
         let mut by_name: HashMap<String, Vec<usize>> = HashMap::new();
@@ -971,6 +996,132 @@ impl FnIndex {
             [only] => Some(only),
             _ => None,
         }
+    }
+
+    /// The bodies of the fns a handler body hands `ctx.accounts` itself
+    /// to and whose result it propagates — `f(ctx.accounts, ..)`,
+    /// `f(&mut ctx.accounts, ..)`, `ctx.accounts.f(..)` — each with its
+    /// parameter (or `self`) written `ctx.accounts`, so its top-level
+    /// checks read as the handler's: (blanked, expr). One call deep.
+    /// cp-swap's `swap_base_input` → `swap_base_input_with_fee(ctx.accounts, ..)`.
+    pub(crate) fn accounts_callees(
+        &self,
+        body: &str,
+        accounts_ty: &str,
+        stripped: &[(String, String)],
+        exprs: &HashMap<&str, String>,
+    ) -> Vec<(String, String)> {
+        let whole = |a: &str| {
+            let t: String = a.chars().filter(|c| !c.is_whitespace()).collect();
+            matches!(t.as_str(), "ctx.accounts" | "&ctx.accounts" | "&mutctx.accounts")
+        };
+        let mut out = Vec::new();
+        for call in calls_in(body).into_iter().filter(|c| c.propagated) {
+            // Run on every path: at the body's top level, not in an `if`, a
+            // loop or a closure (`let f = || helper(ctx.accounts)?;`).
+            // Not past a way out that succeeds (`return Ok(())`, `let .. else
+            // { return Ok(()) }`), not under an attribute (`#[cfg(..)]`).
+            let stmt = body[..call.at].rfind([';', '{', '}']).map_or(0, |i| i + 1);
+            if depth_at(body, call.at) != 0
+                || body[stmt..call.at].contains('|')
+                || body[stmt..call.at].contains("#[")
+                || returns_early(&body[..call.at])
+            {
+                continue;
+            }
+            let Some(i) = self.resolve(&call.callee, &call.name, None, Some(accounts_ty)) else { continue };
+            let f = &self.fns[i];
+            if !self.in_scope(&call.callee, &call.name, f, stripped, body) {
+                continue;
+            }
+            let param = match call.callee {
+                // vipers' `validate()` is read as `validate`, not again here.
+                Callee::AccountsMethod if call.name != "validate" => "self".to_string(),
+                Callee::Free(_) | Callee::Typed(..) => {
+                    let args = top_level(call.args);
+                    let Some(k) = args.iter().position(|a| whole(a)) else { continue };
+                    match (args.len() == f.params.len(), f.params.get(k)) {
+                        (true, Some(p)) => p.clone(),
+                        _ => continue,
+                    }
+                }
+                _ => continue,
+            };
+            let Some((_, src)) = stripped.iter().find(|(n, _)| *n == f.file) else { continue };
+            let (blanked, expr) = (&src[f.body.clone()], &exprs[f.file.as_str()][f.body.clone()]);
+            // Bound again in the fn (`let accounts = mirror;`, a pattern, a
+            // closure's parameter): which account a check reads is not told.
+            let n = regex::escape(&param);
+            let rebound = Regex::new(&format!(
+                r"\blet\b[^=;]*\b{n}\b[^=;]*=|(?:^|[^|])\|[^|;{{}}=\n]*\b{n}\b[^|;{{}}=\n]*\|(?:[^|]|$)|\bfor\s+[^{{]*\b{n}\b[^{{]*\bin\b|\b{n}\s*\)?\s*=>"
+            ))
+            .unwrap();
+            // Its checks run on every path through it too: no early success.
+            let reassigned = Regex::new(&format!(r"(?:^|[^.\w]){n}\s*=[^=]")).unwrap();
+            if (param != "self" && (rebound.is_match(blanked) || reassigned.is_match(blanked))) || returns_early(blanked) {
+                continue;
+            }
+            out.push(rebind(blanked, expr, &param));
+        }
+        out
+    }
+
+    /// Whether a call written in `body` reaches `f`. A path (`m::f`) was
+    /// resolved through this source's modules. A bare name is the fn of
+    /// that name at the top level of the same file — not one inside an
+    /// inline `mod` there — and not when a `use` from outside the source
+    /// names it (`use other::f;`). A glob (`use anchor_lang::prelude::*`)
+    /// never shadows a fn the module defines itself.
+    fn in_scope(&self, callee: &Callee, name: &str, f: &FnInfo, stripped: &[(String, String)], body: &str) -> bool {
+        if !matches!(callee, Callee::Free(p) if p.is_empty()) {
+            return true;
+        }
+        let src = body_file(stripped, body);
+        let here = stripped.iter().find(|(_, s)| Some(s.as_str()) == src).map(|(n, _)| n.as_str());
+        here == Some(f.file.as_str()) && f.mods == file_mods(&f.file) && !self.imported(src, name)
+    }
+
+    /// `name` is brought in by a `use` from outside this source
+    /// (`use other_crate::settle;`): a local fn of that name is not it.
+    fn imported(&self, src: Option<&str>, name: &str) -> bool {
+        let Some(src) = src else { return false };
+        let re = Regex::new(&format!(r"\buse\s+([A-Za-z_]\w*)\s*::[^;]*\b{}\b[^;]*;", regex::escape(name))).unwrap();
+        let outside = re.captures_iter(src).any(|c| !matches!(&c[1], "crate" | "super" | "self") && !self.mods.contains(&c[1]));
+        outside
+    }
+
+    /// A body that does nothing but fail: `err!(..)`, `Err(..)`, either
+    /// after `return`, or a call to a fn of this source whose body is one.
+    pub(crate) fn always_fails(
+        &self,
+        body: &str,
+        expr: &str,
+        accounts_ty: &str,
+        stripped: &[(String, String)],
+        exprs: &HashMap<&str, String>,
+    ) -> bool {
+        if fails_only(expr) {
+            return true;
+        }
+        // One call, its result the body's: `f(ctx)`, `f(ctx)?; Ok(())`.
+        let t = body.trim();
+        let t = t.strip_suffix("Ok(())").map_or(t, |r| r.trim_end());
+        let Some(call) = calls_in(t).into_iter().next() else { return false };
+        let open = call.at + t[call.at..].find('(').unwrap_or(0);
+        let rest = t[open + call.args.len() + 2..].trim_matches(|c: char| c == '?' || c == ';' || c.is_whitespace());
+        if call.at != 0 || !rest.is_empty() || !call.propagated {
+            return false;
+        }
+
+        // The fn it calls must be another handler of the same accounts: a
+        // local fn of that name taking something else is not the one called.
+        let same_ctx = Regex::new(&format!(r"\bContext\s*<[^()]*\b{}\b", regex::escape(accounts_ty))).unwrap();
+        self.resolve(&call.callee, &call.name, None, Some(accounts_ty)).is_some_and(|i| {
+            let f = &self.fns[i];
+            self.in_scope(&call.callee, &call.name, f, stripped, body)
+                && same_ctx.is_match(&f.sig)
+                && fails_only(&exprs[f.file.as_str()][f.body.clone()])
+        })
     }
 
     /// What the fn and those it reaches reject on.
@@ -1101,6 +1252,51 @@ impl FnIndex {
         }
         out
     }
+}
+
+/// A `return` in `text` that is not `return Err(..)` / `return err!(..)`:
+/// a way out that succeeds, so what follows does not always run.
+fn returns_early(text: &str) -> bool {
+    static RET: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\breturn\b").unwrap());
+    RET.find_iter(text).any(|m| !FAILS_RE.is_match(text[m.start()..].trim_start()))
+}
+
+/// The file text a body slice was taken from.
+fn body_file<'a>(stripped: &'a [(String, String)], body: &str) -> Option<&'a str> {
+    let at = body.as_ptr() as usize;
+    stripped
+        .iter()
+        .map(|(_, s)| s.as_str())
+        .find(|s| (s.as_ptr() as usize..s.as_ptr() as usize + s.len() + 1).contains(&at))
+}
+
+/// A body that is one `err!(..)` / `Err(..)`, maybe after `return` or
+/// before a `;`, after any log lines: nothing else runs.
+fn fails_only(expr: &str) -> bool {
+    let t = expr.trim();
+    let t = &t[past_logs(t)..];
+    let t = t.strip_prefix("return").map_or(t, |r| r.trim_start());
+    let Some(m) = FAILS_RE.find(t) else { return false };
+    let Some(close) = closing_paren(&t[m.end()..]) else { return false };
+    t[m.end() + close + 1..].trim_matches(|c: char| c == ';' || c.is_whitespace()).is_empty()
+}
+
+/// `blanked` and `expr` (aligned) with each `param.` written
+/// `ctx.accounts.`: a fn handed the accounts, read as the handler.
+fn rebind(blanked: &str, expr: &str, param: &str) -> (String, String) {
+    let re = Regex::new(&format!(r"(^|[^.\w]){}\s*\.", regex::escape(param))).unwrap();
+    let (mut b, mut e, mut last) = (String::new(), String::new(), 0);
+    for c in re.captures_iter(blanked) {
+        let at = c.get(1).unwrap().end();
+        b.push_str(&blanked[last..at]);
+        e.push_str(&expr[last..at]);
+        b.push_str("ctx.accounts.");
+        e.push_str("ctx.accounts.");
+        last = c.get(0).unwrap().end();
+    }
+    b.push_str(&blanked[last..]);
+    e.push_str(&expr[last..]);
+    (b, e)
 }
 
 /// A fn's parameter names from the text between its parentheses, `self`
@@ -1831,7 +2027,8 @@ fn read_body(blanked: &str, expr: &str) -> Vec<BodyCheck> {
     while i < b.len() {
         let ch = b[i];
         let starts_word = i == 0 || !(b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'_');
-        if depth == 0 && starts_word {
+        // Inside a non-ASCII character there is nothing to start.
+        if depth == 0 && starts_word && blanked.is_char_boundary(i) && expr.is_char_boundary(i) {
             if let Some(m) = alias.captures(&expr[i..]) {
                 let to: String = m[2].chars().filter(|c| !c.is_whitespace()).collect();
                 let re = Regex::new(&format!(r"(^|[^.\w]){}\s*\.", regex::escape(&m[1]))).unwrap();
@@ -1931,7 +2128,7 @@ fn commuted(t: &str) -> String {
     while i < b.len() {
         // Literals are kept in the text: an operator inside one is not one.
         if !quoted {
-            if let Some(n) = raw_string_len(&body[i..]).filter(|_| i == 0 || !b[i - 1].is_ascii_alphanumeric()) {
+            if let Some(n) = body.is_char_boundary(i).then(|| raw_string_len(&body[i..])).flatten().filter(|_| i == 0 || !b[i - 1].is_ascii_alphanumeric()) {
                 i += n;
                 continue;
             }

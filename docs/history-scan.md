@@ -7,6 +7,8 @@ program's `src`, compared with its parent:
 solinv diff --base-src <parent>/programs/<p>/src --head-src <commit>/programs/<p>/src
 ```
 
+For the same tool run over pull requests still open, see [open-pr-scan.md](open-pr-scan.md).
+
 A first-parent commit is one merged pull request (or one squash). To find removals that were
 *mistakes*, the same history was also run the other way round (head → base: the checks each
 commit *added*), and a removal was paired with a later addition of the same check on the same

@@ -109,6 +109,7 @@ flagged instructions are the demo program's three planted account-validation bug
 | A check in vipers' `validate()` counts too | Cashio's real source, fixed → before the fix: the check its fix added is named, in both instructions ([details](docs/diff.md#checked-on)); the map marks 2 of its 26 typed accounts `t`, both validated by the program they are passed to (26 before vipers was read, [#8](https://github.com/psyto/solinv/issues/8)) |
 | …on the 11 classes of [sealevel-attacks](https://github.com/coral-xyz/sealevel-attacks) | Turning each fixed program into its insecure version: 11 of 11 caught where the check was declared, 9 of 11 where it was written in the handler (the other two change CPI seeds and zeroing code, not a check); 0 removed checks reported in the other direction ([details](docs/sealevel-attacks.md)) |
 | …on real merged pull requests | Over 1,133 merged PRs of ten public Anchor programs: two mango-v4 PRs dropped a `has_one` that an audit restored 7 and 17 days later, and solinv names each on the PR that dropped it. On a random sample of 40 removals it reported there, 5 were real loosenings and 35 the same check written another way or moved. solinv now reads `has_one` / `address` / `constraint ==` as one check and a yes/no gate swapped on the same account as a warning, which takes it to 25 reports with the same 5 real (about 1 in 5) — still expect a reviewer to clear most failures as "moved" ([details](docs/history-scan.md)) |
+| …on open pull requests | Over 121 open PRs of 13 public Anchor programs (marginfi, Orca, Squads, Meteora, OpenBook, Raydium and others), every report read against its diff: no dropped check, which is the expected answer for well-reviewed teams. Of the 48 removals, 37 were deliberate changes of meaning that a reviewer has to clear: marginfi's new borrow-order signer, openbook's `\|\| janitor`. The other 11 were checks moved into a helper, a call given one more argument, or an instruction retired. On `main`, 43 are left, 38 of them saying what the check became ("the same call with other arguments", "widened") ([details](docs/open-pr-scan.md)) |
 | …and in native and Pinocchio code | Over 1,164 commits of percolator-prog, SPL Token / p-token, princeps-solana and openhl-solana: 43 warnings, 10 of them real loosenings (owner checks commented out, a signer requirement dropped, an oracle error swallowed), about 1 in 4. Checks deleted by hand from princeps-solana's vault and openhl-solana's core: 4 of 4 named ([details](docs/native-diff.md)) |
 | No noise on code that keeps its checks | Comparing Jito tip-payment, tip-distribution and Raydium cp-swap with themselves: 0 reports. Reformatting a constraint or renaming its error: 0 reports (tested) |
 | The fuzz detectors catch a check that is removed | Mutation test on the clean escrow: of the removed checks the harness reached, 5 of 6 were caught, each by the detector predicted for it — after setting aside 5 mutations that cannot change behaviour, each argued in the [report](examples/escrow-demo/campaigns/escrow-clean-report.md) (5 of 11 before) |
@@ -230,7 +231,12 @@ same line was dropped; every module's `fn handler` merged into one phantom instr
 program failed with an error that did not say why (it now reads native programs), that once it did, it
 found none on GitHub's runners (GNU `find` rejects a `{}` in the detector that macOS `find` lets
 through; fixed in v0.1.6, with a job that runs the detector on ubuntu),
-two setup gaps in the docs ([#7](https://github.com/psyto/solinv/issues/7)), and `check_sets`
+two setup gaps in the docs ([#7](https://github.com/psyto/solinv/issues/7)), four kinds of report
+that read worse than they were on other teams' open pull requests: a check rewritten with other
+arguments, one widened with `||`, a handler's body moved into a fn handed `ctx.accounts`, and an
+instruction retired to `err!(..)`. Each was a "removed" with nothing more said
+([#17](https://github.com/psyto/solinv/issues/17), [#20](https://github.com/psyto/solinv/issues/20)–[#22](https://github.com/psyto/solinv/issues/22);
+the first two stay removals, because a review broke every rule that made them warnings), and `check_sets`
 skipping a set whose accounts are missing without saying so ([#13](https://github.com/psyto/solinv/issues/13)). Two
 shapes that review, not solinv, found in our own programs are now read too: signer seeds with no bump
 (the call cannot sign), and a transfer hook whose `execute` has neither the SPL Execute discriminator
@@ -338,9 +344,12 @@ declaration as a library:
     versions of a program's source slot by slot (no build): a typed
     account loosened to `UncheckedAccount`, a signer no longer
     required, a `seeds` / `address` / `owner` / `has_one` /
-    `constraint` deleted (constraints compared by expression), plus
-    warnings for moved checks, type changes, optional accounts and new
-    unsigned writers. `action.yml` runs it on pull requests with
+    `constraint` deleted (constraints compared by expression; one kept
+    as a side of a new `||` said as *widened*, one rewritten as the same
+    call with other arguments said so), plus warnings for moved checks,
+    type changes, optional accounts, new unsigned writers and an
+    instruction retired to `err!(..)`. A fn the handler hands
+    `ctx.accounts` to is read with it. `action.yml` runs it on pull requests with
     annotations on the line. Design and limits:
     [`docs/diff.md`](docs/diff.md).
 
@@ -901,6 +910,8 @@ solinv/
 │   │   └── field-schema.md          # named fields + relation invariants
 │   ├── idl-specs.md                 # IDL → spec: facts vs candidates, limits
 │   ├── diff.md                      # what `solinv diff` reports, and its limits
+│   ├── history-scan.md              # solinv diff over 1,133 merged PRs of 10 programs
+│   ├── open-pr-scan.md              # …and over 121 open PRs of 13
 │   ├── mutation-testing.md          # operator catalog + scoring rationale
 │   ├── differential-equivalence.md  # oracle rationale + report format
 │   ├── disclosure-template-*.md     # Immunefi / Sherlock / generic templates
@@ -963,9 +974,11 @@ name another account of the instruction or an upper-case constant
 (`seeds` of literals alone too), not an instruction argument the caller
 picks, and what a comparison says is not checked. A key comparison at
 the top level of the handler body (`require_keys_eq!`, `if a.key() !=
-b.key() { return Err(..) }`) counts; one inside a function the handler
-calls is not read (Jito tip-distribution's `upload_merkle_root` checks
-in such a helper), nor is the fact
+b.key() { return Err(..) }`) counts. So does one in a function the handler
+hands `ctx.accounts` itself to, on every path (`f(ctx.accounts, ..)`,
+`ctx.accounts.f(..)`, one call deep). One inside any other function the
+handler calls is not read (Jito tip-distribution's `upload_merkle_root`
+checks in such a helper), nor is the fact
 that a type only ever exists at one PDA. A tie to another account
 counts even when that account is itself the caller's choice (the pool
 or sale the instruction acts on): whether a caller can create a matching

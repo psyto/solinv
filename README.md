@@ -247,7 +247,8 @@ whose seeds name the wallet but not the registry, so any registry's authority wr
 entries ([#18](https://github.com/psyto/solinv/issues/18)). Building
 solinv check turned up two bugs in `anchor idl convert`'s legacy-IDL conversion — string seeds keep
 their quotes ([otter-sec/anchor#5255](https://github.com/otter-sec/anchor/issues/5255)), and
-`has_one` relations land on the wrong account ([#5256](https://github.com/otter-sec/anchor/issues/5256))
+`has_one` relations land on the wrong account ([#5256](https://github.com/otter-sec/anchor/issues/5256));
+both fixed upstream in [#5257](https://github.com/otter-sec/anchor/pull/5257), not yet released
 — and Codex reviewing `idl_diff` against real IDLs found five ways a loosened check could go silent
 or read as a false REMOVED (fixed in ef3bb11). Upstream:
 crucible's `--timeout` overran by 18 minutes in CI ([crucible#25](https://github.com/asymmetric-research/crucible/issues/25)),
@@ -941,8 +942,10 @@ Reads the Anchor 0.30+ IDL format, and a legacy (pre-0.30) IDL directly:
 seeds keep their JSON quotes,
 [anchor#5255](https://github.com/otter-sec/anchor/issues/5255); `has_one`
 relations land on the wrong account,
-[anchor#5256](https://github.com/otter-sec/anchor/issues/5256)), so do
-not pre-convert with it. In a harness, `Idl::from_json_any` does the
+[anchor#5256](https://github.com/otter-sec/anchor/issues/5256); fixed on
+master by [anchor#5257](https://github.com/otter-sec/anchor/pull/5257), but
+anchor-cli 0.32.3 and earlier still have them), so do not pre-convert with
+a released anchor-cli. In a harness, `Idl::from_json_any` does the
 same; `Idl::from_json` takes 0.30+ only. Shank IDLs from native programs
 are not supported. Building an IDL on Anchor 0.30
 with current Rust needs a `proc-macro2` pin

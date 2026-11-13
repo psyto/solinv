@@ -17,7 +17,7 @@ Please point solinv at one Anchor program you know well, time each step, and tel
 | 1–2 (map) | Rust (`cargo`); an Anchor program's source and its IDL, Anchor 0.30 or later |
 | 3 (fuzz, optional) | the above, plus the Solana toolchain (`cargo build-sbf`) and the [Crucible](https://github.com/asymmetric-research/crucible) CLI |
 
-An older (pre-0.30) IDL works as it is: solinv converts it itself (do not run `anchor idl convert` first; it has two bugs that change seeds and `has_one`, [anchor#5255](https://github.com/otter-sec/anchor/issues/5255) and [#5256](https://github.com/otter-sec/anchor/issues/5256)). Native and Shank programs are not supported yet — telling us that you have one is useful too.
+An older (pre-0.30) IDL works as it is: solinv converts it itself (do not run `anchor idl convert` first; up to anchor-cli 0.32.3 it has two bugs that change seeds and `has_one`, [anchor#5255](https://github.com/otter-sec/anchor/issues/5255) and [#5256](https://github.com/otter-sec/anchor/issues/5256), fixed on master by [#5257](https://github.com/otter-sec/anchor/pull/5257) but not yet released). Native and Shank programs are not supported yet — telling us that you have one is useful too.
 
 Keep a clock running: note the time you start each step.
 

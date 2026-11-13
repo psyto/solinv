@@ -47,7 +47,7 @@ A small IDL that loses its only `has_one`, with no seeds or addresses anywhere, 
 
 ## Legacy (pre-0.30) IDLs
 
-`Idl::from_json_any`, which `solinv idl` and `solinv diff --base-idl` use, reads legacy IDLs. It converts them the way `anchor idl convert` does, with two fixes, both reported upstream:
+`Idl::from_json_any`, which `solinv idl` and `solinv diff --base-idl` use, reads legacy IDLs. It converts them the way `anchor idl convert` does, with two fixes. Both were reported upstream and are fixed on master by [anchor#5257](https://github.com/otter-sec/anchor/pull/5257) (merged 2026-11-11), but anchor-cli 0.32.3 and earlier still have them:
 
 - A string const seed becomes its UTF-8 bytes. `anchor idl convert` keeps the JSON quotes ([anchor#5255](https://github.com/otter-sec/anchor/issues/5255)).
 - `relations` move from the declaring slot to the slot they name. `anchor idl convert` copies them unchanged, so every legacy `has_one` reads backwards ([anchor#5256](https://github.com/otter-sec/anchor/issues/5256)).
@@ -56,7 +56,7 @@ Const seeds convert to the bytes Anchor derives from: a string's UTF-8, a byte a
 
 A legacy IDL has no fixed addresses, so addresses are not compared when either side is legacy.
 
-Do not pre-convert with `anchor idl convert`: its output has the two bugs above.
+Do not pre-convert with a released `anchor idl convert` (0.32.3 or earlier): its output has the two bugs above.
 
 ## A real case
 

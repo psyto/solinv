@@ -83,7 +83,8 @@ this; a bare `cargo test --features idl-build` needs
 only; `Idl::from_json_any` (used by `solinv idl` and `solinv diff
 --base-idl`) also reads legacy (pre-0.30) IDLs, converted as `anchor idl
 convert` does except for its two bugs (anchor#5255 seed quotes, anchor#5256
-relations on the wrong account). Shank IDLs are rejected as unsupported. Composite
+relations on the wrong account; fixed on master by anchor#5257, not yet
+released). Shank IDLs are rejected as unsupported. Composite
 accounts bind by dotted path (`group_a.authority`) or by a leaf name
 that is unique in the instruction; an unbound optional account is
 encoded as the program id and signs nothing.

@@ -19,8 +19,10 @@
 //!   output reads every legacy `has_one` backwards. Both are snake_cased,
 //!   as are seed paths.
 //!
-//! Reported upstream: otter-sec/anchor#5255 (seed quotes) and #5256
-//! (relations). Drop the differences here once they are fixed there.
+//! Reported upstream as otter-sec/anchor#5255 (seed quotes) and #5256
+//! (relations); both fixed on master by #5257 (2026-11-11), which converts
+//! as this module does. Released anchor-cli (0.32.3 and earlier) still has
+//! them, so the notes pointing users away from it stay until a release.
 //!
 //! `const` seeds convert to the bytes Anchor derives from: a string's UTF-8,
 //! a byte array as is, an integer little-endian at its width, a public key's

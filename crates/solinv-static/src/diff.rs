@@ -26,6 +26,105 @@ pub enum Severity {
     Warning,
 }
 
+/// What a change is reported as: a removal, a check kept as one side of a
+/// new `||` (a removal too, said as what gets past it), or a warning.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Status {
+    Removed,
+    Widened,
+    Warning,
+}
+
+/// Which check a change is about, for `--format json`. A value is only
+/// ever added: renaming one is a new `schema_version`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Check {
+    Type,
+    Signer,
+    Owner,
+    Seeds,
+    Address,
+    HasOne,
+    Constraint,
+    Token,
+    Close,
+    Handler,
+    Validate,
+    Optional,
+    Slot,
+    Instruction,
+    /// A whole program gone from the head.
+    Program,
+    /// Several checks in one change (an IDL slot's).
+    Multiple,
+    NativeSigner,
+    NativeOwner,
+    NativeKey,
+    NativeWritable,
+    NativeExecutable,
+    SignerSeedsWithoutBump,
+    HookUnreachable,
+    HookFallbackSkipsExecute,
+    EntryNotScopedToGate,
+}
+
+impl Check {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Check::Type => "type",
+            Check::Signer => "signer",
+            Check::Owner => "owner",
+            Check::Seeds => "seeds",
+            Check::Address => "address",
+            Check::HasOne => "has_one",
+            Check::Constraint => "constraint",
+            Check::Token => "token",
+            Check::Close => "close",
+            Check::Handler => "handler",
+            Check::Validate => "validate",
+            Check::Optional => "optional",
+            Check::Slot => "slot",
+            Check::Instruction => "instruction",
+            Check::Program => "program",
+            Check::Multiple => "multiple",
+            Check::NativeSigner => "native_signer",
+            Check::NativeOwner => "native_owner",
+            Check::NativeKey => "native_key",
+            Check::NativeWritable => "native_writable",
+            Check::NativeExecutable => "native_executable",
+            Check::SignerSeedsWithoutBump => "signer_seeds_without_bump",
+            Check::HookUnreachable => "hook_unreachable",
+            Check::HookFallbackSkipsExecute => "hook_fallback_skips_execute",
+            Check::EntryNotScopedToGate => "entry_not_scoped_to_gate",
+        }
+    }
+}
+
+/// The check an IDL change is about, from its message: one slot's
+/// removals are joined with `; `, and differing ones are `Multiple`.
+pub(crate) fn check_named(message: &str) -> Check {
+    let one = |m: &str| {
+        if m.contains("slot removed or renamed") || m.starts_with("taken to be renamed") {
+            Check::Slot
+        } else if m.starts_with("now optional") {
+            Check::Optional
+        } else if m.contains("has_one") {
+            Check::HasOne
+        } else if m.contains("seeds") {
+            Check::Seeds
+        } else if m.contains("fixed address") {
+            Check::Address
+        } else if m.contains("signer") {
+            Check::Signer
+        } else {
+            Check::Instruction
+        }
+    };
+    let mut kinds = message.split("; ").map(one);
+    let first = kinds.next().unwrap_or(Check::Instruction);
+    if kinds.all(|k| k == first) { first } else { Check::Multiple }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Change {
     pub severity: Severity,
@@ -35,6 +134,11 @@ pub struct Change {
     /// Where to point a reviewer: the slot in the head version.
     pub file: String,
     pub line: usize,
+    pub check: Check,
+    /// A `Regression` that keeps the old check as one side of a new `||`.
+    pub widened: bool,
+    /// Where the check was in the base version, when known.
+    pub before: Option<(String, usize)>,
 }
 
 pub fn diff(base: &SourceKinds, head: &SourceKinds) -> Vec<Change> {
@@ -111,7 +215,18 @@ pub fn diff(base: &SourceKinds, head: &SourceKinds) -> Vec<Change> {
         };
         let at = renamed.get(*old).and_then(|n| in_ix(n).first().map(|(_, s)| (s.file.clone(), s.line)));
         let (file, line) = at.unwrap_or_default();
-        out.push(Change { severity: Severity::Warning, ix: old.to_string(), path: String::new(), message, file, line });
+        let before = base.handler_at(old).map(|(f, l)| (f.to_string(), l));
+        out.push(Change {
+            severity: Severity::Warning,
+            ix: old.to_string(),
+            path: String::new(),
+            message,
+            file,
+            line,
+            check: Check::Instruction,
+            widened: false,
+            before,
+        });
     }
 
     for ((base_ix, path), b) in base.slots() {
@@ -133,20 +248,30 @@ pub fn diff(base: &SourceKinds, head: &SourceKinds) -> Vec<Change> {
                     ),
                     file: any.file.clone(),
                     line: any.line,
+                    check: Check::Slot,
+                    widened: false,
+                    before: Some((b.file.clone(), b.line)),
                 });
             }
             continue;
         };
         // This slot's changes start here; a placeholder's are merged below.
         let start = out.len();
-        let mut push = |severity: Severity, message: String| {
+        let mut push = |status: Status, check: Check, message: String| {
             out.push(Change {
-                severity,
+                severity: if status == Status::Warning { Severity::Warning } else { Severity::Regression },
                 ix: ix.clone(),
                 path: path.clone(),
                 message,
                 file: h.file.clone(),
                 line: h.line,
+                check,
+                widened: status == Status::Widened,
+                // A handler check is looked for from the handler on.
+                before: match check {
+                    Check::Handler => base.handler_at(base_ix).map(|(f, l)| (f.to_string(), l)),
+                    _ => Some((b.file.clone(), b.line)),
+                },
             })
         };
         let leaf = path.rsplit('.').next().unwrap_or(path);
@@ -170,7 +295,7 @@ pub fn diff(base: &SourceKinds, head: &SourceKinds) -> Vec<Change> {
         if b.kind == Some(SlotKind::Typed) && h.kind == Some(SlotKind::Unchecked) && b.ty != "Signer" {
             match handed(&|d| d.owner && d.discriminator && d.owner_on.as_ref().is_none_or(|v| v.contains(path))) {
                 Some(d) => push(
-                    Severity::Regression,
+                    Status::Removed, Check::Type,
                     format!(
                         "was {}, now {}: Anchor no longer checks its owner and type. The handler passes it \
                          to {}, which compares an owner and a discriminator: if they are this account's, \
@@ -179,7 +304,7 @@ pub fn diff(base: &SourceKinds, head: &SourceKinds) -> Vec<Change> {
                     ),
                 ),
                 None => push(
-                    Severity::Regression,
+                    Status::Removed, Check::Type,
                     format!("was {}, now {}: Anchor no longer checks its owner and type", b.ty, h.ty),
                 ),
             }
@@ -188,7 +313,7 @@ pub fn diff(base: &SourceKinds, head: &SourceKinds) -> Vec<Change> {
             && b.full_ty != h.full_ty
         {
             push(
-                Severity::Warning,
+                Status::Warning, Check::Type,
                 format!(
                     "type changed from {} to {}: confirm it still validates what the old one did",
                     b.full_ty, h.full_ty
@@ -196,11 +321,11 @@ pub fn diff(base: &SourceKinds, head: &SourceKinds) -> Vec<Change> {
             );
         }
         if !b.optional && h.optional {
-            push(Severity::Warning, "now optional: the instruction runs without it".into());
+            push(Status::Warning, Check::Optional, "now optional: the instruction runs without it".into());
         }
         if signs(b) && !signs(h) {
             push(
-                Severity::Regression,
+                Status::Removed, Check::Signer,
                 format!("was {}, now {}: no longer required to sign", label(b), label(h)),
             );
         }
@@ -215,12 +340,18 @@ pub fn diff(base: &SourceKinds, head: &SourceKinds) -> Vec<Change> {
                 return Some(None);
             }
             let renames = renamed_slots(base, head, base_ix, ix);
-            let used: Vec<String> = renames
+            // Fields first: their keys are base slot paths.
+            let fields = renamed_fields(base, head, base_ix);
+            let used: Vec<String> = fields
                 .iter()
+                .chain(&renames)
                 .filter(|&(o, n)| rename_eqs(&eqs, &BTreeMap::from([(o.clone(), n.clone())])) != eqs)
                 .map(|(o, n)| format!("`{o}` → `{n}`"))
                 .collect();
-            rename_eqs(&eqs, &renames).iter().all(|e| held.contains(e)).then(|| Some(used.join(", ")))
+            rename_eqs(&rename_eqs(&eqs, &fields), &renames)
+                .iter()
+                .all(|e| held.contains(e))
+                .then(|| Some(used.join(", ")))
         };
         // `seeds` and `address` each fix the account, when built from other
         // accounts or constants rather than an instruction argument: one
@@ -235,23 +366,23 @@ pub fn diff(base: &SourceKinds, head: &SourceKinds) -> Vec<Change> {
             && (ha.seed_names.iter().all(|n| n == "::") || slot_or_const(&ha.seed_names));
         if ba.seeds && !ha.seeds {
             match fixed_address {
-                true => push(Severity::Warning, "`seeds` replaced by `address`: confirm it names the same account".into()),
-                false => push(Severity::Regression, "`seeds` constraint removed: any address is accepted".into()),
+                true => push(Status::Warning, Check::Seeds, "`seeds` replaced by `address`: confirm it names the same account".into()),
+                false => push(Status::Removed, Check::Seeds, "`seeds` constraint removed: any address is accepted".into()),
             }
         }
         if ba.address && !ha.address {
             match fixed_seeds {
-                true => push(Severity::Warning, "`address` replaced by `seeds`: confirm it names the same account".into()),
+                true => push(Status::Warning, Check::Address, "`address` replaced by `seeds`: confirm it names the same account".into()),
                 false => match ba.address_expr.as_ref().and_then(|e| restated(vec![key_eq(base, base_ix, path, &format!("{leaf}.key()"), e)])) {
                     Some(None) => {}
-                    Some(Some(r)) => push(Severity::Warning, format!("`address` is still declared in other words once {r} is read as a rename: confirm it is the same account")),
-                    None => push(Severity::Regression, "`address` constraint removed".into()),
+                    Some(Some(r)) => push(Status::Warning, Check::Address, format!("`address` is still declared in other words once {r} is read as a rename: confirm it is the same account")),
+                    None => push(Status::Removed, Check::Address, "`address` constraint removed".into()),
                 },
             }
         }
         if let (Some(x), Some(y)) = (&ba.address_expr, &ha.address_expr) {
             if x != y && restated(vec![key_eq(base, base_ix, path, &format!("{leaf}.key()"), x)]).is_none() {
-                push(Severity::Warning, format!("`address` changed from `{x}` to `{y}`: confirm it names the account it should"));
+                push(Status::Warning, Check::Address, format!("`address` changed from `{x}` to `{y}`: confirm it names the account it should"));
             }
         }
         // `token::mint` / `token::authority`: which mint, which owner.
@@ -265,42 +396,42 @@ pub fn diff(base: &SourceKinds, head: &SourceKinds) -> Vec<Change> {
             }
             match (now, restated(vec![key_eq(base, base_ix, path, &format!("{leaf}.{field}"), &token_value(x))])) {
                 (_, Some(None)) => {}
-                (_, Some(Some(r))) => push(Severity::Warning, format!("`{key} = {x}` is still declared in other words once {r} is read as a rename: confirm it is the same account")),
-                (Some(y), None) => push(Severity::Warning, format!("`{key}` changed from `{x}` to `{y}`: confirm it names the account it should")),
-                (None, None) => push(Severity::Regression, format!("`{key} = {x}` removed: any {field} is accepted")),
+                (_, Some(Some(r))) => push(Status::Warning, Check::Token, format!("`{key} = {x}` is still declared in other words once {r} is read as a rename: confirm it is the same account")),
+                (Some(y), None) => push(Status::Warning, Check::Token, format!("`{key}` changed from `{x}` to `{y}`: confirm it names the account it should")),
+                (None, None) => push(Status::Removed, Check::Token, format!("`{key} = {x}` removed: any {field} is accepted")),
             }
         }
         if ba.owner && !ha.owner {
             match fixed_address {
                 true => push(
-                    Severity::Warning,
+                    Status::Warning, Check::Owner,
                     "`owner` constraint replaced by a fixed address: confirm that account has the owner expected".into(),
                 ),
-                false => push(Severity::Regression, "`owner` constraint removed".into()),
+                false => push(Status::Removed, Check::Owner, "`owner` constraint removed".into()),
             }
         }
         for target in ba.has_one.iter().filter(|t| !ha.has_one.contains(t)) {
             match siblings.iter().find(|(_, s)| s.attrs.has_one.contains(target)) {
                 Some((other, _)) => push(
-                    Severity::Warning,
+                    Status::Warning, Check::HasOne,
                     format!("`has_one = {target}` moved to `{other}`: confirm it checks the same account"),
                 ),
                 None => match restated(vec![key_eq(base, base_ix, path, &format!("{leaf}.{target}"), &format!("{target}.key()"))]) {
                     Some(None) => {}
                     Some(Some(r)) => push(
-                        Severity::Warning,
+                        Status::Warning, Check::HasOne,
                         format!("`has_one = {target}` is still declared in other words once {r} is read as a rename: confirm it is the same account"),
                     ),
                     None => match (widened_has_one(head, ix, path, target, &ba.constraints, &ha.constraints), handed(&|d| keys(d, &sibling(path, target)))) {
                         (Some((e, added)), _) => push(
-                            Severity::Regression,
+                            Status::Widened, Check::HasOne,
                             format!(
                                 "`has_one = {target}` widened into `constraint = {e}`: it still has to match \
                                  `{target}`, unless `{added}` — confirm who can take that way"
                             ),
                         ),
                         (None, Some(d)) => push(
-                            Severity::Regression,
+                            Status::Removed, Check::HasOne,
                             format!(
                                 "`has_one = {target}` removed: it no longer has to match `{target}`. The handler \
                                  passes it and `{target}` to {}, which compares `{target}`'s key: if with this \
@@ -309,7 +440,7 @@ pub fn diff(base: &SourceKinds, head: &SourceKinds) -> Vec<Change> {
                             ),
                         ),
                         (None, None) => push(
-                            Severity::Regression,
+                            Status::Removed, Check::HasOne,
                             format!("`has_one = {target}` removed: it no longer has to match `{target}`"),
                         ),
                     },
@@ -320,13 +451,13 @@ pub fn diff(base: &SourceKinds, head: &SourceKinds) -> Vec<Change> {
         for expr in ba.constraints.iter().filter(|e| !ha.constraints.contains(e)) {
             match siblings.iter().find(|(_, s)| s.attrs.constraints.contains(expr)) {
                 Some((other, _)) => push(
-                    Severity::Warning,
+                    Status::Warning, Check::Constraint,
                     format!("`constraint = {expr}` moved to `{other}`"),
                 ),
                 None => match constraint_eqs(base, base_ix, path, expr).and_then(&restated) {
                     Some(None) => {}
                     Some(Some(r)) => push(
-                        Severity::Warning,
+                        Status::Warning, Check::Constraint,
                         format!("`constraint = {expr}` is still declared in other words once {r} is read as a rename: confirm it is the same account"),
                     ),
                     // A gate on this account's own state swapped for another
@@ -338,7 +469,7 @@ pub fn diff(base: &SourceKinds, head: &SourceKinds) -> Vec<Change> {
                     // The old check kept as one side of a new `||` (#22): still a
                     // loosening, said as what now gets past it.
                     None if let Some(added) = ha.constraints.iter().filter(|e| !ba.constraints.contains(e)).find_map(|e| widened(expr, e)) => push(
-                        Severity::Regression,
+                        Status::Widened, Check::Constraint,
                         format!("`constraint = {expr}` widened: still checked, unless `{added}` — confirm who can take that way"),
                     ),
                     // The same call with other arguments (#20).
@@ -350,7 +481,7 @@ pub fn diff(base: &SourceKinds, head: &SourceKinds) -> Vec<Change> {
                             && !(yes_no(e) && !negated(expr, e) && gate_on(head, ix, path, e) && gate_on(base, base_ix, path, expr))
                     }) => {
                         used_gates.insert(e.clone());
-                        push(Severity::Regression, args_message(&format!("constraint = {expr}"), &format!("constraint = {e}")))
+                        push(Status::Removed, Check::Constraint, args_message(&format!("constraint = {expr}"), &format!("constraint = {e}")))
                     }
                     None => match ha.constraints.iter().find(|e| {
                         !ba.constraints.contains(e)
@@ -364,7 +495,7 @@ pub fn diff(base: &SourceKinds, head: &SourceKinds) -> Vec<Change> {
                             // One new gate stands in for one removed.
                             used_gates.insert(e.clone());
                             push(
-                                Severity::Warning,
+                                Status::Warning, Check::Constraint,
                                 format!("`constraint = {expr}` replaced by `constraint = {e}` on the same account: confirm the new gate is as strict"),
                             )
                         }
@@ -373,16 +504,16 @@ pub fn diff(base: &SourceKinds, head: &SourceKinds) -> Vec<Change> {
                         None => match (expr.contains(".key"), others_named(base, base_ix, path, expr)) {
                             (true, others) if !others.is_empty() => match handed(&|d| others.iter().all(|o| keys(d, o))) {
                                 Some(d) => push(
-                                    Severity::Regression,
+                                    Status::Removed, Check::Constraint,
                                     format!(
                                         "`constraint = {expr}` removed. The handler passes the accounts it names to {}, \
                                          which compares their keys: if with this account's, the check moved there",
                                         handed_at(d)
                                     ),
                                 ),
-                                None => push(Severity::Regression, format!("`constraint = {expr}` removed")),
+                                None => push(Status::Removed, Check::Constraint, format!("`constraint = {expr}` removed")),
                             },
-                            _ => push(Severity::Regression, format!("`constraint = {expr}` removed")),
+                            _ => push(Status::Removed, Check::Constraint, format!("`constraint = {expr}` removed")),
                         },
                     },
                 },
@@ -390,14 +521,14 @@ pub fn diff(base: &SourceKinds, head: &SourceKinds) -> Vec<Change> {
         }
         match (&ba.close, &ha.close) {
             (Some(t), None) => push(
-                Severity::Regression,
+                Status::Removed, Check::Close,
                 format!(
                     "`close = {t}` removed: the account is no longer emptied and handed back \
                      to the system program when the instruction ends"
                 ),
             ),
             (Some(t), Some(u)) if t != u => push(
-                Severity::Warning,
+                Status::Warning, Check::Close,
                 format!("`close` target changed from `{t}` to `{u}`: that is where its lamports go"),
             ),
             _ => {}
@@ -416,21 +547,21 @@ pub fn diff(base: &SourceKinds, head: &SourceKinds) -> Vec<Change> {
             }
             let rewritten = ha.body.iter().find(|e| !ba.body.contains(e) && !used_body.contains(e) && args_changed(check, e, &is_slot));
             match (declared_instead(base, head, base_ix, ix, check, Some(path)), rewritten) {
-                (Some(slot), _) => push(Severity::Warning, moved_message(check, &slot)),
+                (Some(slot), _) => push(Status::Warning, Check::Handler, moved_message(check, &slot)),
                 (None, Some(e)) => {
                     used_body.insert(e);
-                    push(Severity::Regression, args_message(check, e))
+                    push(Status::Removed, Check::Handler, args_message(check, e))
                 }
-                (None, None) => push(Severity::Regression, format!("`{check}` removed from the handler")),
+                (None, None) => push(Status::Removed, Check::Handler, format!("`{check}` removed from the handler")),
             }
         }
         for check in ba.validate.iter().filter(|e| !ha.validate.contains(e)) {
             match siblings.iter().find(|(_, s)| s.attrs.validate.contains(check)) {
                 Some((other, _)) => push(
-                    Severity::Warning,
+                    Status::Warning, Check::Validate,
                     format!("`{check}` in validate() moved to `{other}`"),
                 ),
-                None => push(Severity::Regression, format!("`{check}` removed from validate()")),
+                None => push(Status::Removed, Check::Validate, format!("`{check}` removed from validate()")),
             }
         }
         // Made a placeholder (`/// CHECK: Deprecated …`): its removals are
@@ -458,6 +589,9 @@ pub fn diff(base: &SourceKinds, head: &SourceKinds) -> Vec<Change> {
                     ),
                     file: h.file.clone(),
                     line: h.line,
+                    check: Check::Type,
+                    widened: false,
+                    before: Some((b.file.clone(), b.line)),
                 });
             }
         } else if b.kind == Some(SlotKind::Typed) && h.kind == Some(SlotKind::Unchecked) && b.ty != "Signer" {
@@ -482,7 +616,7 @@ pub fn diff(base: &SourceKinds, head: &SourceKinds) -> Vec<Change> {
                         lost.iter().map(|c| c.message.as_str()).collect::<Vec<_>>().join("; ")
                     ),
                 };
-                out.push(Change { message, ..typed });
+                out.push(Change { message, widened: false, ..typed });
             }
         }
     }
@@ -492,6 +626,7 @@ pub fn diff(base: &SourceKinds, head: &SourceKinds) -> Vec<Change> {
     for base_ix in &base_ixs {
         let Some(ix) = renamed.get(base_ix).or(head_ixs.get(base_ix)) else { continue };
         let (file, line) = head.handler_at(ix).map_or((String::new(), 0), |(f, l)| (f.to_string(), l));
+        let before = base.handler_at(base_ix).map(|(f, l)| (f.to_string(), l));
         let mut seen = BTreeSet::new();
         let lost = |c: &String| {
             count(base.ix_checks(base_ix), c) > count(head.ix_checks(ix), c)
@@ -515,7 +650,17 @@ pub fn diff(base: &SourceKinds, head: &SourceKinds) -> Vec<Change> {
                 }
                 (None, None) => (Severity::Regression, format!("`{check}` removed from the handler")),
             };
-            out.push(Change { severity, ix: ix.clone(), path: String::new(), message, file: file.clone(), line });
+            out.push(Change {
+                severity,
+                ix: ix.clone(),
+                path: String::new(),
+                message,
+                file: file.clone(),
+                line,
+                check: Check::Handler,
+                widened: false,
+                before: before.clone(),
+            });
         }
     }
 
@@ -534,6 +679,9 @@ pub fn diff(base: &SourceKinds, head: &SourceKinds) -> Vec<Change> {
                     .into(),
                 file: s.file.clone(),
                 line: s.line,
+                check: Check::Signer,
+                widened: false,
+                before: None,
             });
         }
     }
@@ -562,6 +710,9 @@ pub fn diff(base: &SourceKinds, head: &SourceKinds) -> Vec<Change> {
             ),
             file,
             line,
+            check: Check::Instruction,
+            widened: false,
+            before: base.handler_at(base_ix).map(|(f, l)| (f.to_string(), l)),
         });
     }
     out.sort_by(|a, b| (a.severity, &a.ix, &a.path).cmp(&(b.severity, &b.ix, &b.path)));
@@ -1123,6 +1274,33 @@ fn renamed_slots(base: &SourceKinds, head: &SourceKinds, base_ix: &str, ix: &str
     out
 }
 
+/// Data fields renamed on the typed slots of `base_ix`: `profile.authority`
+/// → `profile.learner` when `#[account] struct LearnerProfile`'s field at
+/// that place, of that type, now has the new name and neither name is
+/// in the other version. Full paths of the base version.
+fn renamed_fields(base: &SourceKinds, head: &SourceKinds, base_ix: &str) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    for ((i, path), s) in base.slots() {
+        if i != base_ix || s.kind != Some(SlotKind::Typed) {
+            continue;
+        }
+        // `Account<'info,a::Vault>` → `Vault`.
+        let inner = s.full_ty.trim_end_matches('>').rsplit([',', '<']).next().unwrap_or_default();
+        let name = inner.rsplit("::").next().unwrap_or(inner);
+        let (Some(b), Some(h)) = (base.data_fields(name), head.data_fields(name)) else { continue };
+        if b.len() != h.len() {
+            continue;
+        }
+        let named = |v: &[(String, String)], n: &str| v.iter().any(|(f, _)| f == n);
+        for ((bn, bt), (hn, ht)) in b.iter().zip(h) {
+            if bn != hn && bt == ht && !named(h, bn) && !named(b, hn) {
+                out.insert(format!("{path}.{bn}"), format!("{path}.{hn}"));
+            }
+        }
+    }
+    out
+}
+
 /// `eqs` with each renamed slot read as its new path.
 fn rename_eqs(eqs: &[KeyEq], renames: &BTreeMap<String, String>) -> Vec<KeyEq> {
     let swap = |e: &str| {
@@ -1412,6 +1590,9 @@ pub struct Sweep<'info> {
             message: "m".into(),
             file: "dir,x/f%:.rs".into(),
             line: 1,
+            check: Check::Type,
+            widened: false,
+            before: None,
         };
         assert_eq!(render_github(&[c]), "::error file=dir%2Cx/f%25%3A.rs,line=1,title=solinv%3A a.b::m\n");
     }
@@ -2357,6 +2538,42 @@ pub struct CreateBadge<'info> {{
     }
 
     /// #22: openbook-v2#296 kept each owner check and added `|| janitor`.
+    #[test]
+    fn a_has_one_restated_through_a_renamed_data_field_is_a_warning() {
+        // soldojo: `authority` renamed `learner` in the profile, the
+        // `has_one` rewritten as the `constraint` it stands for.
+        let base = r#"
+pub fn record(ctx: Context<Record>) -> Result<()> { Ok(()) }
+#[derive(Accounts)]
+pub struct Record<'info> {
+    #[account(mut, seeds = [b"p", authority.key().as_ref()], bump, has_one = authority)]
+    pub profile: Account<'info, Profile>,
+    pub authority: Signer<'info>,
+}
+#[account]
+pub struct Profile {
+    pub authority: Pubkey,
+    /// xp
+    pub total_xp: u64,
+}
+"#;
+        let head = base
+            .replace("has_one = authority", "constraint = profile.learner == authority.key()")
+            .replace("pub authority: Pubkey", "pub learner: Pubkey");
+        let r = report(base, &head);
+        assert_eq!(r.len(), 1, "{r:?}");
+        assert_eq!(r[0].0, Severity::Warning);
+        assert!(r[0].1.contains("`profile.authority` → `profile.learner`"), "{r:?}");
+        // The field dropped from the constraint, or renamed with another
+        // type, or compared with another field: still removed.
+        let dropped = base.replace(", has_one = authority", "").replace("pub authority: Pubkey", "pub learner: Pubkey");
+        assert_eq!(report(base, &dropped)[0].0, Severity::Regression);
+        let retyped = head.replace("pub learner: Pubkey", "pub learner: [u8; 32]");
+        assert_eq!(report(base, &retyped)[0].0, Severity::Regression);
+        let other = head.replace("profile.learner ==", "profile.total_xp ==");
+        assert_eq!(report(base, &other)[0].0, Severity::Regression);
+    }
+
     #[test]
     fn a_check_kept_as_one_side_of_a_new_or_is_widened() {
         let src = |c: &str, h: &str| {

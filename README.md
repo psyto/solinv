@@ -33,6 +33,8 @@ upgrade in its history. To fail every pull request in CI, or to fuzz the checks,
 |---|---|
 | fail a pull request that removes an account check, with a note on the line | the `psyto/solinv` GitHub Action, or `solinv diff --base-src <before> --head-src <after>` |
 | …in a native or Pinocchio program (a warning: what its code no longer checks) | the same; [what it reads](docs/native-diff.md) |
+| have Claude Code or Codex catch a check it just dropped, and put it back before it says it is done | `solinv mcp` and the skill: [solinv for AI agents](docs/ai-agents.md) |
+| read the result from a script | `--format json` on `solinv diff` / `solinv check` ([shape and exit codes](docs/json.md)) |
 | see which account checks a deployed program's upgrade dropped, without its source | `solinv diff --base-idl <audited.json> --head-idl <onchain.json>` (`anchor idl fetch`), or every upgrade at once in [solinv check](https://solinv-check.meowna-server.workers.dev); [how it decides](docs/idl-diff.md) |
 | see which instructions need a hand-checked account, before writing any harness | `solinv idl target/idl/<program>.json --src programs/<program>/src` |
 | catch a PDA signature whose seeds have no bump, a transfer hook `execute` Token-2022 can never reach, or a whitelist-style entry whose seeds leave out the registry that gates it | the same two commands: `solinv idl --src` lists them under "program-wide findings", and `solinv diff` reports one a change adds |
@@ -198,6 +200,17 @@ if grep '^\[FUZZ_FINDING\] \[' fuzz.log; then exit 1; fi   # solinv's findings s
 [princeps-solana's workflow](https://github.com/psyto/princeps-solana/blob/main/.github/workflows/fuzz-vault.yml)
 is a complete example, separating a crash of `crucible` itself from the timeout.
 Both install lines above were checked from GitHub at that rev, not from a local clone.
+
+With an AI agent writing the code, give it the MCP server so it checks its own edit (0.1.10 and later):
+
+```bash
+claude mcp add solinv -- solinv mcp     # or: codex mcp add solinv -- solinv mcp
+```
+
+and the [skill or the AGENTS.md lines](docs/ai-agents.md#set-up) that say when to call it.
+
+Exit codes, in every `--format`: 0 nothing removed (warnings alone are 0), 1 a check removed or
+widened, 2 nothing could be compared (before 0.1.10, also 1).
 
 Trying it on a program of your own for the first time? [`docs/try-solinv.md`](docs/try-solinv.md) is a
 one-page walk-through, with what to time and what to send back.

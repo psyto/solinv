@@ -18,7 +18,7 @@
 //! still makes on the same account is not seen. Every finding is a warning:
 //! a reviewer looks, CI does not fail on it.
 
-use crate::diff::{Change, Severity};
+use crate::diff::{Change, Check, Severity};
 use crate::source::{
     braced, calls_in, closing_paren, collect, failing_conditions_at, past_logs, FAILS_RE, IF_RE, split_at_top, strip_comments, strip_comments_and_strings,
     file_mods, top_level, unparen, Callee, Demand, FnIndex,
@@ -780,6 +780,15 @@ pub fn diff(base: &NativeChecks, head: &NativeChecks) -> Vec<Change> {
                     message,
                     file: hf.file.clone(),
                     line: hf.line,
+                    check: match a.kind {
+                        Kind::Signer => Check::NativeSigner,
+                        Kind::Writable => Check::NativeWritable,
+                        Kind::Executable => Check::NativeExecutable,
+                        Kind::Owner => Check::NativeOwner,
+                        Kind::Key => Check::NativeKey,
+                    },
+                    widened: false,
+                    before: Some((bf.file.clone(), bf.line)),
                 });
             }
         }

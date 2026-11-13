@@ -7,6 +7,7 @@
 pub mod diff;
 pub mod idl;
 pub mod idl_diff;
+pub mod json;
 pub mod legacy;
 pub mod lint;
 pub mod native;

@@ -2,7 +2,9 @@
 //!
 //! Sub-commands:
 //! - `solinv init`              scaffold a solinv project
-//! - `solinv check <target>`    run invariant checks
+//! - `solinv check <src>`       one version's program-wide findings
+//! - `solinv diff ...`          the account checks a change removes
+//! - `solinv mcp`               both, as an MCP server on stdio
 //! - `solinv fuzz <target>`     run coverage-guided fuzzer
 //! - `solinv corpus fetch ...`  ingest mainnet corpus
 //! - `solinv disclose <id>`     generate bug bounty disclosure
@@ -12,7 +14,10 @@ use clap::{Parser, Subcommand};
 use serde::Deserialize;
 use std::{fs, path::PathBuf};
 
-use solinv_static::{diff, lint, source};
+use solinv_static::{diff, json, lint, source};
+
+mod compare;
+mod mcp;
 
 #[derive(Parser)]
 #[command(
@@ -29,10 +34,15 @@ struct Cli {
 enum Commands {
     /// Initialize a solinv project in the current directory
     Init,
-    /// Run invariant checks against a target program
+    /// One version's program-wide findings: signer seeds without a bump,
+    /// a transfer hook Token-2022 cannot reach, an entry PDA not scoped to
+    /// its gate
     Check {
-        /// Target program path
-        target: String,
+        /// The program source (file or directory)
+        src: PathBuf,
+        /// `text`, `github` for Actions annotations, or `json`
+        #[arg(long, default_value = "text")]
+        format: String,
     },
     /// Run coverage-guided fuzzer against a target program
     Fuzz {
@@ -86,13 +96,17 @@ enum Commands {
         /// The Anchor IDL after the change (e.g. `anchor idl fetch <program>`)
         #[arg(long, requires = "base_idl")]
         head_idl: Option<PathBuf>,
-        /// `text`, or `github` for Actions annotations on the changed lines
+        /// `text`, `github` for Actions annotations on the changed lines,
+        /// or `json` (schema in docs/json.md)
         #[arg(long, default_value = "text")]
         format: String,
         /// Exit 0 even when checks were removed
         #[arg(long)]
         no_fail: bool,
     },
+    /// Serve `diff` and `check` to an AI agent: an MCP server on stdio,
+    /// read-only, in the git repository it starts in
+    Mcp,
     /// Score and rank bug bounty targets
     Score {
         /// Path to target scoring config (.json or .toml)
@@ -508,15 +522,52 @@ const NOT_ANCHOR: &str = "solinv reads Anchor programs: `#[derive(Accounts)]` st
                           `Context<..>`. A native or Pinocchio program has none; test its account checks with \
                           the fuzz detectors (solinv-fuzz) instead";
 
-fn main() -> Result<()> {
+/// Exit 2: nothing could be compared. 1 is kept for a removed check.
+fn main() {
+    if let Err(e) = run() {
+        eprintln!("Error: {e:?}");
+        std::process::exit(2);
+    }
+}
+
+/// `--format json`: an error is a JSON object on stdout, still exit 2.
+fn json_or<T>(format: &str, command: &str, r: Result<T>) -> Result<T> {
+    match r {
+        Err(e) if format == "json" => {
+            println!("{}", json::error(command, &format!("{e:#}")));
+            std::process::exit(2);
+        }
+        r => r,
+    }
+}
+
+fn run() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Commands::Init => {
             println!("solinv init: not yet implemented");
         }
-        Commands::Check { target } => {
-            println!("solinv check {target}: not yet implemented");
+        Commands::Check { src, format } => {
+            if !matches!(format.as_str(), "text" | "github" | "json") {
+                anyhow::bail!("unknown --format {format} (text, github or json)");
+            }
+            let (changes, mode) = json_or(&format, "check", compare::check_src(&src))?;
+            match format.as_str() {
+                "json" => {
+                    let compared = [json::Compared { base: None, head: src.display().to_string(), mode, note: None }];
+                    println!("{:#}", json::report("check", &compared, &changes, &|f| f.to_string()));
+                }
+                "github" => {
+                    print!("{}", diff::render_github(&changes));
+                    eprint!("{}", compare::render_check_text(&changes));
+                }
+                _ => print!("{}", compare::render_check_text(&changes)),
+            }
+            if changes.iter().any(|c| c.severity == diff::Severity::Regression) {
+                std::process::exit(1);
+            }
         }
+        Commands::Mcp => mcp::serve()?,
         Commands::Fuzz { target } => {
             println!("solinv fuzz {target}: not yet implemented");
         }
@@ -537,47 +588,31 @@ fn main() -> Result<()> {
         }
         Commands::Mutate { action } => run_mutate(action)?,
         Commands::Diff { base_src, head_src, base_idl, head_idl, format, no_fail } => {
-            // Program-wide findings the head adds (a hook `execute` that
-            // stops being reachable, a signature without a bump).
-            let lint_changes = match (&base_src, &head_src) {
-                (Some(b), Some(h)) => lint::diff(&lint::read(b)?, &lint::read(h)?),
-                _ => Vec::new(),
+            if !matches!(format.as_str(), "text" | "github" | "json") {
+                anyhow::bail!("unknown --format {format} (text, github or json)");
+            }
+            let compared = |base: &PathBuf, head: &PathBuf, mode| json::Compared {
+                base: Some(base.display().to_string()),
+                head: head.display().to_string(),
+                mode,
+                note: None,
             };
-            let mut changes = match (base_src, head_src, base_idl, head_idl) {
+            let (changes, compared) = match (base_src, head_src, base_idl, head_idl) {
                 (Some(base_src), Some(head_src), None, None) => {
-                    let base = source::SourceKinds::read(&base_src)?;
-                    let head = source::SourceKinds::read(&head_src)?;
-                    if base.is_empty() {
-                        // A native or Pinocchio program: the checks in its code.
-                        let nb = solinv_static::native::NativeChecks::read(&base_src)?;
-                        // A program with an entrypoint whose checks are not
-                        // read here (in another crate, say) compares as empty.
-                        if nb.is_empty() && !nb.has_entrypoint() {
-                            anyhow::bail!(
-                                "no #[derive(Accounts)] field under {} could be matched to an instruction, and no \
-                                 account check (`if !a.is_signer()`, `if a.owner() != ..`, `if a.key() != ..` \
-                                 returning Err) was found in its code",
-                                base_src.display()
-                            );
-                        }
-                        let nh = solinv_static::native::NativeChecks::read(&head_src)?;
-                        solinv_static::native::diff(&nb, &nh)
-                    } else {
-                        // Every account struct gone: every check with it, which the
-                        // per-instruction comparison would only warn about.
-                        if head.is_empty() {
-                            let msg = format!(
-                                "{} has account structs, {} has none: every account check is gone",
-                                base_src.display(),
-                                head_src.display()
-                            );
-                            if !no_fail {
-                                anyhow::bail!(msg);
-                            }
+                    let d = json_or(&format, "diff", compare::diff_src(&base_src, &head_src))?;
+                    let mut changes = d.changes;
+                    if let Some(msg) = d.all_gone {
+                        // Said as an error, as before, unless the report is JSON.
+                        if format == "json" {
+                            changes.insert(0, compare::program_gone(msg, String::new()));
+                        } else if !no_fail {
+                            eprintln!("Error: {msg}");
+                            std::process::exit(1);
+                        } else {
                             eprintln!("warning: {msg}");
                         }
-                        diff::diff(&base, &head)
                     }
+                    (changes, compared(&base_src, &head_src, d.mode))
                 }
                 (None, None, Some(base_idl), Some(head_idl)) => {
                     let read = |p: &PathBuf| -> Result<solinv_static::idl::Idl> {
@@ -585,18 +620,21 @@ fn main() -> Result<()> {
                             .with_context(|| format!("failed to read IDL: {}", p.display()))?;
                         Ok(solinv_static::idl::Idl::from_json_any(&raw)?.0)
                     };
-                    solinv_static::idl_diff::diff_idl(&read(&base_idl)?, &read(&head_idl)?)
+                    let idls = json_or(&format, "diff", read(&base_idl).and_then(|b| Ok((b, read(&head_idl)?))))?;
+                    (
+                        solinv_static::idl_diff::diff_idl(&idls.0, &idls.1),
+                        compared(&base_idl, &head_idl, "idl"),
+                    )
                 }
-                _ => anyhow::bail!("pass --base-src and --head-src, or --base-idl and --head-idl"),
+                _ => json_or(&format, "diff", Err(anyhow::anyhow!("pass --base-src and --head-src, or --base-idl and --head-idl")))?,
             };
-            changes.extend(lint_changes);
             match format.as_str() {
                 "github" => {
                     print!("{}", diff::render_github(&changes));
                     eprint!("{}", diff::render_text(&changes));
                 }
-                "text" => print!("{}", diff::render_text(&changes)),
-                other => anyhow::bail!("unknown --format {other} (text or github)"),
+                "json" => println!("{:#}", json::report("diff", &[compared], &changes, &|f| f.to_string())),
+                _ => print!("{}", diff::render_text(&changes)),
             }
             let removed = changes.iter().any(|c| c.severity == diff::Severity::Regression);
             if removed && !no_fail {

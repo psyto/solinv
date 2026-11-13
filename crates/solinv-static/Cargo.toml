@@ -14,6 +14,6 @@ anyhow.workspace = true
 heck = "0.5"
 regex = "1"
 serde.workspace = true
-serde_json.workspace = true
+serde_json = { workspace = true, features = ["preserve_order"] }
 # Legacy IDL discriminators: sha256("global:<ix>")[..8].
 sha2 = "0.10"

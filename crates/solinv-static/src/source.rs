@@ -156,6 +156,8 @@ pub struct SourceKinds {
     /// Instructions a fn of which does nothing but fail (`err!(..)`), or
     /// hands off to one that does: retired, nothing they guarded runs.
     disabled: HashSet<String>,
+    /// `#[account]` data structs: their fields, `(name, type)` in order.
+    data: HashMap<String, Vec<(String, String)>>,
 }
 
 /// One check read from a handler body, before it is attached.
@@ -770,8 +772,88 @@ impl SourceKinds {
             }
         }
         let disabled = failing.difference(&running).cloned().collect();
-        SourceKinds { map, ix_checks, handlers, disabled }
+        let data = data_structs(files);
+        SourceKinds { map, ix_checks, handlers, disabled, data }
     }
+
+    /// The fields of `#[account]` struct `name`, in order.
+    pub fn data_fields(&self, name: &str) -> Option<&[(String, String)]> {
+        self.data.get(name).map(Vec::as_slice)
+    }
+}
+
+/// `#[account]` / `#[account(zero_copy)]` structs, by name: each field's
+/// name and type (spaces removed), in order. A name two files define
+/// differently is left out.
+fn data_structs(files: &[(String, String)]) -> HashMap<String, Vec<(String, String)>> {
+    static HEAD: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"#\[account(?:\([^)]*\))?\]\s*(?:#\[[^\]]*\]\s*)*pub\s+struct\s+([A-Za-z_]\w*)\s*\{").unwrap()
+    });
+    static FIELD: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"^(?:pub(?:\([^)]*\))?\s+)?([a-z_]\w*)\s*:\s*(.+)$").unwrap());
+    let mut out: HashMap<String, Vec<(String, String)>> = HashMap::new();
+    let mut clash = HashSet::new();
+    for (_, src) in files {
+        let text = strip_comments(src);
+        for c in HEAD.captures_iter(&text) {
+            let body_start = c.get(0).unwrap().end();
+            let (mut depth, mut end) = (1usize, None);
+            for (i, ch) in text[body_start..].char_indices() {
+                match ch {
+                    '{' => depth += 1,
+                    '}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = Some(body_start + i);
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let Some(end) = end else { continue };
+            // Fields split at top-level commas; attributes on a field dropped.
+            let (mut fields, mut cur, mut nest) = (Vec::new(), String::new(), 0i32);
+            for ch in text[body_start..end].chars() {
+                match ch {
+                    '<' | '(' | '[' => nest += 1,
+                    '>' | ')' | ']' => nest -= 1,
+                    _ => {}
+                }
+                if ch == ',' && nest == 0 {
+                    fields.push(std::mem::take(&mut cur));
+                } else {
+                    cur.push(ch);
+                }
+            }
+            fields.push(cur);
+            let fields: Vec<(String, String)> = fields
+                .iter()
+                .map(|f| {
+                    let f = f.trim();
+                    let f = match f.rfind(']') {
+                        Some(i) if f.starts_with("#[") => f[i + 1..].trim(),
+                        _ => f,
+                    };
+                    f.to_string()
+                })
+                .filter_map(|f| {
+                    FIELD.captures(&f).map(|m| (m[1].to_string(), m[2].chars().filter(|c| !c.is_whitespace()).collect()))
+                })
+                .collect();
+            let name = c[1].to_string();
+            match out.get(&name) {
+                Some(prev) if *prev != fields => {
+                    clash.insert(name);
+                }
+                _ => {
+                    out.insert(name, fields);
+                }
+            }
+        }
+    }
+    out.retain(|n, _| !clash.contains(n));
+    out
 }
 
 /// Every fn of the source, by name and the type of the `impl` it is in,

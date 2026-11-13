@@ -40,6 +40,18 @@ pub struct Finding {
     pub line: usize,
 }
 
+impl Kind {
+    pub fn check(self) -> crate::diff::Check {
+        use crate::diff::Check;
+        match self {
+            Kind::SignerSeedsWithoutBump => Check::SignerSeedsWithoutBump,
+            Kind::HookExecuteUnreachable => Check::HookUnreachable,
+            Kind::HookFallbackSkipsExecute => Check::HookFallbackSkipsExecute,
+            Kind::EntryNotScopedToGate => Check::EntryNotScopedToGate,
+        }
+    }
+}
+
 pub fn read(dir: &Path) -> Result<Vec<Finding>> {
     let mut files = Vec::new();
     collect(dir, &mut files).with_context(|| format!("failed to read sources under {}", dir.display()))?;
@@ -99,6 +111,9 @@ pub fn diff(base: &[Finding], head: &[Finding]) -> Vec<crate::diff::Change> {
             message: f.message.clone(),
             file: f.file.clone(),
             line: f.line,
+            check: f.kind.check(),
+            widened: false,
+            before: None,
         })
         .collect()
 }

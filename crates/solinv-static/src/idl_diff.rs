@@ -31,7 +31,17 @@ use crate::idl::{Idl, IdlAccount, IdlInstruction, IdlPda, IdlSeed};
 use std::collections::{BTreeMap, BTreeSet};
 
 fn change(severity: Severity, ix: &str, path: &str, message: String) -> Change {
-    Change { severity, ix: ix.to_string(), path: path.to_string(), message, file: String::new(), line: 0 }
+    Change {
+        severity,
+        ix: ix.to_string(),
+        path: path.to_string(),
+        check: crate::diff::check_named(&message),
+        message,
+        file: String::new(),
+        line: 0,
+        widened: false,
+        before: None,
+    }
 }
 
 /// A slot's checks as labels, for "slot removed" messages.

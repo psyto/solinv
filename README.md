@@ -3,7 +3,7 @@
 Some of Solana's largest losses came down to one account nobody checked:
 [Wormhole](https://www.certik.com/blog/wormhole-bridge-exploit-incident-analysis) (Feb 2022,
 ~$320M) never verified that the instructions sysvar was the real one;
-[Cashio](https://halborn.com/explained-the-cashio-hack-march-2022/) (Mar 2022, ~$48M) never
+[Cashio](https://halborn.com/explained-the-cashio-hack-march-2022/) (Mar 2022, ~$48M–$52M by source) never
 validated a `mint` field, so a chain of fake accounts passed;
 [Crema](https://halborn.com/explained-the-crema-finance-hack-july-2022/) (Jul 2022, ~$8.8M) let a
 fake tick account past its owner check. Those checks were missing from the start, and spotting a

@@ -267,6 +267,15 @@ or read as a false REMOVED (fixed in ef3bb11). Upstream:
 crucible's `--timeout` overran by 18 minutes in CI ([crucible#25](https://github.com/asymmetric-research/crucible/issues/25)),
 and it exits 0 on findings, so CI has to look for `[FUZZ_FINDING]` itself ([crucible#26](https://github.com/asymmetric-research/crucible/issues/26)).
 
+One finding went further than a fix: a `Signer` that nothing tied to stored state, in one of our
+private Anchor programs, is now two Lean theorems on top of
+[Solanalib](https://github.com/solana-foundation/leanprover-solanalib). The first says any signer
+passed before the fix; the second says only the stored authority passes after it. Neither uses
+`sorry`. Solanalib does not model what `#[derive(Accounts)]` generates, so that part is written by
+hand; we asked upstream about it in
+[solana-foundation/leanprover-solanalib#13](https://github.com/solana-foundation/leanprover-solanalib/issues/13).
+How it was done: [docs/lean-proofs.md](docs/lean-proofs.md).
+
 ## How it compares
 
 - **Anchor's own checks** enforce what is declared. solinv watches the declarations: it notices
